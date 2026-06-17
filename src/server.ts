@@ -385,7 +385,7 @@ function getSharedWorkspaceManager(config: CodexProConfig): WorkspaceManager {
 export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = getSharedWorkspaceManager(config);
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.27.2" });
+  const server = new McpServer({ name: "CodexPro", version: "0.28.0" });
   registerToolCardResource(server);
 
   registerToolCompat(

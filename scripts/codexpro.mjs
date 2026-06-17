@@ -882,15 +882,17 @@ function splitCommandTemplate(input) {
   const tokens = [];
   let current = '';
   let quote = '';
-  let escaping = false;
-  for (const char of String(input)) {
-    if (escaping) {
-      current += char;
-      escaping = false;
-      continue;
-    }
+  const text = String(input);
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
     if (char === '\\') {
-      escaping = true;
+      const next = text[i + 1];
+      if (next && (next === quote || next === '\\' || (!quote && /\s|["']/.test(next)))) {
+        current += next;
+        i += 1;
+      } else {
+        current += char;
+      }
       continue;
     }
     if (quote) {
@@ -911,7 +913,6 @@ function splitCommandTemplate(input) {
     }
     current += char;
   }
-  if (escaping) current += '\\';
   if (quote) throw new Error('Custom command has an unterminated quote.');
   if (current) tokens.push(current);
   return tokens;

@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
@@ -160,6 +161,10 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   };
 }
 
+function bashExecutable(): string {
+  return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
+}
+
 function trimOutput(value: string, maxBytes: number): { value: string; truncated: boolean } {
   const buffer = Buffer.from(value, "utf8");
   if (buffer.byteLength <= maxBytes) return { value, truncated: false };
@@ -182,7 +187,7 @@ export async function runBash(
   const start = Date.now();
 
   return new Promise((resolve, reject) => {
-    const child = spawn("/bin/bash", ["-lc", command], {
+    const child = spawn(bashExecutable(), ["-lc", command], {
       cwd,
       env: makeEnv(config),
       stdio: ["ignore", "pipe", "pipe"]

@@ -19,6 +19,10 @@ function requireSuccess(result, label) {
   }
 }
 
+function quoteArg(value) {
+  return `"${String(value).replaceAll('"', '\\"')}"`;
+}
+
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-execute-handoff-'));
 await fs.mkdir(path.join(root, '.ai-bridge'), { recursive: true });
 await fs.writeFile(path.join(root, '.ai-bridge', 'current-plan.md'), '# Test plan\n\nAppend the implementation marker.\n', 'utf8');
@@ -60,7 +64,7 @@ const missingPlaceholder = run([
   '--agent',
   'custom',
   '--command',
-  `${process.execPath} fake-agent.mjs`,
+  `${quoteArg(process.execPath)} fake-agent.mjs`,
   '--yes'
 ]);
 if (missingPlaceholder.status === 0 || !missingPlaceholder.stderr.includes('must include {{plan_file}} or {{plan_text}}')) {
@@ -74,7 +78,7 @@ const executed = run([
   '--agent',
   'custom',
   '--command',
-  `${process.execPath} fake-agent.mjs --model {{model}} --task-file {{plan_file}}`,
+  `${quoteArg(process.execPath)} fake-agent.mjs --model {{model}} --task-file {{plan_file}}`,
   '--model',
   'local/test-model',
   '--yes'

@@ -65,7 +65,14 @@ await fs.writeFile(path.join(tmp, 'config.txt'), 'OPENAI_API_KEY=sk-realSecretVa
 await fs.writeFile(path.join(tmp, 'AGENTS.md'), '# Smoke Agents\n\n- Preserve demo.txt.\n', 'utf8');
 const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-outside-'));
 await fs.writeFile(path.join(outside, 'secret.txt'), 'do-not-read', 'utf8');
-await fs.symlink(path.join(outside, 'secret.txt'), path.join(tmp, 'secret-link.txt'));
+let symlinkEscapePath = 'secret-link.txt';
+try {
+  await fs.symlink(path.join(outside, 'secret.txt'), path.join(tmp, symlinkEscapePath));
+} catch (error) {
+  if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error;
+  symlinkEscapePath = 'secret-link-dir/secret.txt';
+  await fs.symlink(outside, path.join(tmp, 'secret-link-dir'), 'junction');
+}
 
 const client = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
   cwd: path.resolve('.'),
@@ -146,7 +153,7 @@ const envRefPayload = JSON.stringify(envRefRead);
 if (envRefPayload.includes('[REDACTED_SECRET]')) {
   throw new Error('env-var token references were incorrectly redacted as literal secrets');
 }
-const symlinkRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'secret-link.txt' } });
+const symlinkRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: symlinkEscapePath } });
 if (!symlinkRead.isError) throw new Error('symlink escape read was not blocked');
 await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'demo.txt', old_text: 'read\nread', new_text: 'read\nwrite' } });
 const codexContext = await client.request('tools/call', { name: 'codex_context', arguments: { workspace_id: ws, target_path: 'demo.txt' } });
