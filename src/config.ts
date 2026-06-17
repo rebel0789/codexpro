@@ -4,16 +4,19 @@ import path from "node:path";
 
 export type BashMode = "off" | "safe" | "full";
 export type WriteMode = "off" | "handoff" | "workspace";
+export type ToolMode = "minimal" | "standard" | "full";
 
 export interface CodexProConfig {
   defaultRoot: string;
   allowedRoots: string[];
   host: string;
   port: number;
+  widgetDomain: string;
   authToken?: string;
   requireHttpToken: boolean;
   bashMode: BashMode;
   writeMode: WriteMode;
+  toolMode: ToolMode;
   inheritEnv: boolean;
   maxReadBytes: number;
   maxWriteBytes: number;
@@ -142,6 +145,28 @@ function writeModeFrom(value: string | undefined): WriteMode {
   return "workspace";
 }
 
+function toolModeFrom(value: string | undefined): ToolMode {
+  if (value === "minimal" || value === "standard" || value === "full") return value;
+  return "standard";
+}
+
+function widgetDomainFrom(value: string | undefined): string {
+  const raw = value?.trim() || "https://rebel0789.github.io";
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(`CODEXPRO_WIDGET_DOMAIN must be a valid origin URL, got: ${raw}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error("CODEXPRO_WIDGET_DOMAIN must use https.");
+  }
+  if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error("CODEXPRO_WIDGET_DOMAIN must be an origin only, for example https://widgets.example.com.");
+  }
+  return parsed.origin;
+}
+
 function boolFrom(value: string | undefined, fallback = false): boolean {
   if (value === undefined) return fallback;
   return ["1", "true", "yes", "y", "on"].includes(value.toLowerCase());
@@ -176,6 +201,8 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   const hostArg = typeof args.host === "string" ? args.host : undefined;
   const bashArg = typeof args.bash === "string" ? args.bash : undefined;
   const writeArg = typeof args.write === "string" ? args.write : undefined;
+  const toolModeArg = typeof args["tool-mode"] === "string" ? args["tool-mode"] : undefined;
+  const widgetDomainArg = typeof args["widget-domain"] === "string" ? args["widget-domain"] : undefined;
   const extraBlockedGlobs = splitList(process.env.CODEXPRO_BLOCKED_GLOBS, ",");
   const host = hostArg ?? process.env.HOST ?? process.env.CODEXPRO_HOST ?? "127.0.0.1";
   const authToken = process.env.CODEXPRO_HTTP_TOKEN ?? process.env.CODEBASE_BRIDGE_HTTP_TOKEN;
@@ -190,10 +217,12 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     allowedRoots,
     host,
     port: numberFrom(portArg ?? process.env.PORT ?? process.env.CODEXPRO_PORT, 8787, 1, 65535),
+    widgetDomain: widgetDomainFrom(widgetDomainArg ?? process.env.CODEXPRO_WIDGET_DOMAIN),
     authToken,
     requireHttpToken,
     bashMode: bashModeFrom(bashArg ?? process.env.CODEXPRO_BASH_MODE),
     writeMode: writeModeFrom(writeArg ?? process.env.CODEXPRO_WRITE_MODE),
+    toolMode: toolModeFrom(toolModeArg ?? process.env.CODEXPRO_TOOL_MODE),
     inheritEnv: process.env.CODEXPRO_INHERIT_ENV === "1",
     maxReadBytes: numberFrom(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000),
     maxWriteBytes: numberFrom(process.env.CODEXPRO_MAX_WRITE_BYTES, 1_000_000, 1_000, 10_000_000),

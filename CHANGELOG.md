@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.28.4
+
+- Made workspace cards compact by default, moving git details, discovered skills, and optional file tree output behind collapsible disclosure rows.
+- Changed workspace open skill discovery to include workspace, user, and plugin skills by default while still exposing a focused `standard` tool surface.
+- Kept AGENTS detection in the workspace open result but stopped embedding the full AGENTS file in the open response; agents can read it explicitly when needed.
+
+## 0.28.3
+
+- Added `CODEXPRO_WIDGET_DOMAIN` and the Apps SDK resource metadata keys `_meta.ui.domain` plus `_meta["openai/widgetDomain"]` so ChatGPT no longer reports that the widget domain is missing.
+- Surfaced the widget domain in server config, HTTP status output, docs, env examples, and smoke tests.
+
+## 0.28.2
+
+- Moved ChatGPT visual cards from `bash` to the workspace open tools so the first call gives a compact project orientation instead of noisy terminal cards.
+- Kept `bash` data-only for focused verification commands and strengthened server instructions to prefer `tree`, `search`, `read`, and `show_changes` for inspection/review.
+- Upgraded the widget to v8 with a workspace summary renderer and a neutral waiting state instead of a stale-looking running card.
+
+## 0.28.1
+
+- Added `CODEXPRO_TOOL_MODE=minimal|standard|full`, with `standard` as the default focused ChatGPT tool surface and `full` preserving the previous advanced toolbox.
+- Added `show_changes` as a review-oriented visual card for git status, diff stats, and optional diff while keeping raw `git_diff` data-only.
+- Upgraded the ChatGPT widget to v7 with compact bash execution summaries, review cards, and cleaner handoff cards.
+- Allowed `open_workspace` to accept `path` as an alias for `root` to reduce client argument mismatch failures.
+- Allowed safe package scripts with colon suffixes such as `npm run build:clients` for build/test verification.
+- Surfaced tool mode in server config, local status, workspace/context exports, launcher output, setup profiles, and docs.
+
 ## 0.28.0
 
 - Added `codexpro execute-handoff` as an opt-in local executor for `.ai-bridge/current-plan.md`.

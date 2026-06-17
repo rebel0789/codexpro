@@ -134,6 +134,16 @@ async function callTool(client, name, args = {}) {
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
+await fs.mkdir(path.join(root, '.codex', 'skills', 'http-smoke-skill'), { recursive: true });
+await fs.writeFile(path.join(root, '.codex', 'skills', 'http-smoke-skill', 'SKILL.md'), [
+  '---',
+  'name: http-smoke-skill',
+  'description: HTTP smoke test skill discovery.',
+  '---',
+  '',
+  '# HTTP Smoke Skill',
+  ''
+].join('\n'), 'utf8');
 const port = await getFreePort();
 const token = 'codexpro-http-smoke-token';
 const child = spawn('node', ['dist/http.js'], {
@@ -145,7 +155,9 @@ const child = spawn('node', ['dist/http.js'], {
     CODEXPRO_PORT: String(port),
     CODEXPRO_HTTP_TOKEN: token,
     CODEXPRO_BASH_MODE: 'safe',
-    CODEXPRO_WRITE_MODE: 'handoff'
+    CODEXPRO_WRITE_MODE: 'handoff',
+    CODEXPRO_TOOL_MODE: 'full',
+    CODEXPRO_WIDGET_DOMAIN: 'https://widgets.codexpro.test'
   },
   stdio: ['ignore', 'pipe', 'pipe']
 });
@@ -182,18 +194,18 @@ try {
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);
   const queryToolNames = toolNames(queryTools);
-  for (const expected of ['server_config', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+  for (const expected of ['server_config', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'show_changes', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
     }
   }
-  const toolCardUri = 'ui://widget/codexpro-tool-card-v5.html';
-  for (const visualTool of ['write', 'edit', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
+  const toolCardUri = 'ui://widget/codexpro-tool-card-v8.html';
+  for (const visualTool of ['open_current_workspace', 'open_workspace', 'write', 'edit', 'show_changes', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
     if (!hasWidgetMeta(queryTools, visualTool, toolCardUri)) {
       throw new Error(`${visualTool} should render the CodexPro widget`);
     }
   }
-  for (const quietTool of ['server_config', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'read', 'bash', 'git_status', 'git_diff', 'read_handoff', 'codex_context']) {
+  for (const quietTool of ['server_config', 'codexpro_inventory', 'list_workspaces', 'workspace_snapshot', 'tree', 'search', 'read', 'bash', 'git_status', 'git_diff', 'read_handoff', 'codex_context']) {
     if (hasWidgetMeta(queryTools, quietTool, toolCardUri)) {
       throw new Error(`${quietTool} should stay data-only without widget metadata`);
     }
@@ -216,11 +228,14 @@ try {
     const widget = await client.readResource({ uri: toolCardUri });
     const widgetText = widget.contents?.[0]?.text ?? '';
     const widgetMeta = widget.contents?.[0]?._meta ?? {};
-    if (!widgetText.includes('Working in the workspace') || !widgetText.includes('ui/notifications/tool-result')) {
+    if (!widgetText.includes('Waiting for tool result') || !widgetText.includes('renderWorkspace') || !widgetText.includes('details class="fold"') || !widgetText.includes('ui/notifications/tool-result')) {
       throw new Error('HTTP tool-card widget resource did not include expected Apps bridge code');
     }
     if (!widgetMeta.ui?.csp || !widgetMeta['openai/widgetCSP']) {
       throw new Error('HTTP tool-card widget resource did not expose standard and ChatGPT CSP metadata');
+    }
+    if (widgetMeta.ui?.domain !== 'https://widgets.codexpro.test' || widgetMeta['openai/widgetDomain'] !== 'https://widgets.codexpro.test') {
+      throw new Error('HTTP tool-card widget resource did not expose standard and ChatGPT widget domain metadata');
     }
   });
 
@@ -228,6 +243,12 @@ try {
     const result = await callTool(client, 'open_current_workspace', { include_tree: false });
     if (result.structuredContent.codexpro_tool !== 'open_current_workspace') {
       throw new Error('HTTP tool result was not tagged for widget rendering');
+    }
+    if (result.structuredContent.tool_mode !== 'full') {
+      throw new Error(`open_current_workspace did not expose tool_mode: ${result.structuredContent.tool_mode}`);
+    }
+    if (!result.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'http-smoke-skill')) {
+      throw new Error('HTTP open_current_workspace did not discover workspace skill inventory');
     }
     return result.structuredContent.workspace_id;
   });

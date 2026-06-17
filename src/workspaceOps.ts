@@ -7,6 +7,8 @@ import type { Workspace } from "./guard.js";
 import { PathGuard } from "./guard.js";
 import { readTextFile, repoTree, ensureAiBridge } from "./fsOps.js";
 import { gitDiff, gitLog, gitStatus } from "./gitOps.js";
+import { discoverSkillInventory } from "./capabilitiesOps.js";
+import type { SkillInventoryItem } from "./capabilitiesOps.js";
 
 export interface WorkspaceSummary {
   text: string;
@@ -15,6 +17,8 @@ export interface WorkspaceSummary {
   agentsLoaded: boolean;
   agentsPath?: string;
   skills: string[];
+  skillInventory: SkillInventoryItem[];
+  skillCounts: Record<string, number>;
   tree?: string;
   gitStatus: string;
 }
@@ -61,16 +65,21 @@ export async function discoverSkills(workspace: Workspace, options: { includeGlo
   return unique(skills).sort((a, b) => a.localeCompare(b));
 }
 
-async function findAgentsFile(workspace: Workspace): Promise<string | undefined> {
-  const candidates = ["AGENTS.override.md", "AGENTS.md", "agents.md", ".agents.md"];
-  for (const candidate of candidates) {
-    const abs = path.join(workspace.root, candidate);
-    if (fs.existsSync(abs)) return candidate;
+function skillCounts(skills: Array<{ source?: string }>): Record<string, number> {
+  const counts: Record<string, number> = { total: skills.length, workspace: 0, user: 0, plugin: 0, other: 0 };
+  for (const skill of skills) {
+    const source = skill.source ?? "other";
+    counts[source] = (counts[source] ?? 0) + 1;
   }
-  return undefined;
+  return counts;
 }
 
-function candidateAgentsPaths(targetPath: string): string[] {
+async function findAgentsFile(workspace: Workspace): Promise<string | undefined> {
+  const [first] = await findAgentsFilesInDir(workspace, ".");
+  return first;
+}
+
+function candidateAgentDirs(targetPath: string): string[] {
   const normalized = targetPath.split(path.sep).join("/").replace(/^\.\//, "");
   const parts = normalized && normalized !== "." ? normalized.split("/").filter(Boolean) : [];
   const dirs = [""];
@@ -78,11 +87,28 @@ function candidateAgentsPaths(targetPath: string): string[] {
   for (let i = 0; i < directoryParts.length; i += 1) {
     dirs.push(directoryParts.slice(0, i + 1).join("/"));
   }
+  return [...new Set(dirs)];
+}
 
+async function findAgentsFilesInDir(workspace: Workspace, dir: string): Promise<string[]> {
   const names = ["AGENTS.override.md", "AGENTS.md", "agents.md", ".agents.md"];
-  return unique(
-    dirs.flatMap((dir) => names.map((name) => (dir ? `${dir}/${name}` : name)))
-  );
+  const absDir = path.join(workspace.root, dir);
+  const entries = await safeReaddir(absDir);
+  const files = entries.filter((entry) => entry.isFile());
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const name of names) {
+    const entry =
+      files.find((item) => item.name === name) ??
+      files.find((item) => item.name.toLowerCase() === name.toLowerCase());
+    if (!entry) continue;
+    const rel = dir && dir !== "." ? `${dir}/${entry.name}` : entry.name;
+    const real = fs.realpathSync(path.join(workspace.root, rel)).toLowerCase();
+    if (seen.has(real)) continue;
+    seen.add(real);
+    out.push(rel);
+  }
+  return out;
 }
 
 async function readAgentsChain(
@@ -95,7 +121,10 @@ async function readAgentsChain(
   const chunks: string[] = [];
   const files: string[] = [];
   const seenRealPaths = new Set<string>();
-  for (const rel of candidateAgentsPaths(targetPath)) {
+  const candidates = (
+    await Promise.all(candidateAgentDirs(targetPath).map((dir) => findAgentsFilesInDir(workspace, dir || ".")))
+  ).flat();
+  for (const rel of candidates) {
     try {
       const resolved = guard.resolve(workspace, rel);
       if (!fs.existsSync(resolved.absPath)) continue;
@@ -125,16 +154,15 @@ export async function workspaceSummary(
   if (options.bootstrapContext) {
     await ensureAiBridge(config, guard, workspace);
   }
-  const skills = options.includeSkills ? await discoverSkills(workspace, { includeGlobal: options.includeGlobalSkills }) : [];
+  const skillInventory = options.includeSkills
+    ? await discoverSkillInventory(workspace, { includeGlobal: options.includeGlobalSkills !== false, maxSkills: 120 })
+    : [];
+  const skills = skillInventory.map((skill) => skill.name);
+  const counts = skillCounts(skillInventory);
   const agentsPath = await findAgentsFile(workspace);
   let agentsText = "AGENTS.md: none loaded";
   if (agentsPath) {
-    try {
-      const agents = await readTextFile(config, guard, workspace, agentsPath, { maxBytes: 40_000 });
-      agentsText = `AGENTS.md loaded from ${agentsPath}\n\n${agents.text}`;
-    } catch {
-      agentsText = `AGENTS.md found at ${agentsPath}, but it could not be read.`;
-    }
+    agentsText = `AGENTS.md: ${agentsPath} (read this file before editing or making project decisions).`;
   }
 
   let treeText: string | undefined;
@@ -151,9 +179,9 @@ export async function workspaceSummary(
   const status = gitStatus(config, workspace);
   const log = gitLog(config, workspace, 5);
   const skillText = options.includeSkills
-    ? `Skills (${skills.length}): ${skills.join(", ") || "none discovered"}`
-    : "Skills: skipped for speed. Pass include_skills=true if repo-local skill discovery is needed.";
-  const text = `# Workspace\n\nWorkspace: ${workspace.id}\nRoot: ${workspace.root}\nBash mode: ${config.bashMode}\nWrite mode: ${config.writeMode}\nAllowed roots:\n${config.allowedRoots.map((root) => `- ${root}`).join("\n")}\n\n${skillText}\n\n${agentsText}\n\n## Git status\n\n${status}\n\n## Recent commits\n\n${log}\n${treeText ? `\n## Files\n\n${treeText}` : ""}`;
+    ? `Skills: ${counts.total} total (${counts.workspace ?? 0} workspace, ${counts.user ?? 0} user, ${counts.plugin ?? 0} plugin, ${counts.other ?? 0} other).`
+    : "Skills: skipped. Pass include_skills=true if skill discovery is needed.";
+  const text = `# Workspace\n\nWorkspace: ${workspace.id}\nRoot: ${workspace.root}\nBash mode: ${config.bashMode}\nWrite mode: ${config.writeMode}\nTool mode: ${config.toolMode}\n\n${agentsText}\n${skillText}\n\n## Git status\n\n${status}\n\n## Recent commits\n\n${log}\n${treeText ? `\n## Files\n\n${treeText}` : ""}`;
 
   return {
     text,
@@ -162,6 +190,8 @@ export async function workspaceSummary(
     agentsLoaded: Boolean(agentsPath),
     agentsPath,
     skills,
+    skillInventory,
+    skillCounts: counts,
     tree: treeText,
     gitStatus: status
   };
@@ -236,6 +266,7 @@ export async function readCodexContext(
     `Target path: ${targetPath}`,
     `Bash mode: ${config.bashMode}`,
     `Write mode: ${config.writeMode}`,
+    `Tool mode: ${config.toolMode}`,
     "",
     "## AGENTS Instructions",
     "",

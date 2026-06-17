@@ -66,7 +66,7 @@ function logToolCall(name: string, status: "ok" | "error", started: number): voi
   console.error(`[CodexProTool] ${name} ${status} ${Date.now() - started}ms`);
 }
 
-function registerToolCardResource(server: McpServer): void {
+function registerToolCardResource(server: McpServer, config: CodexProConfig): void {
   const s = server as any;
   if (typeof s.registerResource !== "function") return;
   s.registerResource(
@@ -74,7 +74,7 @@ function registerToolCardResource(server: McpServer): void {
     TOOL_CARD_URI,
     {
       title: "CodexPro Tool Card",
-      description: "Compact visual renderer for high-signal CodexPro diffs and handoffs.",
+      description: "Compact visual renderer for CodexPro workspace orientation, source changes, and handoffs.",
       mimeType: TOOL_CARD_MIME_TYPE
     },
     async () => ({
@@ -86,13 +86,15 @@ function registerToolCardResource(server: McpServer): void {
           _meta: {
             ui: {
               prefersBorder: true,
+              domain: config.widgetDomain,
               csp: {
                 connectDomains: [],
                 resourceDomains: []
               }
             },
-            "openai/widgetDescription": "Renders high-signal CodexPro changes such as file diffs, Pro context exports, and Codex handoff plans as compact developer cards.",
+            "openai/widgetDescription": "Renders CodexPro workspace orientation, file diffs, change reviews, Pro context exports, and handoff plans as compact developer cards. Bash stays data-only.",
             "openai/widgetPrefersBorder": true,
+            "openai/widgetDomain": config.widgetDomain,
             "openai/widgetCSP": {
               connect_domains: [],
               resource_domains: []
@@ -166,6 +168,59 @@ function registerToolCompat(
   throw new Error("Unsupported MCP SDK: McpServer has neither registerTool nor tool.");
 }
 
+const MINIMAL_TOOLS = new Set([
+  "server_config",
+  "open_current_workspace",
+  "open_workspace",
+  "read",
+  "write",
+  "edit",
+  "bash",
+  "show_changes"
+]);
+
+const STANDARD_TOOLS = new Set([
+  ...MINIMAL_TOOLS,
+  "tree",
+  "search",
+  "read_handoff",
+  "export_pro_context",
+  "handoff_to_agent"
+]);
+
+function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
+  if (config.toolMode === "full") return true;
+  if (config.toolMode === "minimal") return MINIMAL_TOOLS.has(name);
+  return STANDARD_TOOLS.has(name);
+}
+
+function registerCodexTool(
+  config: CodexProConfig,
+  server: McpServer,
+  name: string,
+  options: Record<string, unknown>,
+  handler: (args: any) => Promise<any> | any
+): void {
+  if (!shouldRegisterTool(config, name)) return;
+  registerToolCompat(server, name, options, handler);
+}
+
+function serverInstructions(config: CodexProConfig): string {
+  return [
+    "CodexPro connects ChatGPT to one local development workspace.",
+    "",
+    "Preferred workflow:",
+    "1. Start with open_current_workspace. Use open_workspace only when the user gives a different root or asks to switch folders.",
+    "2. Follow any AGENTS.md-style instructions returned by the workspace open call before editing files.",
+    "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
+    "4. Edit with write/edit. After edits, call show_changes once for git status, diff stats, and review diff.",
+    "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.",
+    "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad bash/git calls.",
+    "",
+    `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
+  ].join("\n");
+}
+
 function limitInt(value: unknown, fallback: number, min: number, max: number): number {
   const n = Number(value ?? fallback);
   if (!Number.isFinite(n)) return fallback;
@@ -180,6 +235,32 @@ function parseBool(value: unknown, fallback = false): boolean {
 
 function diffBlock(diff: string): string {
   return `\n\n\`\`\`diff\n${diff}\n\`\`\``;
+}
+
+function diffStats(diff: string): { additions: number; deletions: number; changed: boolean } {
+  let additions = 0;
+  let deletions = 0;
+  for (const line of diff.split("\n")) {
+    if (line.startsWith("+") && !line.startsWith("+++")) additions += 1;
+    if (line.startsWith("-") && !line.startsWith("---")) deletions += 1;
+  }
+  return { additions, deletions, changed: Boolean(diff.trim()) };
+}
+
+function normalizeGitOutput(output: string): string {
+  return output.trim() === "(no output)" ? "" : output;
+}
+
+function looksLikeGitError(output: string): boolean {
+  const trimmed = output.trim();
+  return trimmed.startsWith("fatal:") || trimmed.startsWith("error:") || trimmed.startsWith("git unavailable or failed:");
+}
+
+function changedStatusLines(status: string): string[] {
+  return status
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("##"));
 }
 
 function jsonlEvent(event: string, data: Record<string, unknown>): string {
@@ -385,10 +466,11 @@ function getSharedWorkspaceManager(config: CodexProConfig): WorkspaceManager {
 export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = getSharedWorkspaceManager(config);
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.28.0" });
-  registerToolCardResource(server);
+  const server = new McpServer({ name: "CodexPro", version: "0.28.4" }, { instructions: serverInstructions(config) });
+  registerToolCardResource(server, config);
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "server_config",
     {
@@ -407,9 +489,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         allowedRoots: config.allowedRoots,
         host: config.host,
         port: config.port,
+        widgetDomain: config.widgetDomain,
         authEnabled: Boolean(config.authToken),
         bashMode: config.bashMode,
         writeMode: config.writeMode,
+        toolMode: config.toolMode,
         inheritEnv: config.inheritEnv,
         contextDir: config.contextDir,
         maxReadBytes: config.maxReadBytes,
@@ -422,7 +506,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "codexpro_inventory",
     {
@@ -460,7 +545,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "list_workspaces",
     {
@@ -482,7 +568,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "open_current_workspace",
     {
@@ -492,10 +579,12 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {
         include_tree: z.boolean().optional().describe("Include a compact file tree. Default: false for speed."),
         max_depth: z.number().int().min(1).max(8).optional().describe("Tree depth when include_tree=true. Default: 2."),
-        include_skills: z.boolean().optional().describe("Discover repo-local skills. Default: true.")
+        include_skills: z.boolean().optional().describe("Discover workspace, user, and plugin skills by name/description. Default: true."),
+        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills when include_skills=true. Default: true.")
       },
       annotations: SESSION_READ_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Opening current CodexPro workspace...",
         "openai/toolInvocation/invoked": "Current CodexPro workspace opened"
       }
@@ -506,7 +595,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         includeTree: parseBool(args.include_tree, false),
         maxDepth: limitInt(args.max_depth, 2, 1, 8),
         includeSkills: parseBool(args.include_skills, true),
-        includeGlobalSkills: false,
+        includeGlobalSkills: parseBool(args.include_global_skills, true),
         bootstrapContext: false
       });
       return textResult(summary.text, {
@@ -515,14 +604,19 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         agents_loaded: summary.agentsLoaded,
         agents_path: summary.agentsPath,
         skills: summary.skills,
+        skill_inventory: summary.skillInventory,
+        skill_counts: summary.skillCounts,
+        tree: summary.tree,
         git_status: summary.gitStatus,
         bash_mode: config.bashMode,
-        write_mode: config.writeMode
+        write_mode: config.writeMode,
+        tool_mode: config.toolMode
       });
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "open_workspace",
     {
@@ -531,25 +625,30 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         "Open a local project directory as a CodexPro workspace. Returns a workspace_id plus git status, AGENTS.md, skills, and a compact file tree.",
       inputSchema: {
         root: z.string().optional().describe("Project directory to open. Omit to use CODEXPRO_ROOT/current working directory. Supports ~/ paths."),
+        path: z.string().optional().describe("Alias for root. Useful for clients that naturally send path instead of root."),
         include_tree: z.boolean().optional().describe("Include a compact file tree. Default: true."),
         max_depth: z.number().int().min(1).max(8).optional().describe("Tree depth. Default: 3."),
-        include_skills: z.boolean().optional().describe("Discover repo-local skills. Default: false for speed."),
-        include_global_skills: z.boolean().optional().describe("Also scan home-level skill folders when include_skills=true. Default: false."),
+        include_skills: z.boolean().optional().describe("Discover workspace, user, and plugin skills by name/description. Default: true."),
+        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills when include_skills=true. Default: true."),
         bootstrap_context: z.boolean().optional().describe("Deprecated and ignored. Use handoff_to_agent to create .ai-bridge files.")
       },
       annotations: SESSION_READ_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Opening CodexPro workspace...",
         "openai/toolInvocation/invoked": "CodexPro workspace opened"
       }
     },
     async (args) => {
-      const workspace = workspaces.openWorkspace(args.root);
+      if (args.root && args.path && args.root !== args.path) {
+        throw new CodexProError("open_workspace accepts either root or path. If both are provided, they must match.");
+      }
+      const workspace = workspaces.openWorkspace(args.root ?? args.path);
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: args.include_tree !== false,
         maxDepth: limitInt(args.max_depth, 3, 1, 8),
-        includeSkills: parseBool(args.include_skills, false),
-        includeGlobalSkills: parseBool(args.include_global_skills, false),
+        includeSkills: parseBool(args.include_skills, true),
+        includeGlobalSkills: parseBool(args.include_global_skills, true),
         bootstrapContext: false
       });
       return textResult(summary.text, {
@@ -558,14 +657,19 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         agents_loaded: summary.agentsLoaded,
         agents_path: summary.agentsPath,
         skills: summary.skills,
+        skill_inventory: summary.skillInventory,
+        skill_counts: summary.skillCounts,
+        tree: summary.tree,
         git_status: summary.gitStatus,
         bash_mode: config.bashMode,
-        write_mode: config.writeMode
+        write_mode: config.writeMode,
+        tool_mode: config.toolMode
       });
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "workspace_snapshot",
     {
@@ -597,7 +701,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "tree",
     {
@@ -628,7 +733,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "search",
     {
@@ -663,7 +769,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "read",
     {
@@ -694,7 +801,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "write",
     {
@@ -737,7 +845,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "edit",
     {
@@ -781,13 +890,14 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "bash",
     {
       title: "Bash",
       description:
-        "Run one safe inspection or test command in the workspace. Do not chain commands with &&, pipes, redirects, or shell file readers; use tree/read/search for listing and file content.",
+        "Run one allowlisted verification command in the workspace, such as tests, build, lint, typecheck, or a project script. Do not use for git status/diff or file inspection; use show_changes, tree, search, and read instead. Do not chain commands with &&, pipes, redirects, or shell file readers.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         command: z.string().describe("Command to run."),
@@ -811,7 +921,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "git_status",
     {
@@ -833,7 +944,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "git_diff",
     {
@@ -857,7 +969,69 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
+    server,
+    "show_changes",
+    {
+      title: "Show Changes",
+      description: "Summarize the current workspace changes in one review-oriented result with git status, diff stats, and optional diff. Use this instead of bash git status, bash git diff, git_status, or git_diff when reviewing work.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
+        path: z.string().optional().describe("Optional file path relative to workspace root."),
+        staged: z.boolean().optional().describe("Show staged diff. Default: false."),
+        include_diff: z.boolean().optional().describe("Include the unified diff. Default: true.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Summarizing workspace changes...",
+        "openai/toolInvocation/invoked": "Workspace changes summarized"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const status = gitStatus(config, workspace);
+      const includeDiff = parseBool(args.include_diff, true);
+      const rawDiff = includeDiff ? normalizeGitOutput(gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false))) : "";
+      const statusError = looksLikeGitError(status) ? status : "";
+      const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
+      const diff = diffError ? "" : rawDiff;
+      const stats = diffStats(diff);
+      const changedFiles = statusError ? [] : changedStatusLines(status);
+      const changedText = statusError
+        ? `- Git status unavailable: ${statusError}`
+        : changedFiles.length
+          ? changedFiles.map((line) => `- ${line}`).join("\n")
+          : "- No changed files.";
+      const diffText = includeDiff
+        ? diffError
+          ? `\n\nGit diff unavailable: ${diffError}`
+          : diff
+          ? diffBlock(diff)
+          : "\n\nNo diff output."
+        : "\n\nDiff omitted by request.";
+      const text = `# Show Changes\n\nWorkspace: ${workspace.root}\n\n## Changed\n\n${changedText}\n\n## Diff stats\n\n+${stats.additions} -${stats.deletions}${diffText}`;
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        path: args.path ?? "workspace changes",
+        status,
+        status_error: statusError || undefined,
+        diff_error: diffError || undefined,
+        changed_files: changedFiles,
+        staged: parseBool(args.staged, false),
+        include_diff: includeDiff,
+        additions: stats.additions,
+        deletions: stats.deletions,
+        changed: !statusError && (changedFiles.length > 0 || stats.changed),
+        diff
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
     server,
     "read_handoff",
     {
@@ -879,7 +1053,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "codex_context",
     {
@@ -921,7 +1096,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "export_pro_context",
     {
@@ -973,7 +1149,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "handoff_to_agent",
     {
@@ -1040,7 +1217,8 @@ ${result.prompt}
     }
   );
 
-  registerToolCompat(
+  registerCodexTool(
+    config,
     server,
     "handoff_to_codex",
     {

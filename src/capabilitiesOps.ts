@@ -215,6 +215,7 @@ export async function codexproInventory(
 Workspace: ${workspace.root}
 Bash mode: ${config.bashMode}
 Write mode: ${config.writeMode}
+Tool mode: ${config.toolMode}
 
 ## Skill summary
 

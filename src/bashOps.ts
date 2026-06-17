@@ -118,7 +118,13 @@ function compact(command: string): string {
 
 function startsWithAllowedPrefix(command: string): boolean {
   const normalized = compact(command);
-  return SAFE_ALLOWED_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix} `));
+  return isAllowedPackageScript(normalized) || SAFE_ALLOWED_PREFIXES.some((prefix) => normalized === prefix || normalized.startsWith(`${prefix} `));
+}
+
+function isAllowedPackageScript(command: string): boolean {
+  const packageScriptPattern =
+    /^(?:npm|pnpm|yarn|bun)\s+run\s+(?:test|typecheck|lint|build|check)(?::[A-Za-z0-9._-]+)*(?:\s+--\s+[A-Za-z0-9._:= -]+)?$/;
+  return packageScriptPattern.test(command);
 }
 
 function assertSafeCommand(config: CodexProConfig, command: string): void {
@@ -139,7 +145,7 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
   if (!startsWithAllowedPrefix(normalized)) {
     throw new CodexProError(
       `Command is not in the safe bash allowlist: ${normalized}\n` +
-        "Allowed examples: ls, find, git status, git diff, npm test, npm run typecheck, pytest, go test, cargo test. Use read/search tools for file contents. " +
+        "Allowed examples: ls, find, git status, git diff, npm test, npm run typecheck, npm run build:clients, pytest, go test, cargo test. Use read/search tools for file contents. " +
         "Use CODEXPRO_BASH_MODE=full for trusted local automation."
     );
   }

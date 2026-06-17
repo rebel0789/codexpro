@@ -103,24 +103,44 @@ ChatGPT can do MCP-backed agentic coding in your local repo, while Codex remains
 
 ## Tools exposed to ChatGPT
 
+CodexPro defaults to `CODEXPRO_TOOL_MODE=standard`, which keeps ChatGPT's tool picker focused on the normal coding loop plus handoff/export workflows. Use `--tool-mode minimal` for the tightest demo surface, or `--tool-mode full` when you want every compatibility and debugging tool exposed.
+
+The smaller default tool list is deliberate. ChatGPT behaves better when routine work goes through a few high-signal tools instead of a large action catalog. Installed user/plugin skills are still discovered during workspace open; they are surfaced as context in the workspace card and inventory results, not as dozens of separate ChatGPT actions.
+
+Standard mode exposes:
+
 - `server_config` — show safety modes, limits, blocked globs, and allowed roots.
-- `codexpro_inventory` — list discovered skill names and configured MCP server names without exposing MCP command arguments or secrets.
 - `open_current_workspace` — open the configured default workspace without accepting a path. Fastest/safest first call.
-- `open_workspace` — open a local project directory and return workspace id, git status, AGENTS.md status, optional skill discovery, and optional file tree.
-- `list_workspaces` — show opened workspaces in the current MCP session.
-- `workspace_snapshot` — project status plus `.ai-bridge` handoff context.
+- `open_workspace` — open a local project directory using `root` or `path` and return workspace id, git status, AGENTS.md status, optional skill discovery, and optional file tree.
 - `tree` — inspect files.
 - `search` — search code with ripgrep or a Node fallback.
 - `read` — read text files with line numbers.
 - `write` — create/overwrite files and return a diff. Controlled by `CODEXPRO_WRITE_MODE`.
 - `edit` — exact text replacement and return a diff. Controlled by `CODEXPRO_WRITE_MODE`.
 - `bash` — run allowlisted shell commands in the workspace. Controlled by `CODEXPRO_BASH_MODE`.
-- `git_status` — inspect git status.
-- `git_diff` — inspect current diff.
+- `show_changes` — one review-oriented summary with git status, diff stats, and optional diff.
 - `read_handoff` — read `.ai-bridge` files.
-- `codex_context` — load Codex-style context in one call: AGENTS instructions for a target path, `.ai-bridge` files, and optional git status/diff.
 - `export_pro_context` — write `.ai-bridge/pro-context.md` for models that cannot call MCP tools directly.
 - `handoff_to_agent` — write `.ai-bridge/current-plan.md` for Codex, OpenCode, Pi, or a custom local implementation agent without executing local commands.
+
+Minimal mode exposes only:
+
+```text
+server_config
+open_current_workspace / open_workspace
+read / write / edit
+bash
+show_changes
+```
+
+Full mode adds:
+
+- `codexpro_inventory` — list discovered skill names and configured MCP server names without exposing MCP command arguments or secrets.
+- `list_workspaces` — show opened workspaces in the current MCP session.
+- `workspace_snapshot` — project status plus `.ai-bridge` handoff context.
+- `git_status` — inspect git status.
+- `git_diff` — inspect current diff.
+- `codex_context` — load Codex-style context in one call: AGENTS instructions for a target path, `.ai-bridge` files, and optional git status/diff.
 - `handoff_to_codex` — compatibility wrapper for `handoff_to_agent` with `agent=codex`.
 
 Local-only companion command:
@@ -167,47 +187,51 @@ The watcher writes the same review files as `execute-handoff`:
 v0.8+ registers a reusable Apps SDK widget resource:
 
 ```text
-ui://widget/codexpro-tool-card-v5.html
+ui://widget/codexpro-tool-card-v8.html
 ```
 
-Only high-signal change tools attach that resource through `_meta.ui.resourceUri` and the ChatGPT compatibility key `_meta["openai/outputTemplate"]`. In ChatGPT Developer Mode this renders compact cards for:
+Only high-signal workflow tools attach that resource through `_meta.ui.resourceUri` and the ChatGPT compatibility key `_meta["openai/outputTemplate"]`. In ChatGPT Developer Mode this renders compact cards for:
 
 ```text
+open_current_workspace / open_workspace project summaries
 write/edit diffs
+show_changes review summaries
 handoff/pro-context exports
 ```
+
+Workspace cards stay compact by default. Git details, discovered skills, and optional file tree output are folded into disclosure rows so the chat does not fill with project inventory unless you open it.
 
 Routine plumbing tools intentionally stay data-only and compact:
 
 ```text
 server_config
 codexpro_inventory
-open_current_workspace / open_workspace
 tree
 search
 read
 bash
-git_status
-git_diff
+git_status / git_diff
 read_handoff
 workspace_snapshot
 codex_context
 ```
 
-`git_diff` is intentionally data-only. Empty or large repo diffs should not create a visual card or trigger a widget fetch just to say there is no output.
+`bash` and `git_diff` are intentionally data-only. Use `bash` for focused verification commands, and use `show_changes` when you want the visual review card. Empty or large raw diffs should not create a visual card or trigger a widget fetch just to say there is no output.
 
 This avoids the noisy "every tool call becomes a card" behavior. It follows the Apps SDK decoupled pattern: data-processing tools return normal tool results, while render-worthy tools attach the widget template.
 
 The visual cards are not unlocked by "normal coding mode" alone; the MCP server has to register an HTML resource with `text/html;profile=mcp-app` and point selected tool descriptors at it.
 
-The widget sets both CSP metadata surfaces:
+The widget sets both domain and CSP metadata surfaces:
 
 ```text
+_meta.ui.domain
+_meta["openai/widgetDomain"]
 _meta.ui.csp
 _meta["openai/widgetCSP"]
 ```
 
-Both are intentionally strict because the widget has no external fetches, fonts, scripts, images, or iframes.
+`CODEXPRO_WIDGET_DOMAIN` defaults to `https://rebel0789.github.io` for this package. For app submission, set it to a dedicated HTTPS origin you control, for example `https://widgets.yourdomain.com`. The CSP lists are intentionally strict because the widget has no external fetches, fonts, scripts, images, or iframes.
 
 After upgrading or changing widget metadata, open the CodexPro app settings in ChatGPT Developer Mode and click `Refresh` / `Refresh actions` so ChatGPT reloads the tool descriptors and resource URI.
 
@@ -573,12 +597,12 @@ For faster ChatGPT runs, keep the first call narrow:
 ```text
 Call open_current_workspace with include_tree=false unless you need the tree immediately.
 Use tree with max_depth=2 and max_entries=100 when you need file structure.
-Call codexpro_inventory when you want ChatGPT to see local skills and MCP server names. Leave global skill scans out of normal open_workspace calls unless you need them.
+Use --tool-mode full and call codexpro_inventory only when you want ChatGPT to see global skill and MCP server names.
 Do not call open_workspace after open_current_workspace unless you are switching to a different root.
-Use one targeted search for verification instead of repeated broad searches.
+Use tree/search/read for inspection, one targeted search plus show_changes for review, and bash only for focused build/test/lint verification.
 ```
 
-`open_current_workspace` discovers repo-local skills by default. `open_workspace` and `workspace_snapshot` skip skill discovery by default for speed. Use `codexpro_inventory` for global/user/plugin skills and MCP server names. `codexpro_inventory` reports names/descriptions and sanitized paths only; it does not expose MCP command arguments or environment values.
+`open_current_workspace` and `open_workspace` discover workspace, user, and plugin skills by default. Use `include_global_skills=false` when you only want repo-local instructions, or `include_skills=false` when you want the fastest possible open call. `workspace_snapshot` stays narrower by default for speed. In `--tool-mode full`, use `codexpro_inventory` for global/user/plugin skills and MCP server names. `codexpro_inventory` reports names/descriptions and sanitized paths only; it does not expose MCP command arguments or environment values.
 
 ## Codex-style context
 
@@ -956,6 +980,23 @@ workspace  write/edit can write workspace files, except blocked paths
 
 The launcher defaults to `workspace` in normal coding mode and `handoff` in handoff/pro planning modes.
 
+## Tool modes
+
+`CODEXPRO_TOOL_MODE=standard` is the default. It exposes the normal coding loop plus `show_changes`, Pro context export, and generic agent handoff.
+
+```text
+minimal   smallest surface for demos and simple coding: open/read/write/edit/bash/show_changes
+standard  default surface for normal coding plus handoff/export
+full      all tools, including inventory, workspace snapshots, raw git tools, codex_context, and compatibility wrappers
+```
+
+Launcher examples:
+
+```bash
+codexpro start --tool-mode minimal
+codexpro start --tool-mode full
+```
+
 ## Bash modes
 
 `CODEXPRO_BASH_MODE=safe` is the default. It allows common inspection and test commands, including:
@@ -963,7 +1004,7 @@ The launcher defaults to `workspace` in normal coding mode and `handoff` in hand
 ```text
 pwd, ls, find
 git status, git diff, git log, git show, git branch, git rev-parse, git ls-files
-npm/pnpm/yarn/bun test/build/lint/typecheck/check
+npm/pnpm/yarn/bun test/build/lint/typecheck/check, including suffix scripts such as npm run build:clients
 pytest, go test, cargo test, cargo check, cargo clippy, tsc, eslint, biome check
 ```
 
@@ -1008,11 +1049,11 @@ Use CodexPro.
 
 Call server_config first.
 Then call open_current_workspace with include_tree=false.
-Call codexpro_inventory only when you need local skill or MCP server names.
+If you need global skill or MCP server names, ask me to restart CodexPro with --tool-mode full.
 
-Act as a coding agent. Inspect the relevant files, make the requested source edits with write/edit, then verify with search/read/bash and git_diff or git_status when useful.
+Act as a coding agent. Inspect the relevant files, make the requested source edits with write/edit, then verify with search/read/bash and show_changes when useful.
 
-Keep changes scoped to the request. Do not use handoff_to_agent or handoff_to_codex unless I explicitly ask for planning-only handoff.
+Keep changes scoped to the request. Do not use handoff_to_agent unless I explicitly ask for planning-only handoff.
 ```
 
 ## Prompt for a local agent
@@ -1042,13 +1083,12 @@ Use CodexPro.
 Open ~/tmp/codexpro-example as the active workspace. Demonstrate each tool call while you work:
 
 1. server_config
-2. codexpro_inventory
-3. open_workspace
-4. tree
-5. read the relevant HTML/table file
-6. write README.md explaining the demo
-7. edit the repeated table row so each tool appears once
-8. run one final targeted search to verify
+2. open_workspace
+3. tree
+4. read the relevant HTML/table file
+5. write README.md explaining the demo
+6. edit the repeated table row so each tool appears once
+7. run one final targeted search and show_changes to verify
 
 Narrate which CodexPro tool you are using before each call.
 ```

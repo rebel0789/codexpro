@@ -61,7 +61,7 @@ ChatGPT Web 可以看到：
   AGENTS.md
   .ai-bridge 计划、状态和执行记录
   git status
-  git diff
+  show_changes 审查摘要和可选 diff
   文件树、搜索结果、指定源码文件
 
 ChatGPT Web 可以操作：
@@ -70,13 +70,19 @@ ChatGPT Web 可以操作：
   write   在工作区内写文件
   edit    精确替换文本
   bash    运行安全验证命令
-  git_*   查看 git 状态和 diff
+  show_changes 查看当前改动摘要
 
 本地执行器仍然有价值：
   Codex / OpenCode / Pi 执行计划
   终端重任务留在本地
   ChatGPT 回看执行结果和 diff
 ```
+
+默认 `CODEXPRO_TOOL_MODE=standard`，只暴露常用编码循环、`show_changes`、上下文导出和 handoff。演示时可以用 `--tool-mode minimal`，需要完整兼容工具时用 `--tool-mode full`。
+
+默认工具数量较少是故意的：ChatGPT 面对少量高信号工具时更稳定。workspace open 仍会发现已安装的 user/plugin skills，但把它们作为上下文显示，而不是变成几十个单独 action。
+
+ChatGPT 里只有关键动作会显示卡片：open workspace 项目摘要、write/edit diff、`show_changes` 审查和 handoff 导出。workspace 卡片默认紧凑，git、skills 和 tree 放在可展开详情里。bash 只用于测试、构建、lint、typecheck 等验证命令，并保持纯数据，避免刷屏。`CODEXPRO_WIDGET_DOMAIN` 用于设置 ChatGPT widget iframe 的专用 HTTPS origin，正式提交 app 前应换成你控制的独立域名。
 
 ## 快速开始
 

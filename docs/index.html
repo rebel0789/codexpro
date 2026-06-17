@@ -421,26 +421,22 @@ codexpro settings delete --yes</code></pre>
 
         <div class="tool-reference">
           <div>
-            <p class="eyebrow">Tools ChatGPT gets</p>
-            <h3>Local repo actions exposed through MCP.</h3>
+            <p class="eyebrow">Default standard tools</p>
+            <h3>Focused local repo actions exposed through MCP.</h3>
           </div>
           <div class="tool-list">
             <span>server_config</span>
             <span>open_current_workspace</span>
-            <span>codexpro_inventory</span>
-            <span>codex_context</span>
+            <span>open_workspace</span>
             <span>tree</span>
             <span>search</span>
             <span>read</span>
             <span>write</span>
             <span>edit</span>
             <span>bash</span>
-            <span>git_status</span>
-            <span>git_diff</span>
-            <span>workspace_snapshot</span>
+            <span>show_changes</span>
             <span>read_handoff</span>
             <span>export_pro_context</span>
-            <span>handoff_to_codex</span>
             <span>handoff_to_agent</span>
           </div>
         </div>
@@ -459,7 +455,7 @@ codexpro settings delete --yes</code></pre>
           <article>
             <small>Visual widgets</small>
             <h3>Cards only for useful changes</h3>
-            <p>Write/edit diffs and handoff exports get compact cards. Routine reads, searches, and config calls stay data-only to keep ChatGPT clean.</p>
+            <p>Workspace opens, write/edit diffs, show_changes review cards, and handoff exports get compact cards. Skills, git, and tree details stay folded until opened; bash stays data-only.</p>
           </article>
           <article>
             <small>Stable URL rule</small>

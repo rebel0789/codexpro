@@ -199,6 +199,7 @@ export async function buildProContext(
       `Workspace ID: ${workspace.id}`,
       `Write mode: ${config.writeMode}`,
       `Bash mode: ${config.bashMode}`,
+      `Tool mode: ${config.toolMode}`,
       "",
       "Purpose: paste this bundle into a high-context ChatGPT model when that model cannot call the CodexPro MCP tools directly.",
       "Instruction for ChatGPT: use this as repository context, produce a narrow Codex execution plan, and avoid inventing files or runtime facts not shown here."
