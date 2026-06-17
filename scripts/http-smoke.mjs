@@ -194,7 +194,7 @@ try {
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);
   const queryToolNames = toolNames(queryTools);
-  for (const expected of ['server_config', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'show_changes', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+  for (const expected of ['server_config', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'load_skill', 'show_changes', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
     }
@@ -205,7 +205,7 @@ try {
       throw new Error(`${visualTool} should render the CodexPro widget`);
     }
   }
-  for (const quietTool of ['server_config', 'codexpro_inventory', 'list_workspaces', 'workspace_snapshot', 'tree', 'search', 'read', 'bash', 'git_status', 'git_diff', 'read_handoff', 'codex_context']) {
+  for (const quietTool of ['server_config', 'codexpro_inventory', 'list_workspaces', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'read', 'bash', 'git_status', 'git_diff', 'read_handoff', 'codex_context']) {
     if (hasWidgetMeta(queryTools, quietTool, toolCardUri)) {
       throw new Error(`${quietTool} should stay data-only without widget metadata`);
     }
@@ -260,6 +260,13 @@ try {
     });
     if (inventory.structuredContent.codexpro_tool !== 'codexpro_inventory') {
       throw new Error('HTTP inventory result was not tagged for widget rendering');
+    }
+    const loadedSkill = await callTool(client, 'load_skill', {
+      name: 'http-smoke-skill',
+      source: 'workspace'
+    });
+    if (loadedSkill.structuredContent.skill?.name !== 'http-smoke-skill' || !loadedSkill.structuredContent.text?.includes('# HTTP Smoke Skill')) {
+      throw new Error('HTTP load_skill did not return bounded SKILL.md content');
     }
   });
 

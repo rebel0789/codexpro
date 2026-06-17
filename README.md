@@ -105,7 +105,7 @@ ChatGPT can do MCP-backed agentic coding in your local repo, while Codex remains
 
 CodexPro defaults to `CODEXPRO_TOOL_MODE=standard`, which keeps ChatGPT's tool picker focused on the normal coding loop plus handoff/export workflows. Use `--tool-mode minimal` for the tightest demo surface, or `--tool-mode full` when you want every compatibility and debugging tool exposed.
 
-The smaller default tool list is deliberate. ChatGPT behaves better when routine work goes through a few high-signal tools instead of a large action catalog. Installed user/plugin skills are still discovered during workspace open; they are surfaced as context in the workspace card and inventory results, not as dozens of separate ChatGPT actions.
+The smaller default tool list is deliberate. ChatGPT behaves better when routine work goes through a few high-signal tools instead of a large action catalog. Installed user/plugin skills are still discovered during workspace open; they are surfaced as context in the workspace card and can be loaded on demand with `load_skill`, not exposed as dozens of separate ChatGPT actions.
 
 Standard mode exposes:
 
@@ -114,6 +114,7 @@ Standard mode exposes:
 - `open_workspace` — open a local project directory using `root` or `path` and return workspace id, git status, AGENTS.md status, optional skill discovery, and optional file tree.
 - `tree` — inspect files.
 - `search` — search code with ripgrep or a Node fallback.
+- `load_skill` — load bounded `SKILL.md` instructions for a discovered workspace, user, or plugin skill by name.
 - `read` — read text files with line numbers.
 - `write` — create/overwrite files and return a diff. Controlled by `CODEXPRO_WRITE_MODE`.
 - `edit` — exact text replacement and return a diff. Controlled by `CODEXPRO_WRITE_MODE`.
@@ -208,6 +209,7 @@ server_config
 codexpro_inventory
 tree
 search
+load_skill
 read
 bash
 git_status / git_diff
@@ -597,12 +599,13 @@ For faster ChatGPT runs, keep the first call narrow:
 ```text
 Call open_current_workspace with include_tree=false unless you need the tree immediately.
 Use tree with max_depth=2 and max_entries=100 when you need file structure.
-Use --tool-mode full and call codexpro_inventory only when you want ChatGPT to see global skill and MCP server names.
+Use load_skill only for the specific discovered skill needed for the task.
+Use --tool-mode full and call codexpro_inventory only when you want ChatGPT to see full global skill and MCP server inventory.
 Do not call open_workspace after open_current_workspace unless you are switching to a different root.
 Use tree/search/read for inspection, one targeted search plus show_changes for review, and bash only for focused build/test/lint verification.
 ```
 
-`open_current_workspace` and `open_workspace` discover workspace, user, and plugin skills by default. Use `include_global_skills=false` when you only want repo-local instructions, or `include_skills=false` when you want the fastest possible open call. `workspace_snapshot` stays narrower by default for speed. In `--tool-mode full`, use `codexpro_inventory` for global/user/plugin skills and MCP server names. `codexpro_inventory` reports names/descriptions and sanitized paths only; it does not expose MCP command arguments or environment values.
+`open_current_workspace` and `open_workspace` discover workspace, user, and plugin skills by default. Use `include_global_skills=false` when you only want repo-local instructions, or `include_skills=false` when you want the fastest possible open call. `load_skill` only accepts a discovered skill name and optional source, then reads that skill's `SKILL.md` with a bounded byte limit; it does not accept arbitrary file paths. `workspace_snapshot` stays narrower by default for speed. In `--tool-mode full`, use `codexpro_inventory` for global/user/plugin skills and MCP server names. `codexpro_inventory` reports names/descriptions and sanitized paths only; it does not expose MCP command arguments or environment values.
 
 ## Codex-style context
 

@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,6 +14,12 @@ function run(args, env) {
     throw new Error(`codexpro ${args.join(' ')} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   }
   return `${result.stdout}\n${result.stderr}`;
+}
+
+async function readProfile(root, home) {
+  const realRoot = await fs.realpath(root);
+  const id = createHash('sha256').update(realRoot).digest('hex').slice(0, 24);
+  return JSON.parse(await fs.readFile(path.join(home, 'profiles', `${id}.json`), 'utf8'));
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-root-'));
@@ -38,6 +45,10 @@ const saved = run([
   '19087',
   '--mode',
   'agent',
+  '--tool-mode',
+  'full',
+  '--widget-domain',
+  'https://widgets.codexpro.test',
   '--token',
   'codexpro-settings-token'
 ], env);
@@ -53,6 +64,10 @@ for (const expected of ['Tunnel', 'ngrok', 'codexpro-test.ngrok-free.app', '1908
 }
 if (shown.includes('codexpro-settings-token')) {
   throw new Error(`settings show leaked token\n${shown}`);
+}
+const profile = await readProfile(root, home);
+if (profile.toolMode !== 'full' || profile.widgetDomain !== 'https://widgets.codexpro.test') {
+  throw new Error(`settings profile did not persist tool/widget options: ${JSON.stringify(profile)}`);
 }
 
 const listed = run(['settings', 'list'], env);

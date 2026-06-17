@@ -1883,9 +1883,11 @@ async function runSetupWizard(argv) {
     const bash = optionValue(defaults, profile, 'bash', ['CODEXPRO_BASH_MODE'], '');
     const write = optionValue(defaults, profile, 'write', ['CODEXPRO_WRITE_MODE'], '');
     const toolMode = optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
+    const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
     if (bash) args.push('--bash', bash);
     if (write) args.push('--write', write);
     if (toolMode) args.push('--tool-mode', toolMode);
+    if (widgetDomain) args.push('--widget-domain', widgetDomain);
     if (defaults.noInstallCloudflared) args.push('--no-install-cloudflared');
     if (defaults.openChatgpt) args.push('--open-chatgpt');
     if (defaults.noCopyUrl) args.push('--no-copy-url');
@@ -1959,6 +1961,7 @@ async function runSetupWizard(argv) {
         ...(bash ? { bash } : {}),
         ...(write ? { write } : {}),
         ...(toolMode ? { toolMode } : {}),
+        ...(widgetDomain ? { widgetDomain } : {}),
         ...(defaults.noInstallCloudflared ? { noInstallCloudflared: true } : {})
       });
       statusLine('ok', `Saved workspace profile: ${savedPath}`);

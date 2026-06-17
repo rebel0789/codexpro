@@ -4,7 +4,9 @@
 
 - Made workspace cards compact by default, moving git details, discovered skills, and optional file tree output behind collapsible disclosure rows.
 - Changed workspace open skill discovery to include workspace, user, and plugin skills by default while still exposing a focused `standard` tool surface.
+- Added read-only `load_skill` so ChatGPT can load bounded `SKILL.md` instructions for discovered workspace, user, or plugin skills without exposing arbitrary path reads.
 - Kept AGENTS detection in the workspace open result but stopped embedding the full AGENTS file in the open response; agents can read it explicitly when needed.
+- Fixed setup propagation for `--widget-domain` and corrected workspace-card git status splitting for multi-file diffs.
 
 ## 0.28.3
 

@@ -10,7 +10,7 @@ import { runBash } from "./bashOps.js";
 import { gitDiff, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { exportProContext } from "./proContext.js";
-import { codexproInventory } from "./capabilitiesOps.js";
+import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
 import { TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 
@@ -183,6 +183,7 @@ const STANDARD_TOOLS = new Set([
   ...MINIMAL_TOOLS,
   "tree",
   "search",
+  "load_skill",
   "read_handoff",
   "export_pro_context",
   "handoff_to_agent"
@@ -541,6 +542,49 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         skills: inventory.skills,
         mcp_servers: inventory.mcpServers,
         widget_uri: TOOL_CARD_URI
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "load_skill",
+    {
+      title: "Load Skill",
+      description:
+        "Load the bounded SKILL.md body for a discovered workspace, user, or plugin skill by name. Does not accept arbitrary paths; use after open_current_workspace/open_workspace shows skill_inventory.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
+        name: z.string().describe("Exact skill name from skill_inventory or codexpro_inventory."),
+        source: z.enum(["workspace", "user", "plugin", "other"]).optional().describe("Optional source when multiple skills share a name."),
+        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills. Default: true."),
+        max_bytes: z.number().int().min(1000).max(100000).optional().describe("Maximum bytes to return from SKILL.md. Default: 40000.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: {
+        "openai/toolInvocation/invoking": "Loading skill instructions...",
+        "openai/toolInvocation/invoked": "Skill instructions loaded"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const loaded = await loadSkill(workspace, {
+        name: String(args.name ?? ""),
+        source: args.source,
+        includeGlobal: parseBool(args.include_global_skills, true),
+        maxBytes: limitInt(args.max_bytes, 40_000, 1_000, 100_000)
+      });
+      const truncated = loaded.truncated ? "\n\n[truncated: increase max_bytes if more context is required]" : "";
+      const text = `# Load Skill\n\nName: ${loaded.skill.name}\nSource: ${loaded.skill.source}\nPath: ${loaded.skill.path}\nBytes: ${loaded.bytes}/${loaded.totalBytes}\n\n\`\`\`markdown\n${loaded.text}${truncated}\n\`\`\``;
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        skill: loaded.skill,
+        bytes: loaded.bytes,
+        total_bytes: loaded.totalBytes,
+        truncated: loaded.truncated,
+        text: loaded.text
       });
     }
   );

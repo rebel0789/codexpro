@@ -593,7 +593,7 @@ export const toolCardWidgetHtml = String.raw`
 
   function gitStatusRows(status, max = 8) {
     return String(status || "")
-      .split("\\n")
+      .split("\n")
       .map((line) => line.trim())
       .filter((line) => line && !line.startsWith("##"))
       .slice(0, max)
@@ -609,7 +609,7 @@ export const toolCardWidgetHtml = String.raw`
     const skills = Array.isArray(data.skill_inventory) ? data.skill_inventory : (Array.isArray(data.skills) ? data.skills : []);
     const skillCount = Number(data.skill_counts?.total ?? skills.length);
     const changedRows = gitStatusRows(data.git_status, 8);
-    const gitLines = String(data.git_status || "").split("\\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("##"));
+    const gitLines = String(data.git_status || "").split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("##"));
     const agentsLabel = data.agents_loaded ? (data.agents_path || "AGENTS.md") : "no AGENTS";
     const pills = [
       pill(agentsLabel, data.agents_loaded ? "good" : "warn"),

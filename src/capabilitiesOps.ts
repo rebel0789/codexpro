@@ -12,6 +12,18 @@ export interface SkillInventoryItem {
   path: string;
 }
 
+interface SkillInventoryRecord extends SkillInventoryItem {
+  absPath: string;
+}
+
+export interface LoadedSkill {
+  skill: SkillInventoryItem;
+  text: string;
+  bytes: number;
+  totalBytes: number;
+  truncated: boolean;
+}
+
 export interface McpServerInventoryItem {
   name: string;
   source: string;
@@ -36,6 +48,24 @@ async function safeReadText(file: string, maxBytes = 16_000): Promise<string> {
     const buffer = Buffer.alloc(Math.min(stat.size, maxBytes));
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
+  }
+}
+
+async function readTextWithStats(file: string, maxBytes: number): Promise<{ text: string; bytes: number; totalBytes: number; truncated: boolean }> {
+  const stat = await fsp.stat(file);
+  const handle = await fsp.open(file, "r");
+  try {
+    const limit = Math.max(1, Math.min(maxBytes, stat.size));
+    const buffer = Buffer.alloc(limit);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return {
+      text: buffer.subarray(0, bytesRead).toString("utf8"),
+      bytes: bytesRead,
+      totalBytes: stat.size,
+      truncated: stat.size > bytesRead
+    };
   } finally {
     await handle.close();
   }
@@ -69,6 +99,30 @@ function skillSource(skillPath: string, workspaceRoot: string): SkillInventoryIt
   return "other";
 }
 
+function skillSourceRank(source: SkillInventoryItem["source"]): number {
+  if (source === "workspace") return 0;
+  if (source === "user") return 1;
+  if (source === "plugin") return 2;
+  return 3;
+}
+
+function compareSkills(a: SkillInventoryItem, b: SkillInventoryItem): number {
+  return (
+    skillSourceRank(a.source) - skillSourceRank(b.source) ||
+    a.name.localeCompare(b.name) ||
+    a.path.localeCompare(b.path)
+  );
+}
+
+function publicSkill(record: SkillInventoryRecord): SkillInventoryItem {
+  return {
+    name: record.name,
+    description: record.description,
+    source: record.source,
+    path: record.path
+  };
+}
+
 function frontmatterValue(text: string, key: string): string | undefined {
   const match = text.match(new RegExp(`^${key}:\\s*(.+)$`, "m"));
   return match?.[1]?.trim().replace(/^["']|["']$/g, "");
@@ -91,10 +145,10 @@ async function findSkillFiles(root: string, maxDepth: number, out: string[], max
   }
 }
 
-export async function discoverSkillInventory(
+async function discoverSkillRecords(
   workspace: Workspace,
   options: { includeGlobal?: boolean; maxSkills?: number } = {}
-): Promise<SkillInventoryItem[]> {
+): Promise<SkillInventoryRecord[]> {
   const maxSkills = Math.max(1, Math.min(options.maxSkills ?? 120, 500));
   const roots = [
     path.join(workspace.root, ".codex", "skills"),
@@ -115,7 +169,7 @@ export async function discoverSkillInventory(
     if (skillFiles.length >= maxSkills) break;
   }
 
-  const items: SkillInventoryItem[] = [];
+  const items: SkillInventoryRecord[] = [];
   for (const file of skillFiles.slice(0, maxSkills)) {
     let text = "";
     try {
@@ -129,13 +183,65 @@ export async function discoverSkillInventory(
       name,
       description,
       source: skillSource(file, workspace.root),
-      path: displayPath(file, workspace.root)
+      path: displayPath(file, workspace.root),
+      absPath: file
     });
   }
 
-  return unique(items, (item) => `${item.source}:${item.name}:${item.path}`).sort((a, b) =>
-    `${a.source}:${a.name}`.localeCompare(`${b.source}:${b.name}`)
-  );
+  return unique(items, (item) => `${item.source}:${item.name}:${item.path}`).sort(compareSkills);
+}
+
+export async function discoverSkillInventory(
+  workspace: Workspace,
+  options: { includeGlobal?: boolean; maxSkills?: number } = {}
+): Promise<SkillInventoryItem[]> {
+  return (await discoverSkillRecords(workspace, options)).map(publicSkill);
+}
+
+export async function loadSkill(
+  workspace: Workspace,
+  options: {
+    name: string;
+    source?: SkillInventoryItem["source"];
+    includeGlobal?: boolean;
+    maxSkills?: number;
+    maxBytes?: number;
+  }
+): Promise<LoadedSkill> {
+  const name = options.name.trim();
+  if (!name) throw new Error("Skill name is required.");
+
+  const records = await discoverSkillRecords(workspace, {
+    includeGlobal: options.includeGlobal !== false,
+    maxSkills: options.maxSkills
+  });
+  const matches = records.filter((skill) => skill.name === name && (!options.source || skill.source === options.source));
+  if (!matches.length) {
+    const near = records
+      .filter((skill) => skill.name.toLowerCase().includes(name.toLowerCase()))
+      .slice(0, 8)
+      .map((skill) => `${skill.name} [${skill.source}]`)
+      .join(", ");
+    throw new Error(`Skill not found: ${name}${near ? `. Similar skills: ${near}` : ""}`);
+  }
+  if (matches.length > 1 && !options.source) {
+    const choices = matches.map((skill) => `${skill.name} [${skill.source}] at ${skill.path}`).join("; ");
+    throw new Error(`Multiple skills named ${name} were found. Pass source to choose one: ${choices}`);
+  }
+
+  const [skill] = matches;
+  if (path.basename(skill.absPath) !== "SKILL.md") {
+    throw new Error(`Refusing to load non-skill file: ${skill.path}`);
+  }
+  const maxBytes = Math.max(1_000, Math.min(options.maxBytes ?? 40_000, 100_000));
+  const loaded = await readTextWithStats(skill.absPath, maxBytes);
+  return {
+    skill: publicSkill(skill),
+    text: loaded.text,
+    bytes: loaded.bytes,
+    totalBytes: loaded.totalBytes,
+    truncated: loaded.truncated
+  };
 }
 
 function parseTomlMcpServers(text: string, source: string): McpServerInventoryItem[] {
