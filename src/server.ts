@@ -558,6 +558,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         name: z.string().describe("Exact skill name from skill_inventory or codexpro_inventory."),
         source: z.enum(["workspace", "user", "plugin", "other"]).optional().describe("Optional source when multiple skills share a name."),
+        path: z.string().optional().describe("Exact sanitized path from skill_inventory when name/source are still ambiguous."),
         include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills. Default: true."),
         max_bytes: z.number().int().min(1000).max(100000).optional().describe("Maximum bytes to return from SKILL.md. Default: 40000.")
       },
@@ -572,6 +573,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const loaded = await loadSkill(workspace, {
         name: String(args.name ?? ""),
         source: args.source,
+        path: typeof args.path === "string" ? args.path : undefined,
         includeGlobal: parseBool(args.include_global_skills, true),
         maxBytes: limitInt(args.max_bytes, 40_000, 1_000, 100_000)
       });
@@ -1035,9 +1037,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const status = gitStatus(config, workspace);
+      const scopedPath = typeof args.path === "string" ? args.path : undefined;
+      const status = gitStatus(config, workspace, guard, scopedPath);
       const includeDiff = parseBool(args.include_diff, true);
-      const rawDiff = includeDiff ? normalizeGitOutput(gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false))) : "";
+      const rawDiff = includeDiff ? normalizeGitOutput(gitDiff(config, guard, workspace, scopedPath, parseBool(args.staged, false))) : "";
       const statusError = looksLikeGitError(status) ? status : "";
       const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
       const diff = diffError ? "" : rawDiff;

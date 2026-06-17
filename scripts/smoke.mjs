@@ -73,6 +73,16 @@ await fs.writeFile(path.join(tmp, '.codex', 'skills', 'smoke-skill', 'SKILL.md')
   '# Smoke Skill',
   ''
 ].join('\n'), 'utf8');
+await fs.mkdir(path.join(tmp, '.agents', 'skills', 'smoke-skill'), { recursive: true });
+await fs.writeFile(path.join(tmp, '.agents', 'skills', 'smoke-skill', 'SKILL.md'), [
+  '---',
+  'name: smoke-skill',
+  'description: Duplicate smoke test skill discovery.',
+  '---',
+  '',
+  '# Duplicate Smoke Skill',
+  ''
+].join('\n'), 'utf8');
 await fs.writeFile(path.join(tmp, 'package.json'), JSON.stringify({
   scripts: {
     'build:clients': "node -e \"console.log('clients ok')\""
@@ -93,6 +103,10 @@ for (const args of [['init'], ['add', 'demo.txt', 'AGENTS.md', 'package.json']])
   if (result.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
   }
+}
+const commitResult = spawnSync('git', ['-c', 'user.email=smoke@example.com', '-c', 'user.name=Smoke Test', 'commit', '-m', 'initial smoke fixture'], { cwd: tmp, encoding: 'utf8' });
+if (commitResult.status !== 0) {
+  throw new Error(`git commit failed: ${commitResult.stderr || commitResult.stdout}`);
 }
 
 const client = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe', '--tool-mode', 'full'], {
@@ -157,7 +171,15 @@ if (current.structuredContent.tool_mode !== 'full') throw new Error(`open_curren
 if (!current.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'smoke-skill')) {
   throw new Error('open_current_workspace did not discover workspace skill inventory');
 }
-const loadedSkill = await client.request('tools/call', { name: 'load_skill', arguments: { name: 'smoke-skill', source: 'workspace' } });
+await expectToolError('load_skill', { name: 'smoke-skill', source: 'workspace' }, /Multiple skills named smoke-skill/);
+const loadedSkill = await client.request('tools/call', {
+  name: 'load_skill',
+  arguments: {
+    name: 'smoke-skill',
+    source: 'workspace',
+    path: '$WORKSPACE/.codex/skills/smoke-skill/SKILL.md'
+  }
+});
 if (loadedSkill.structuredContent.skill?.name !== 'smoke-skill' || !loadedSkill.structuredContent.text?.includes('# Smoke Skill')) {
   throw new Error('load_skill did not return bounded SKILL.md content for smoke-skill');
 }
@@ -196,6 +218,17 @@ await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws
 const changes = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws } });
 if (!changes.structuredContent.changed || !changes.structuredContent.diff.includes('demo.txt')) {
   throw new Error('show_changes did not report the edited demo.txt diff');
+}
+const demoChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'demo.txt' } });
+if (!demoChanges.structuredContent.changed || !demoChanges.structuredContent.changed_files?.some?.((line) => line.includes('demo.txt'))) {
+  throw new Error(`path-scoped show_changes did not report demo.txt: ${JSON.stringify(demoChanges.structuredContent.changed_files)}`);
+}
+if (demoChanges.structuredContent.changed_files?.some?.((line) => line.includes('env-ref.js'))) {
+  throw new Error(`path-scoped show_changes leaked unrelated env-ref.js status: ${JSON.stringify(demoChanges.structuredContent.changed_files)}`);
+}
+const cleanPathChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'package.json' } });
+if (cleanPathChanges.structuredContent.changed || cleanPathChanges.structuredContent.changed_files?.length || cleanPathChanges.structuredContent.diff.includes('demo.txt')) {
+  throw new Error(`path-scoped show_changes leaked unrelated changes: ${JSON.stringify(cleanPathChanges.structuredContent)}`);
 }
 const codexContext = await client.request('tools/call', { name: 'codex_context', arguments: { workspace_id: ws, target_path: 'demo.txt' } });
 if (!codexContext.structuredContent.agents_files.includes('AGENTS.md')) throw new Error('codex_context did not include AGENTS.md');

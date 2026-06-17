@@ -22,8 +22,14 @@ function runGit(workspace: Workspace, args: string[], maxOutputBytes: number): s
   return redactSensitiveText(result.stdout.trim() || "(no output)");
 }
 
-export function gitStatus(config: CodexProConfig, workspace: Workspace): string {
-  return runGit(workspace, ["status", "--short", "--branch"], config.maxOutputBytes);
+export function gitStatus(config: CodexProConfig, workspace: Workspace, guard?: PathGuard, filePath?: string): string {
+  const args = ["status", "--short", "--branch"];
+  if (filePath?.trim()) {
+    if (!guard) return "path-scoped git status requires a path guard";
+    const resolved = guard.resolve(workspace, filePath);
+    args.push("--", resolved.relPath);
+  }
+  return runGit(workspace, args, config.maxOutputBytes);
 }
 
 export function gitDiff(config: CodexProConfig, guard: PathGuard, workspace: Workspace, filePath?: string, staged = false): string {

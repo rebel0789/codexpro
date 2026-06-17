@@ -203,6 +203,7 @@ export async function loadSkill(
   options: {
     name: string;
     source?: SkillInventoryItem["source"];
+    path?: string;
     includeGlobal?: boolean;
     maxSkills?: number;
     maxBytes?: number;
@@ -210,23 +211,30 @@ export async function loadSkill(
 ): Promise<LoadedSkill> {
   const name = options.name.trim();
   if (!name) throw new Error("Skill name is required.");
+  const requestedPath = options.path?.trim();
 
   const records = await discoverSkillRecords(workspace, {
     includeGlobal: options.includeGlobal !== false,
     maxSkills: options.maxSkills
   });
-  const matches = records.filter((skill) => skill.name === name && (!options.source || skill.source === options.source));
+  const matches = records.filter(
+    (skill) =>
+      skill.name === name &&
+      (!options.source || skill.source === options.source) &&
+      (!requestedPath || skill.path === requestedPath)
+  );
   if (!matches.length) {
     const near = records
       .filter((skill) => skill.name.toLowerCase().includes(name.toLowerCase()))
       .slice(0, 8)
       .map((skill) => `${skill.name} [${skill.source}]`)
       .join(", ");
-    throw new Error(`Skill not found: ${name}${near ? `. Similar skills: ${near}` : ""}`);
+    const suffix = requestedPath ? ` at ${requestedPath}` : "";
+    throw new Error(`Skill not found: ${name}${suffix}${near ? `. Similar skills: ${near}` : ""}`);
   }
-  if (matches.length > 1 && !options.source) {
+  if (matches.length > 1) {
     const choices = matches.map((skill) => `${skill.name} [${skill.source}] at ${skill.path}`).join("; ");
-    throw new Error(`Multiple skills named ${name} were found. Pass source to choose one: ${choices}`);
+    throw new Error(`Multiple skills named ${name} were found. Pass source and path to choose one: ${choices}`);
   }
 
   const [skill] = matches;

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.28.5
+
+- Fixed path-scoped `show_changes` so unrelated workspace status is not reported for a clean requested path.
+- Kept duplicate `load_skill` matches ambiguous until the caller supplies the exact displayed skill path.
+
 ## 0.28.4
 
 - Made workspace cards compact by default, moving git details, discovered skills, and optional file tree output behind collapsible disclosure rows.

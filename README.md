@@ -114,7 +114,7 @@ Standard mode exposes:
 - `open_workspace` — open a local project directory using `root` or `path` and return workspace id, git status, AGENTS.md status, optional skill discovery, and optional file tree.
 - `tree` — inspect files.
 - `search` — search code with ripgrep or a Node fallback.
-- `load_skill` — load bounded `SKILL.md` instructions for a discovered workspace, user, or plugin skill by name.
+- `load_skill` — load bounded `SKILL.md` instructions for a discovered workspace, user, or plugin skill by name, with optional source/path disambiguation.
 - `read` — read text files with line numbers.
 - `write` — create/overwrite files and return a diff. Controlled by `CODEXPRO_WRITE_MODE`.
 - `edit` — exact text replacement and return a diff. Controlled by `CODEXPRO_WRITE_MODE`.
@@ -605,7 +605,7 @@ Do not call open_workspace after open_current_workspace unless you are switching
 Use tree/search/read for inspection, one targeted search plus show_changes for review, and bash only for focused build/test/lint verification.
 ```
 
-`open_current_workspace` and `open_workspace` discover workspace, user, and plugin skills by default. Use `include_global_skills=false` when you only want repo-local instructions, or `include_skills=false` when you want the fastest possible open call. `load_skill` only accepts a discovered skill name and optional source, then reads that skill's `SKILL.md` with a bounded byte limit; it does not accept arbitrary file paths. `workspace_snapshot` stays narrower by default for speed. In `--tool-mode full`, use `codexpro_inventory` for global/user/plugin skills and MCP server names. `codexpro_inventory` reports names/descriptions and sanitized paths only; it does not expose MCP command arguments or environment values.
+`open_current_workspace` and `open_workspace` discover workspace, user, and plugin skills by default. Use `include_global_skills=false` when you only want repo-local instructions, or `include_skills=false` when you want the fastest possible open call. `load_skill` only accepts a discovered skill name plus optional source and exact displayed path, then reads that skill's `SKILL.md` with a bounded byte limit; it does not accept arbitrary file paths. If multiple discovered skills still match, CodexPro returns an ambiguity error instead of guessing. `workspace_snapshot` stays narrower by default for speed. In `--tool-mode full`, use `codexpro_inventory` for global/user/plugin skills and MCP server names. `codexpro_inventory` reports names/descriptions and sanitized paths only; it does not expose MCP command arguments or environment values.
 
 ## Codex-style context
 
