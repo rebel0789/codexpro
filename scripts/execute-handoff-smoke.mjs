@@ -103,4 +103,66 @@ if (!app.includes('implemented with local/test-model: yes')) {
   throw new Error(`fake agent did not edit app.txt\n${app}`);
 }
 
-console.log('✓ execute-handoff smoke test passed');
+const watchRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-watch-handoff-'));
+await fs.mkdir(path.join(watchRoot, '.ai-bridge'), { recursive: true });
+await fs.writeFile(path.join(watchRoot, '.ai-bridge', 'current-plan.md'), '# Current Plan\n\nNo plan written yet.\n', 'utf8');
+await fs.writeFile(path.join(watchRoot, 'app.txt'), 'start\n', 'utf8');
+await fs.writeFile(path.join(watchRoot, 'watch-agent.mjs'), `
+import fs from 'node:fs';
+
+const taskIndex = process.argv.indexOf('--task-file');
+if (taskIndex < 0) throw new Error('missing --task-file');
+const plan = fs.readFileSync(process.argv[taskIndex + 1], 'utf8');
+fs.appendFileSync('app.txt', \`watch implemented: \${plan.split('\\n')[0]}\\n\`);
+console.log('watch agent completed');
+`, 'utf8');
+requireSuccess(spawnSync('git', ['init'], { cwd: watchRoot, encoding: 'utf8' }), 'watch git init');
+requireSuccess(spawnSync('git', ['add', 'app.txt'], { cwd: watchRoot, encoding: 'utf8' }), 'watch git add');
+
+const watchCommand = [
+  'watch-handoff',
+  '--root',
+  watchRoot,
+  '--agent',
+  'custom',
+  '--command',
+  `${process.execPath} watch-agent.mjs --task-file {{plan_file}}`,
+  '--once',
+  '--yes',
+  '--debounce-ms',
+  '0'
+];
+
+requireSuccess(run(watchCommand), 'watch-handoff scaffold skip');
+let watchApp = await fs.readFile(path.join(watchRoot, 'app.txt'), 'utf8');
+if (watchApp !== 'start\n') {
+  throw new Error(`watch executed scaffolded empty plan\n${watchApp}`);
+}
+
+await fs.writeFile(path.join(watchRoot, '.ai-bridge', 'current-plan.md'), '# Watch plan 1\n\nAppend watch marker.\n', 'utf8');
+requireSuccess(run(watchCommand), 'watch-handoff first run');
+watchApp = await fs.readFile(path.join(watchRoot, 'app.txt'), 'utf8');
+if ((watchApp.match(/watch implemented/g) ?? []).length !== 1) {
+  throw new Error(`watch first run did not execute exactly once\n${watchApp}`);
+}
+
+requireSuccess(run(watchCommand), 'watch-handoff duplicate skip');
+watchApp = await fs.readFile(path.join(watchRoot, 'app.txt'), 'utf8');
+if ((watchApp.match(/watch implemented/g) ?? []).length !== 1) {
+  throw new Error(`watch duplicate plan was executed again\n${watchApp}`);
+}
+
+await fs.writeFile(path.join(watchRoot, '.ai-bridge', 'current-plan.md'), '# Watch plan 2\n\nAppend second watch marker.\n', 'utf8');
+requireSuccess(run(watchCommand), 'watch-handoff changed plan');
+watchApp = await fs.readFile(path.join(watchRoot, 'app.txt'), 'utf8');
+if ((watchApp.match(/watch implemented/g) ?? []).length !== 2 || !watchApp.includes('# Watch plan 2')) {
+  throw new Error(`watch changed plan did not execute\n${watchApp}`);
+}
+
+const watchState = await fs.readFile(path.join(watchRoot, '.ai-bridge', 'watch-handoff-state.json'), 'utf8');
+const watchLog = await fs.readFile(path.join(watchRoot, '.ai-bridge', 'execution-log.jsonl'), 'utf8');
+if (!watchState.includes('lastPlanHash') || !watchLog.includes('"event":"watch_handoff_started"') || !watchLog.includes('"event":"watch_handoff_finished"')) {
+  throw new Error(`watch did not write state/log\nstate:\n${watchState}\nlog:\n${watchLog}`);
+}
+
+console.log('✓ execute-handoff and watch-handoff smoke test passed');

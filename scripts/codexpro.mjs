@@ -22,6 +22,7 @@ Usage:
   codexpro settings
   codexpro doctor
   codexpro execute-handoff --agent opencode --model provider/model
+  codexpro watch-handoff --agent opencode --model provider/model
   codexpro --root /path/to/repo
   codexpro ngrok --hostname your-domain.ngrok-free.dev
   codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
@@ -95,6 +96,16 @@ Execute handoff options:
   --context-dir <dir>       Handoff directory. Default: .ai-bridge.
   --yes                     Run without interactive confirmation.
 
+Watch handoff options:
+  codexpro watch-handoff --agent opencode --model provider/model
+  codexpro watch-handoff --agent pi --model provider/model
+  codexpro watch-handoff --agent custom --command "my-agent --task-file {{plan_file}}"
+  --once                    Exit after checking/running one new plan.
+  --poll-interval-ms <ms>   Poll interval. Default: 2000.
+  --debounce-ms <ms>        Wait for plan file stability. Default: 500.
+  --state-file <path>       Watch state file. Default: .ai-bridge/watch-handoff-state.json.
+  --yes                     Start automatic local execution without startup confirmation.
+
 Default agent mode:
   codexpro start --root /path/to/repo
 
@@ -122,6 +133,10 @@ Execute a local handoff after ChatGPT writes .ai-bridge/current-plan.md:
   codexpro execute-handoff --agent opencode --model provider/model
   codexpro execute-handoff --agent pi --model provider/model
   codexpro execute-handoff --agent custom --command "node ./agent.js --task-file {{plan_file}}" --yes
+
+Watch for new handoff plans and execute them locally:
+  codexpro watch-handoff --agent opencode --model provider/model --yes
+  codexpro watch-handoff --agent custom --command "node ./agent.js --task-file {{plan_file}}" --yes
 
 Stable URL mode after one-time Cloudflare tunnel setup:
   codexpro stable --root /path/to/repo --hostname codexpro.example.com --tunnel-name codexpro
@@ -231,6 +246,9 @@ function parseArgs(argv) {
     else if (key === 'copy-url') out.copyUrl = true;
     else if (key === 'no-copy-url') out.noCopyUrl = true;
     else if (key === 'dry-run') out.dryRun = true;
+    else if (key === 'once') out.once = true;
+    else if (key === 'confirm') out.confirm = true;
+    else if (key === 'no-confirm') out.noConfirm = true;
     else if (key === 'open-chatgpt') out.openChatgpt = true;
     else if (key === 'no-profile') out.noProfile = true;
     else if (key === 'save-config') out.saveConfig = true;
@@ -1130,12 +1148,7 @@ async function confirmLocalExecution(args, root, commandInfo) {
   }
 }
 
-async function runExecuteHandoff(argv) {
-  const args = parseArgs(argv);
-  if (args.help) {
-    usage();
-    return;
-  }
+function loadHandoffExecution(args) {
   const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
   const contextDir = contextDirFromArgs(args);
   const bridgeDir = resolveWorkspaceFile(root, contextDir);
@@ -1149,42 +1162,252 @@ async function runExecuteHandoff(argv) {
   const planText = readTextFileBounded(planPath, maxReadBytes);
   const commandInfo = buildExecutorCommand(args, root, planPath, planText);
   const commandText = executorCommandPreview(commandInfo);
+  return {
+    root,
+    contextDir,
+    bridgeDir,
+    planPath,
+    planText,
+    commandInfo,
+    commandText,
+    maxOutputBytes,
+    timeoutMs
+  };
+}
 
-  if (args.dryRun) {
-    printBox('CodexPro execute-handoff dry run', [
-      labelValue('Workspace', root),
-      labelValue('Plan', path.relative(root, planPath)),
-      labelValue('Agent', commandInfo.agent),
-      ...(commandInfo.model ? [labelValue('Model', commandInfo.model)] : []),
-      labelValue('Command', commandText),
-      'No command was executed and no .ai-bridge result files were changed.'
-    ]);
-    return;
-  }
+function printHandoffDryRun(request, title = 'CodexPro execute-handoff dry run') {
+  printBox(title, [
+    labelValue('Workspace', request.root),
+    labelValue('Plan', path.relative(request.root, request.planPath)),
+    labelValue('Agent', request.commandInfo.agent),
+    ...(request.commandInfo.model ? [labelValue('Model', request.commandInfo.model)] : []),
+    labelValue('Command', request.commandText),
+    'No command was executed and no .ai-bridge result files were changed.'
+  ]);
+}
 
-  const confirmed = await confirmLocalExecution(args, root, commandInfo);
+async function executeHandoffRequest(request, args, options = {}) {
+  const confirmed = options.skipConfirmation ? true : await confirmLocalExecution(args, request.root, request.commandInfo);
   if (!confirmed) {
     statusLine('warn', 'Execution cancelled.');
+    return { cancelled: true, result: null, outputs: null };
+  }
+
+  if (!commandAvailableFromRoot(request.commandInfo.command, request.root)) {
+    throw new Error(`${request.commandInfo.command} was not found. Install it, add it to PATH, pass an absolute path, or use --command.`);
+  }
+
+  statusLine('wait', `Running ${request.commandInfo.agent}: ${request.commandText}`);
+  const result = await runProcessCaptured(request.commandInfo.command, request.commandInfo.args, {
+    cwd: request.root,
+    timeoutMs: request.timeoutMs,
+    maxOutputBytes: request.maxOutputBytes
+  });
+  const diffText = readGitDiff(request.root, request.maxOutputBytes);
+  const outputs = writeExecutionOutputs(request.root, request.contextDir, request.commandInfo, result, diffText);
+  statusLine(result.exitCode === 0 ? 'ok' : 'warn', `Agent exited with code ${result.exitCode ?? 'null'}${result.signal ? ` signal=${result.signal}` : ''}`);
+  console.log(`Status: ${path.relative(request.root, outputs.statusPath)}`);
+  console.log(`Diff:   ${path.relative(request.root, outputs.diffPath)}`);
+  console.log(`Log:    ${path.relative(request.root, outputs.logPath)}`);
+  return { cancelled: false, result, outputs };
+}
+
+async function runExecuteHandoff(argv) {
+  const args = parseArgs(argv);
+  if (args.help) {
+    usage();
+    return;
+  }
+  const request = loadHandoffExecution(args);
+
+  if (args.dryRun) {
+    printHandoffDryRun(request);
     return;
   }
 
-  if (!commandAvailableFromRoot(commandInfo.command, root)) {
-    throw new Error(`${commandInfo.command} was not found. Install it, add it to PATH, pass an absolute path, or use --command.`);
+  const execution = await executeHandoffRequest(request, args);
+  if (execution.result?.exitCode && execution.result.exitCode !== 0) process.exitCode = execution.result.exitCode;
+}
+
+function planHash(planText) {
+  return createHash('sha256').update(planText).digest('hex');
+}
+
+function isScaffoldedHandoffPlan(planText) {
+  return String(planText).trim() === '# Current Plan\n\nNo plan written yet.';
+}
+
+function readWatchState(statePath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeWatchState(statePath, state) {
+  fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
+function appendBridgeLog(root, contextDir, event) {
+  const bridgeDir = resolveWorkspaceFile(root, contextDir);
+  fs.mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
+  const logPath = path.join(bridgeDir, 'execution-log.jsonl');
+  fs.appendFileSync(logPath, `${JSON.stringify({ ts: new Date().toISOString(), ...event })}\n`, { mode: 0o600 });
+}
+
+async function waitForStablePlan(planPath, debounceMs) {
+  try {
+    const before = fs.statSync(planPath);
+    await sleep(debounceMs);
+    const after = fs.statSync(planPath);
+    return before.isFile() && after.isFile() && before.size === after.size && before.mtimeMs === after.mtimeMs;
+  } catch {
+    return false;
+  }
+}
+
+async function confirmWatchHandoff(args, root) {
+  if (args.yes || args.noConfirm) return true;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('Use --yes to start watch-handoff in non-interactive shells.');
+  }
+  printBox('Confirm handoff watcher', [
+    labelValue('Workspace', root),
+    labelValue('Agent', args.agent ?? 'opencode'),
+    ...(args.model ? [labelValue('Model', args.model)] : []),
+    'This starts a local-only watcher. Each new .ai-bridge/current-plan.md hash runs through the configured local agent.',
+    'ChatGPT only writes the handoff plan; this terminal-owned process performs execution.'
+  ]);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await ask(rl, 'Start automatic local handoff execution?', 'no');
+    return ['y', 'yes'].includes(answer.trim().toLowerCase());
+  } finally {
+    rl.close();
+  }
+}
+
+async function runWatchHandoff(argv) {
+  const args = parseArgs(argv);
+  if (args.help) {
+    usage();
+    return;
+  }
+  const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
+  const contextDir = contextDirFromArgs(args);
+  const bridgeDir = resolveWorkspaceFile(root, contextDir);
+  const planPath = path.join(bridgeDir, 'current-plan.md');
+  const statePath = resolveWorkspaceFile(root, args.stateFile ?? path.posix.join(contextDir, 'watch-handoff-state.json'));
+  const pollIntervalMs = numberOption(args.pollIntervalMs ?? args.pollInterval, 2000, 250, 60_000);
+  const debounceMs = numberOption(args.debounceMs, 500, 0, 30_000);
+  let state = readWatchState(statePath);
+  let lastDryRunHash = state.lastPlanHash ?? '';
+  let lastSkippedHash = '';
+  let stopped = false;
+
+  if (!args.dryRun) {
+    const approved = await confirmWatchHandoff(args, root);
+    if (!approved) {
+      statusLine('warn', 'Watcher cancelled.');
+      return;
+    }
   }
 
-  statusLine('wait', `Running ${commandInfo.agent}: ${commandText}`);
-  const result = await runProcessCaptured(commandInfo.command, commandInfo.args, {
-    cwd: root,
-    timeoutMs,
-    maxOutputBytes
-  });
-  const diffText = readGitDiff(root, maxOutputBytes);
-  const outputs = writeExecutionOutputs(root, contextDir, commandInfo, result, diffText);
-  statusLine(result.exitCode === 0 ? 'ok' : 'warn', `Agent exited with code ${result.exitCode ?? 'null'}${result.signal ? ` signal=${result.signal}` : ''}`);
-  console.log(`Status: ${path.relative(root, outputs.statusPath)}`);
-  console.log(`Diff:   ${path.relative(root, outputs.diffPath)}`);
-  console.log(`Log:    ${path.relative(root, outputs.logPath)}`);
-  if (result.exitCode && result.exitCode !== 0) process.exitCode = result.exitCode;
+  printBox('CodexPro watch-handoff', [
+    labelValue('Workspace', root),
+    labelValue('Plan', path.relative(root, planPath)),
+    labelValue('State', path.relative(root, statePath)),
+    labelValue('Agent', args.agent ?? 'opencode'),
+    ...(args.model ? [labelValue('Model', args.model)] : []),
+    labelValue('Poll', `${pollIntervalMs} ms`),
+    labelValue('Debounce', `${debounceMs} ms`),
+    args.once ? 'Mode: check once and exit.' : 'Mode: watching until Ctrl+C.'
+  ]);
+
+  const stop = () => {
+    stopped = true;
+    statusLine('warn', 'Stopping handoff watcher...');
+  };
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  while (!stopped) {
+    if (!fs.existsSync(planPath)) {
+      if (args.once) throw new Error(`No handoff plan found at ${path.relative(root, planPath)}.`);
+      await sleep(pollIntervalMs);
+      continue;
+    }
+
+    const stable = await waitForStablePlan(planPath, debounceMs);
+    if (!stable) {
+      if (args.once) throw new Error(`Handoff plan did not become stable at ${path.relative(root, planPath)}.`);
+      await sleep(pollIntervalMs);
+      continue;
+    }
+
+    const request = loadHandoffExecution({ ...args, root, contextDir });
+    const currentHash = planHash(request.planText);
+    if (isScaffoldedHandoffPlan(request.planText)) {
+      if (lastSkippedHash !== currentHash) statusLine('wait', 'Ignoring scaffolded empty handoff plan.');
+      lastSkippedHash = currentHash;
+      if (args.once) return;
+      await sleep(pollIntervalMs);
+      continue;
+    }
+    if (state.lastPlanHash === currentHash || lastDryRunHash === currentHash) {
+      statusLine(args.once ? 'ok' : 'wait', `No new handoff plan: ${currentHash.slice(0, 12)}`);
+      if (args.once) return;
+      await sleep(pollIntervalMs);
+      continue;
+    }
+
+    if (args.dryRun) {
+      printHandoffDryRun(request, 'CodexPro watch-handoff dry run');
+      lastDryRunHash = currentHash;
+      if (args.once) return;
+      await sleep(pollIntervalMs);
+      continue;
+    }
+
+    appendBridgeLog(root, contextDir, {
+      event: 'watch_handoff_started',
+      plan_hash: currentHash,
+      agent: request.commandInfo.agent,
+      model: request.commandInfo.model || undefined,
+      plan_path: path.posix.join(contextDir, 'current-plan.md')
+    });
+
+    const execution = await executeHandoffRequest(request, { ...args, yes: true }, { skipConfirmation: true });
+    const exitCode = execution.result?.exitCode ?? null;
+    state = {
+      lastPlanHash: currentHash,
+      lastRanAt: new Date().toISOString(),
+      agent: request.commandInfo.agent,
+      model: request.commandInfo.model || undefined,
+      exitCode,
+      planPath: path.posix.join(contextDir, 'current-plan.md')
+    };
+    writeWatchState(statePath, state);
+    appendBridgeLog(root, contextDir, {
+      event: 'watch_handoff_finished',
+      plan_hash: currentHash,
+      agent: request.commandInfo.agent,
+      model: request.commandInfo.model || undefined,
+      exit_code: exitCode,
+      status_path: path.posix.join(contextDir, 'agent-status.md'),
+      diff_path: path.posix.join(contextDir, 'implementation-diff.patch')
+    });
+
+    if (args.once) {
+      if (exitCode && exitCode !== 0) process.exitCode = exitCode;
+      return;
+    }
+
+    await sleep(pollIntervalMs);
+  }
 }
 
 function createConnectorDetails(endpoint, token, localBase = '') {
@@ -2034,6 +2257,10 @@ async function main() {
   }
   if (subcommand === 'execute-handoff' || subcommand === 'execute' || subcommand === 'run-handoff') {
     await runExecuteHandoff(argv.slice(1));
+    return;
+  }
+  if (subcommand === 'watch-handoff' || subcommand === 'watch') {
+    await runWatchHandoff(argv.slice(1));
     return;
   }
   if (subcommand === 'pro-bundle' || subcommand === 'bundle') {

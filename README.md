@@ -120,6 +120,41 @@ ChatGPT can do MCP-backed agentic coding in your local repo, while Codex remains
 Local-only companion command:
 
 - `codexpro execute-handoff` — run a previously written `.ai-bridge/current-plan.md` through a local agent, then collect status, logs, and git diff. This is intentionally a CLI command, not a remote MCP tool.
+- `codexpro watch-handoff` — watch `.ai-bridge/current-plan.md` locally and run a new plan through a configured agent when its content hash changes. This is also CLI-only and is not exposed as a remote MCP tool.
+
+The watcher is the safer way to automate handoff execution from ChatGPT Web. ChatGPT writes the plan through `handoff_to_agent`; the user-started local watcher notices the new plan and runs Pi, OpenCode, Codex, or a restricted custom command from the terminal:
+
+```bash
+codexpro start --mode handoff
+codexpro watch-handoff --agent opencode --model provider/model --yes
+```
+
+For custom local agents:
+
+```bash
+codexpro watch-handoff \
+  --agent custom \
+  --command "node ./agent.js --task-file {{plan_file}}" \
+  --yes
+```
+
+Useful watcher flags:
+
+```text
+--once                  check one new plan and exit
+--dry-run               show the command without executing it
+--poll-interval-ms 2000 polling interval
+--debounce-ms 500       wait for the plan file to become stable
+--state-file <path>     duplicate-run state, default .ai-bridge/watch-handoff-state.json
+```
+
+The watcher writes the same review files as `execute-handoff`:
+
+```text
+.ai-bridge/agent-status.md
+.ai-bridge/implementation-diff.patch
+.ai-bridge/execution-log.jsonl
+```
 
 ## Visual ChatGPT cards
 
