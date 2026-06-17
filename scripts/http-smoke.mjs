@@ -182,13 +182,13 @@ try {
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);
   const queryToolNames = toolNames(queryTools);
-  for (const expected of ['server_config', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'codex_context', 'handoff_to_codex', 'export_pro_context']) {
+  for (const expected of ['server_config', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
     }
   }
   const toolCardUri = 'ui://widget/codexpro-tool-card-v5.html';
-  for (const visualTool of ['write', 'edit', 'export_pro_context', 'handoff_to_codex']) {
+  for (const visualTool of ['write', 'edit', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
     if (!hasWidgetMeta(queryTools, visualTool, toolCardUri)) {
       throw new Error(`${visualTool} should render the CodexPro widget`);
     }

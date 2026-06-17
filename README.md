@@ -64,7 +64,7 @@ What it gives you:
 
 ```text
 Normal coding mode  ChatGPT reads, writes, edits, searches, and verifies directly.
-Handoff mode        ChatGPT writes .ai-bridge/current-plan.md for Codex to execute.
+Handoff mode        ChatGPT writes .ai-bridge/current-plan.md for a local implementation agent.
 Pro planning mode   Export a durable context bundle for sessions that cannot call MCP tools.
 Stable URLs         Use an ngrok free dev domain or Cloudflare named tunnel so the ChatGPT app URL stays fixed.
 ```
@@ -110,7 +110,8 @@ CodexPro does not bypass, increase, or modify ChatGPT, Codex, or OpenAI rate lim
 - `read_handoff` — read `.ai-bridge` files.
 - `codex_context` — load Codex-style context in one call: AGENTS instructions for a target path, `.ai-bridge` files, and optional git status/diff.
 - `export_pro_context` — write `.ai-bridge/pro-context.md` for models that cannot call MCP tools directly.
-- `handoff_to_codex` — write `.ai-bridge/current-plan.md` and append `.ai-bridge/session-log.jsonl`.
+- `handoff_to_agent` — write `.ai-bridge/current-plan.md` for Codex, OpenCode, Pi, or a custom local implementation agent without executing local commands.
+- `handoff_to_codex` — compatibility wrapper for `handoff_to_agent` with `agent=codex`.
 
 ## Visual ChatGPT cards
 
@@ -436,6 +437,23 @@ codexpro start \
   --tunnel cloudflare
 ```
 
+In handoff mode, ChatGPT can create a plan for a local implementation agent without getting direct source-write access. Use `handoff_to_agent` from ChatGPT with `agent=opencode`, `agent=pi`, `agent=codex`, or a custom agent id. CodexPro writes:
+
+```text
+.ai-bridge/current-plan.md
+.ai-bridge/agent-status.md
+.ai-bridge/implementation-diff.patch
+.ai-bridge/execution-log.jsonl
+```
+
+Then run your local agent manually against `.ai-bridge/current-plan.md`, for example:
+
+```bash
+opencode run --model provider/cheap-model "$(cat .ai-bridge/current-plan.md)"
+```
+
+Have the implementation agent update `.ai-bridge/agent-status.md`, write the final review diff to `.ai-bridge/implementation-diff.patch` when practical, and then let ChatGPT review those files through `read_handoff` or `codex_context`.
+
 For debugging whether ChatGPT is actually reaching the local server, add:
 
 ```bash
@@ -492,9 +510,12 @@ Then it adds:
 
 ```text
 .ai-bridge/current-plan.md
+.ai-bridge/agent-status.md
+.ai-bridge/implementation-diff.patch
 .ai-bridge/codex-status.md
 .ai-bridge/decisions.md
 .ai-bridge/open-questions.md
+.ai-bridge/execution-log.jsonl
 git status
 optional git diff
 ```
@@ -561,7 +582,7 @@ codexpro pro-bundle \
   --copy
 ```
 
-Paste the bundle into any model that cannot call MCP tools directly and ask it to produce a narrow Codex plan. Save the returned plan to a file, then apply it:
+Paste the bundle into any model that cannot call MCP tools directly and ask it to produce a narrow implementation plan. Save the returned plan to a file, then apply it:
 
 ```bash
 codexpro pro-apply --root /absolute/path/to/your/repo --file plan.md
@@ -579,7 +600,7 @@ That writes:
 .ai-bridge/current-plan.md
 ```
 
-Then run Codex with the normal handoff prompt.
+Then run Codex, OpenCode, Pi, or another local implementation agent against `.ai-bridge/current-plan.md`.
 
 ## Cloudflare options
 
@@ -834,7 +855,7 @@ Example MCP config:
 `CODEXPRO_WRITE_MODE=workspace` is the default normal coding mode. Use `handoff` when you want planning-only behavior and do not want ChatGPT to edit source files directly.
 
 ```text
-off        write/edit tools are disabled; handoff_to_codex still writes .ai-bridge/current-plan.md
+off        write/edit tools are disabled; handoff_to_agent and handoff_to_codex still write .ai-bridge/current-plan.md
 handoff    write/edit can only write inside .ai-bridge/
 workspace  write/edit can write workspace files, except blocked paths
 ```
@@ -897,15 +918,15 @@ Call codexpro_inventory only when you need local skill or MCP server names.
 
 Act as a coding agent. Inspect the relevant files, make the requested source edits with write/edit, then verify with search/read/bash and git_diff or git_status when useful.
 
-Keep changes scoped to the request. Do not use handoff_to_codex unless I explicitly ask for planning-only handoff.
+Keep changes scoped to the request. Do not use handoff_to_agent or handoff_to_codex unless I explicitly ask for planning-only handoff.
 ```
 
-## Prompt for Codex
+## Prompt for a local agent
 
 ```text
 Read .ai-bridge/current-plan.md and execute it in small, reviewable steps.
 
-After each meaningful change, update .ai-bridge/codex-status.md with:
+After each meaningful change, update .ai-bridge/agent-status.md with:
 
 - what changed
 - files touched
@@ -914,7 +935,7 @@ After each meaningful change, update .ai-bridge/codex-status.md with:
 - blockers or questions
 - what ChatGPT or another reviewer should review next
 
-Keep .ai-bridge/decisions.md aligned with implementation choices. Do not overwrite .ai-bridge/current-plan.md unless asked.
+Keep .ai-bridge/decisions.md aligned with implementation choices. Save the final review diff to .ai-bridge/implementation-diff.patch when practical. Do not overwrite .ai-bridge/current-plan.md unless asked.
 ```
 
 ## Demo prompt matching the screenshots
@@ -944,7 +965,7 @@ Narrate which CodexPro tool you are using before each call.
 2. Connect the printed endpoint in ChatGPT Developer Mode.
 3. Ask ChatGPT to inspect the repo, edit files directly, and verify the work with search/read/bash/git tools.
 4. If your chosen ChatGPT model cannot call tools, run `codexpro pro-bundle --root /repo --copy`, paste the bundle into that model, then apply its plan with `codexpro pro-apply --root /repo --file plan.md`.
-5. Use `codexpro start --mode handoff` only when you want ChatGPT to write `.ai-bridge/current-plan.md` for Codex instead of editing source files itself.
+5. Use `codexpro start --mode handoff` only when you want ChatGPT to write `.ai-bridge/current-plan.md` for Codex, OpenCode, Pi, or another local implementation agent instead of editing source files itself.
 
 ## Development
 

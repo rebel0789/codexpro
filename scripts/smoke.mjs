@@ -80,7 +80,7 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'read', 'write', 'edit', 'bash', 'codex_context', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['server_config', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'read', 'write', 'edit', 'bash', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
 const toolCardUri = 'ui://widget/codexpro-tool-card-v5.html';
@@ -99,7 +99,7 @@ async function expectToolError(name, args, pattern) {
     throw new Error(`${name} error did not match ${pattern}: ${text}`);
   }
 }
-for (const visualTool of ['write', 'edit', 'export_pro_context', 'handoff_to_codex']) {
+for (const visualTool of ['write', 'edit', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
   if (!hasWidgetMeta(visualTool)) throw new Error(`${visualTool} should render the CodexPro widget`);
 }
 for (const quietTool of ['server_config', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'read', 'bash', 'git_status', 'git_diff', 'read_handoff', 'codex_context']) {
@@ -148,6 +148,26 @@ await expectToolError('bash', { workspace_id: ws, command: 'ls $HOME' }, /blocke
 const exported = await client.request('tools/call', { name: 'export_pro_context', arguments: { workspace_id: ws, selected_paths: ['demo.txt'], max_files: 4, max_total_bytes: 80000 } });
 if (exported.structuredContent.path !== '.ai-bridge/pro-context.md') throw new Error('export_pro_context wrote an unexpected path');
 await fs.stat(path.join(tmp, '.ai-bridge', 'pro-context.md'));
-await client.request('tools/call', { name: 'handoff_to_codex', arguments: { workspace_id: ws, title: 'Smoke plan', plan: '- Verify demo.txt contains write.' } });
+const agentHandoff = await client.request('tools/call', {
+  name: 'handoff_to_agent',
+  arguments: {
+    workspace_id: ws,
+    agent: 'opencode',
+    model: 'provider/cheap-model',
+    title: 'Smoke agent plan',
+    plan: '- Verify demo.txt contains write.'
+  }
+});
+if (agentHandoff.structuredContent.agent !== 'opencode') throw new Error('handoff_to_agent did not preserve target agent');
+for (const bridgeFile of ['agent-status.md', 'implementation-diff.patch', 'execution-log.jsonl']) {
+  await fs.stat(path.join(tmp, '.ai-bridge', bridgeFile));
+}
+const handoffContext = await client.request('tools/call', { name: 'read_handoff', arguments: { workspace_id: ws } });
+for (const expectedFile of ['.ai-bridge/agent-status.md', '.ai-bridge/implementation-diff.patch', '.ai-bridge/execution-log.jsonl']) {
+  if (!handoffContext.structuredContent.files.includes(expectedFile)) {
+    throw new Error(`read_handoff did not include ${expectedFile}`);
+  }
+}
+await client.request('tools/call', { name: 'handoff_to_codex', arguments: { workspace_id: ws, title: 'Smoke Codex plan', plan: '- Verify demo.txt contains write.', append: true } });
 client.close();
 console.log('✓ smoke test passed');

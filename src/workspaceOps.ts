@@ -179,16 +179,19 @@ export async function readAiBridgeContext(
     const bridgeDir = guard.resolve(workspace, config.contextDir);
     if (!fs.existsSync(bridgeDir.absPath)) {
       return {
-        text: `No ${config.contextDir} handoff context exists yet. Use handoff_to_codex to create it when a plan is ready.`,
+        text: `No ${config.contextDir} handoff context exists yet. Use handoff_to_agent or handoff_to_codex to create it when a plan is ready.`,
         files: []
       };
     }
   }
   const relFiles = [
     `${config.contextDir}/current-plan.md`,
+    `${config.contextDir}/agent-status.md`,
+    `${config.contextDir}/implementation-diff.patch`,
     `${config.contextDir}/codex-status.md`,
     `${config.contextDir}/decisions.md`,
-    `${config.contextDir}/open-questions.md`
+    `${config.contextDir}/open-questions.md`,
+    `${config.contextDir}/execution-log.jsonl`
   ];
   const chunks: string[] = [];
   const files: string[] = [];

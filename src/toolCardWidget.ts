@@ -317,6 +317,7 @@ export const toolCardWidgetHtml = String.raw`
       edit: "Edit File",
       git_diff: "Git Diff",
       export_pro_context: "Pro Context",
+      handoff_to_agent: "Agent Handoff",
       handoff_to_codex: "Codex Handoff",
       bash: "Terminal",
       search: "Search",
@@ -330,6 +331,7 @@ export const toolCardWidgetHtml = String.raw`
     if (tool === "edit") return "E";
     if (tool === "git_diff") return "G";
     if (tool === "export_pro_context") return "P";
+    if (tool === "handoff_to_agent") return "A";
     if (tool === "handoff_to_codex") return "H";
     if (tool === "bash") return "$";
     if (tool === "search") return "S";
@@ -450,7 +452,7 @@ export const toolCardWidgetHtml = String.raw`
       return;
     }
     const tool = data.codexpro_tool;
-    if (tool === "write" || tool === "edit" || tool === "git_diff" || tool === "export_pro_context" || tool === "handoff_to_codex" || tool === "read") {
+    if (tool === "write" || tool === "edit" || tool === "git_diff" || tool === "export_pro_context" || tool === "handoff_to_agent" || tool === "handoff_to_codex" || tool === "read") {
       root.innerHTML = renderFile(data);
     } else if (tool === "bash") {
       root.innerHTML = renderBash(data);

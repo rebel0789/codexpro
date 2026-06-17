@@ -32,5 +32,9 @@ const currentPlan = await fs.readFile(path.join(root, '.ai-bridge', 'current-pla
 if (!currentPlan.includes('Smoke Pro Plan') || !currentPlan.includes('Inspect demo.txt')) {
   throw new Error('pro apply did not write expected current-plan content');
 }
+const executionLog = await fs.readFile(path.join(root, '.ai-bridge', 'execution-log.jsonl'), 'utf8');
+if (!executionLog.includes('"event":"pro_apply"')) {
+  throw new Error('pro apply did not append execution-log event');
+}
 
 console.log('✓ pro CLI smoke test passed');

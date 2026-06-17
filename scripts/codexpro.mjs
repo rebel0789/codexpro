@@ -38,7 +38,7 @@ Options:
   --mode <agent|handoff|pro>
                              Default: agent.
                              agent = ChatGPT can read, write/edit files, search, and run safe bash.
-                             handoff = ChatGPT writes .ai-bridge plans for Codex to execute.
+                             handoff = ChatGPT writes .ai-bridge plans for a local implementation agent.
                              pro = export context for models that cannot call MCP tools.
   --agent                   Shortcut for --mode agent.
   --handoff                 Shortcut for --mode handoff.

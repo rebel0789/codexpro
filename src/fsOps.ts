@@ -319,11 +319,14 @@ export async function editTextFile(
 
 export async function ensureAiBridge(config: CodexProConfig, guard: PathGuard, workspace: Workspace): Promise<string[]> {
   const files: Record<string, string> = {
-    "README.md": `# AI Bridge\n\nShared planning context for ChatGPT, other planning models, and Codex.\n\n- current-plan.md: plan produced by ChatGPT or another planning model for Codex to execute.\n- codex-status.md: implementation notes and test results from Codex.\n- decisions.md: architectural decisions that should remain stable.\n- open-questions.md: unresolved questions.\n- session-log.jsonl: append-only session events.\n`,
+    "README.md": `# AI Bridge\n\nShared planning context for ChatGPT, other planning models, Codex, OpenCode, Pi, or another local implementation agent.\n\n- current-plan.md: plan produced by ChatGPT or another planning model for the implementation agent.\n- agent-status.md: generic implementation notes, touched files, test results, blockers, and review notes.\n- implementation-diff.patch: final review diff from the implementation agent when practical.\n- codex-status.md: legacy Codex-specific status file, kept for existing workflows.\n- decisions.md: architectural decisions that should remain stable.\n- open-questions.md: unresolved questions.\n- execution-log.jsonl: append-only generic agent handoff and execution events.\n- session-log.jsonl: append-only legacy session events.\n`,
     "current-plan.md": "# Current Plan\n\nNo plan written yet.\n",
+    "agent-status.md": "# Agent Status\n\nNo implementation agent status written yet.\n",
+    "implementation-diff.patch": "",
     "codex-status.md": "# Codex Status\n\nNo Codex status written yet.\n",
     "decisions.md": "# Decisions\n\n",
     "open-questions.md": "# Open Questions\n\n",
+    "execution-log.jsonl": "",
     "session-log.jsonl": ""
   };
   const created: string[] = [];

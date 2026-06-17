@@ -5,7 +5,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 function usage() {
-  console.log(`Apply a planning-model response to the Codex handoff file
+  console.log(`Apply a planning-model response to the agent handoff file
 
 Usage:
   codexpro pro-apply --root /path/to/repo --file plan.md
@@ -110,17 +110,22 @@ async function main() {
   });
 
   const logRel = `${config.contextDir}/session-log.jsonl`;
+  const executionLogRel = `${config.contextDir}/execution-log.jsonl`;
   const logResolved = guard.resolve(workspace, logRel, { forWrite: true });
-  await fsp.appendFile(logResolved.absPath, jsonlEvent('pro_apply', {
+  const executionLogResolved = guard.resolve(workspace, executionLogRel, { forWrite: true });
+  const event = jsonlEvent('pro_apply', {
     plan_path: planPath,
     source_file: args.file ? path.resolve(args.file) : 'stdin',
     append: Boolean(args.append)
-  }), 'utf8');
+  });
+  await fsp.appendFile(logResolved.absPath, event, 'utf8');
+  await fsp.appendFile(executionLogResolved.absPath, event, 'utf8');
 
   console.log(`Wrote ${path.join(workspace.root, planPath)}`);
   console.log(`Bytes: ${result.bytes}`);
   console.log(`Diff stats: +${result.diff.additions} -${result.diff.deletions}`);
   console.log(`Session log: ${path.join(workspace.root, logRel)}`);
+  console.log(`Execution log: ${path.join(workspace.root, executionLogRel)}`);
 }
 
 main().catch((error) => {

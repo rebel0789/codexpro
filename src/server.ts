@@ -3,7 +3,7 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CodexProConfig } from "./config.js";
-import { WorkspaceManager, PathGuard, CodexProError } from "./guard.js";
+import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./guard.js";
 import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge } from "./fsOps.js";
 import { searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
@@ -117,10 +117,10 @@ function assertWriteToolAllowed(config: CodexProConfig, relPath: string): void {
   if (config.writeMode === "handoff") {
     throw new CodexProError(
       `Source writes are disabled because CODEXPRO_WRITE_MODE=handoff. ` +
-        `Use handoff_to_codex, or write/edit only inside ${config.contextDir}/.`
+        `Use handoff_to_agent or handoff_to_codex, or write/edit only inside ${config.contextDir}/.`
     );
   }
-  throw new CodexProError("write/edit tools are disabled because CODEXPRO_WRITE_MODE=off. handoff_to_codex is still available for planning.");
+  throw new CodexProError("write/edit tools are disabled because CODEXPRO_WRITE_MODE=off. handoff_to_agent and handoff_to_codex are still available for planning.");
 }
 
 function registerToolCompat(
@@ -186,6 +186,167 @@ function jsonlEvent(event: string, data: Record<string, unknown>): string {
   return JSON.stringify({ ts: new Date().toISOString(), event, ...data }) + "\n";
 }
 
+function cleanOneLine(value: unknown, fallback: string, maxLength = 120): string {
+  const text = String(value ?? "").replace(/\s+/g, " ").trim();
+  return (text || fallback).slice(0, maxLength);
+}
+
+function normalizeAgentId(value: unknown): string {
+  const agent = cleanOneLine(value, "custom", 64).toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/.test(agent)) {
+    throw new CodexProError("agent must use only lowercase letters, numbers, dots, underscores, or hyphens.");
+  }
+  return agent;
+}
+
+function displayAgentName(agent: string, agentName?: unknown): string {
+  const explicit = cleanOneLine(agentName, "", 80);
+  if (explicit) return explicit;
+  if (agent === "codex") return "Codex";
+  if (agent === "opencode") return "OpenCode";
+  if (agent === "pi") return "Pi";
+  return agent;
+}
+
+function agentCommandHint(agent: string, planPath: string, model?: string): string {
+  const modelArg = model ? ` --model ${model}` : " --model <provider/model>";
+  if (agent === "opencode") return `opencode run${modelArg} "$(cat ${planPath})"`;
+  if (agent === "pi") return `pi run${modelArg} "$(cat ${planPath})"`;
+  if (agent === "codex") return `Read ${planPath} and execute it in small, reviewable steps.`;
+  return `Run your local implementation agent manually with ${planPath} as the task input.`;
+}
+
+function buildAgentPlanBody(options: {
+  title: string;
+  plan: string;
+  workspace: Workspace;
+  agent: string;
+  agentName: string;
+  model?: string;
+  statusPath: string;
+  diffPath: string;
+  executionLogPath: string;
+}): string {
+  const modelLine = options.model ? `Model: ${options.model}\n` : "";
+  return `# ${options.title}
+
+Updated: ${new Date().toISOString()}
+Workspace: ${options.workspace.root}
+Target agent: ${options.agentName} (${options.agent})
+${modelLine}
+## Plan
+
+${options.plan.trim()}
+
+## Implementation contract
+
+- Work from this plan in small, reviewable steps.
+- Keep edits scoped to the requested task and existing project conventions.
+- Run focused verification before handing work back.
+- Update ${options.statusPath} with files touched, checks run, results, blockers, and review notes.
+- Save the final review diff to ${options.diffPath} when practical.
+- Append notable execution events to ${options.executionLogPath} when the implementation agent supports logging.
+`;
+}
+
+async function writeAgentHandoff(
+  config: CodexProConfig,
+  guard: PathGuard,
+  workspace: Workspace,
+  options: {
+    agent: string;
+    agentName?: string;
+    model?: string;
+    title: string;
+    plan: string;
+    append: boolean;
+    eventName: string;
+  }
+): Promise<{
+  agent: string;
+  agentName: string;
+  model?: string;
+  title: string;
+  planPath: string;
+  statusPath: string;
+  diffPath: string;
+  logPath: string;
+  executionLogPath: string;
+  prompt: string;
+  writeResult: Awaited<ReturnType<typeof writeTextFile>>;
+}> {
+  await ensureAiBridge(config, guard, workspace);
+  const agent = normalizeAgentId(options.agent);
+  const agentName = displayAgentName(agent, options.agentName);
+  const model = options.model ? cleanOneLine(options.model, "", 120) : undefined;
+  const plan = String(options.plan ?? "").trim();
+  if (!plan) throw new CodexProError("plan must not be empty.");
+  const planPath = `${config.contextDir}/current-plan.md`;
+  const statusPath = `${config.contextDir}/agent-status.md`;
+  const legacyCodexStatusPath = `${config.contextDir}/codex-status.md`;
+  const diffPath = `${config.contextDir}/implementation-diff.patch`;
+  const logPath = `${config.contextDir}/session-log.jsonl`;
+  const executionLogPath = `${config.contextDir}/execution-log.jsonl`;
+  const body = buildAgentPlanBody({
+    title: options.title,
+    plan,
+    workspace,
+    agent,
+    agentName,
+    model,
+    statusPath,
+    diffPath,
+    executionLogPath
+  });
+
+  let content = body;
+  if (options.append) {
+    const resolved = guard.resolve(workspace, planPath);
+    const raw = await fsp.readFile(resolved.absPath, "utf8");
+    content = `${raw.trimEnd()}\n\n---\n\n${body}`;
+  }
+
+  const writeResult = await writeTextFile(config, guard, workspace, planPath, content, { createDirs: true, overwrite: true });
+  const event = {
+    agent,
+    agent_name: agentName,
+    model,
+    title: options.title,
+    plan_path: planPath,
+    status_path: statusPath,
+    diff_path: diffPath
+  };
+  const logResolved = guard.resolve(workspace, logPath, { forWrite: true });
+  const executionLogResolved = guard.resolve(workspace, executionLogPath, { forWrite: true });
+  await fsp.appendFile(logResolved.absPath, jsonlEvent(options.eventName, event), "utf8");
+  await fsp.appendFile(executionLogResolved.absPath, jsonlEvent(options.eventName, event), "utf8");
+
+  const promptLines = [
+    `Read ${planPath} and execute it in small, reviewable steps.`,
+    `After each meaningful change, update ${statusPath} with files touched, checks run, results, blockers, and the next review focus.`,
+    `Before review, write the final diff to ${diffPath} when practical.`,
+    agentCommandHint(agent, planPath, model)
+  ];
+  if (agent === "codex") {
+    promptLines.splice(2, 0, `For legacy Codex handoffs, mirror key status notes to ${legacyCodexStatusPath} if your workflow expects that file.`);
+  }
+  const prompt = promptLines.join("\n");
+
+  return {
+    agent,
+    agentName,
+    model,
+    title: options.title,
+    planPath,
+    statusPath,
+    diffPath,
+    logPath,
+    executionLogPath,
+    prompt,
+    writeResult
+  };
+}
+
 const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destructiveHint: false };
 const SESSION_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
@@ -214,7 +375,7 @@ function getSharedWorkspaceManager(config: CodexProConfig): WorkspaceManager {
 export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = getSharedWorkspaceManager(config);
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.27.0" });
+  const server = new McpServer({ name: "CodexPro", version: "0.27.2" });
   registerToolCardResource(server);
 
   registerToolCompat(
@@ -364,7 +525,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         max_depth: z.number().int().min(1).max(8).optional().describe("Tree depth. Default: 3."),
         include_skills: z.boolean().optional().describe("Discover repo-local skills. Default: false for speed."),
         include_global_skills: z.boolean().optional().describe("Also scan home-level skill folders when include_skills=true. Default: false."),
-        bootstrap_context: z.boolean().optional().describe("Deprecated and ignored. Use handoff_to_codex to create .ai-bridge files.")
+        bootstrap_context: z.boolean().optional().describe("Deprecated and ignored. Use handoff_to_agent to create .ai-bridge files.")
       },
       annotations: SESSION_READ_ANNOTATIONS,
       _meta: {
@@ -691,14 +852,14 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     "read_handoff",
     {
       title: "Read Handoff",
-      description: "Read the shared .ai-bridge planning files used for ChatGPT-to-Codex coordination.",
+      description: "Read the shared .ai-bridge planning files used for ChatGPT-to-agent coordination.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
-        "openai/toolInvocation/invoking": "Reading Codex handoff context...",
-        "openai/toolInvocation/invoked": "Codex handoff context ready"
+        "openai/toolInvocation/invoking": "Reading agent handoff context...",
+        "openai/toolInvocation/invoked": "Agent handoff context ready"
       }
     },
     async (args) => {
@@ -718,7 +879,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         target_path: z.string().optional().describe("Workspace-relative file or directory whose AGENTS instruction chain should be loaded. Default: ."),
-        include_ai_bridge: z.boolean().optional().describe("Include .ai-bridge/current-plan.md, codex-status.md, decisions.md, and open-questions.md. Default: true."),
+        include_ai_bridge: z.boolean().optional().describe("Include .ai-bridge plan, agent status, diff, decisions, questions, and execution log. Default: true."),
         include_git: z.boolean().optional().describe("Include git status. Default: true."),
         include_diff: z.boolean().optional().describe("Include full git diff. Default: false for speed/noise."),
         max_agent_bytes: z.number().int().min(1000).max(200000).optional().describe("Maximum bytes per AGENTS file. Default: 60000.")
@@ -804,10 +965,77 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
 
   registerToolCompat(
     server,
+    "handoff_to_agent",
+    {
+      title: "Handoff To Agent",
+      description:
+        "Write .ai-bridge/current-plan.md for Codex, OpenCode, Pi, or another local implementation agent. This only creates handoff files; it does not execute local agent commands.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
+        agent: z.string().optional().describe("Target agent id, for example codex, opencode, pi, or custom. Default: custom."),
+        agent_name: z.string().optional().describe("Human-readable agent name for custom agents."),
+        model: z.string().optional().describe("Optional model identifier to include in the handoff plan."),
+        title: z.string().optional().describe("Short task title."),
+        plan: z.string().describe("Detailed implementation plan for the local agent."),
+        append: z.boolean().optional().describe("Append to existing current-plan.md instead of overwriting. Default: false.")
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Writing agent handoff plan...",
+        "openai/toolInvocation/invoked": "Agent handoff plan written"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const result = await writeAgentHandoff(config, guard, workspace, {
+        agent: args.agent ?? "custom",
+        agentName: args.agent_name,
+        model: args.model,
+        title: cleanOneLine(args.title, "Agent implementation plan"),
+        plan: String(args.plan ?? ""),
+        append: parseBool(args.append, false),
+        eventName: "handoff_to_agent"
+      });
+
+      const text = `# Handoff To Agent
+
+Agent: ${result.agentName} (${result.agent})
+${result.model ? `Model: ${result.model}\n` : ""}Wrote ${result.planPath}.
+Status path: ${result.statusPath}
+Diff path: ${result.diffPath}
+Execution log: ${result.executionLogPath}
+Diff stats: +${result.writeResult.diff.additions} -${result.writeResult.diff.deletions}
+
+Agent prompt:
+
+\`\`\`text
+${result.prompt}
+\`\`\`${diffBlock(result.writeResult.diff.diff)}`;
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        agent: result.agent,
+        agent_name: result.agentName,
+        model: result.model,
+        plan_path: result.planPath,
+        status_path: result.statusPath,
+        diff_path: result.diffPath,
+        log_path: result.logPath,
+        execution_log_path: result.executionLogPath,
+        additions: result.writeResult.diff.additions,
+        deletions: result.writeResult.diff.deletions,
+        diff: result.writeResult.diff.diff
+      });
+    }
+  );
+
+  registerToolCompat(
+    server,
     "handoff_to_codex",
     {
       title: "Handoff To Codex",
-      description: "Write .ai-bridge/current-plan.md and append a session-log entry so Codex can execute the plan.",
+      description: "Compatibility wrapper for handoff_to_agent with agent=codex.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         title: z.string().optional().describe("Short task title."),
@@ -823,34 +1051,38 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      await ensureAiBridge(config, guard, workspace);
-      const title = String(args.title ?? "Codex implementation plan");
-      const body = `# ${title}\n\nUpdated: ${new Date().toISOString()}\nWorkspace: ${workspace.root}\n\n${String(args.plan ?? "").trim()}\n`;
-      const planPath = `${config.contextDir}/current-plan.md`;
-      let content = body;
-      if (parseBool(args.append, false)) {
-        const current = await readTextFile(config, guard, workspace, planPath, { maxBytes: config.maxReadBytes });
-        content = `${current.text}\n\n---\n\n${body}`;
-        // current.text is line-numbered, so for append mode use raw file content instead.
-        const resolved = guard.resolve(workspace, planPath);
-        const raw = await fsp.readFile(resolved.absPath, "utf8");
-        content = `${raw.trimEnd()}\n\n---\n\n${body}`;
-      }
-      const writeResult = await writeTextFile(config, guard, workspace, planPath, content, { createDirs: true, overwrite: true });
+      const result = await writeAgentHandoff(config, guard, workspace, {
+        agent: "codex",
+        title: cleanOneLine(args.title, "Codex implementation plan"),
+        plan: String(args.plan ?? ""),
+        append: parseBool(args.append, false),
+        eventName: "handoff_to_codex"
+      });
+      const text = `# Handoff To Codex
 
-      const logRel = `${config.contextDir}/session-log.jsonl`;
-      const logResolved = guard.resolve(workspace, logRel, { forWrite: true });
-      await fsp.appendFile(logResolved.absPath, jsonlEvent("handoff_to_codex", { title, plan_path: planPath }), "utf8");
+Wrote ${result.planPath}.
+Status path: ${result.statusPath}
+Diff path: ${result.diffPath}
+Diff stats: +${result.writeResult.diff.additions} -${result.writeResult.diff.deletions}
 
-      const text = `# Handoff To Codex\n\nWrote ${planPath}.\nDiff stats: +${writeResult.diff.additions} -${writeResult.diff.deletions}\n\nCodex prompt:\n\n\`\`\`text\nRead ${planPath} and execute it in small, reviewable steps. After each meaningful change, update ${config.contextDir}/codex-status.md with files touched, tests run, results, blockers, and the next GPT review focus.\n\`\`\`${diffBlock(writeResult.diff.diff)}`;
+Codex prompt:
+
+\`\`\`text
+${result.prompt}
+\`\`\`${diffBlock(result.writeResult.diff.diff)}`;
       return textResult(text, {
         workspace_id: workspace.id,
         root: workspace.root,
-        plan_path: planPath,
-        log_path: logRel,
-        additions: writeResult.diff.additions,
-        deletions: writeResult.diff.deletions,
-        diff: writeResult.diff.diff
+        agent: result.agent,
+        agent_name: result.agentName,
+        plan_path: result.planPath,
+        status_path: result.statusPath,
+        diff_path: result.diffPath,
+        log_path: result.logPath,
+        execution_log_path: result.executionLogPath,
+        additions: result.writeResult.diff.additions,
+        deletions: result.writeResult.diff.deletions,
+        diff: result.writeResult.diff.diff
       });
     }
   );
