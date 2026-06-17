@@ -12,16 +12,17 @@ import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./works
 import { exportProContext } from "./proContext.js";
 import { codexproInventory } from "./capabilitiesOps.js";
 import { TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
+import { redactSensitiveText, redactStructured } from "./redact.js";
 
 function errorText(error: unknown): string {
-  if (error instanceof Error) return `${error.name}: ${error.message}`;
-  return String(error);
+  if (error instanceof Error) return redactSensitiveText(`${error.name}: ${error.message}`);
+  return redactSensitiveText(String(error));
 }
 
 function textResult(text: string, structuredContent: Record<string, unknown> = {}, meta: Record<string, unknown> = {}): any {
   return {
-    content: [{ type: "text", text }],
-    structuredContent,
+    content: [{ type: "text", text: redactSensitiveText(text) }],
+    structuredContent: redactStructured(structuredContent),
     _meta: meta
   };
 }

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
+import { redactSensitiveText } from "./redact.js";
 
 export interface BashResult {
   command: string;
@@ -214,8 +215,8 @@ export async function runBash(
       if (killedByTimeout) {
         stderr += `\n[codexpro] Command timed out after ${timeoutMs} ms.`;
       }
-      const out = trimOutput(stdout, config.maxOutputBytes);
-      const err = trimOutput(stderr, config.maxOutputBytes);
+      const out = trimOutput(redactSensitiveText(stdout), config.maxOutputBytes);
+      const err = trimOutput(redactSensitiveText(stderr), config.maxOutputBytes);
       resolve({
         command,
         cwd: path.relative(workspace.root, cwd) || ".",

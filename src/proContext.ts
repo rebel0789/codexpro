@@ -8,6 +8,7 @@ import { CodexProError, PathGuard, normalizeRelPath } from "./guard.js";
 import { listFiles, readTextFile, repoTree, writeTextFile, ensureAiBridge } from "./fsOps.js";
 import { gitDiff, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext } from "./workspaceOps.js";
+import { redactSensitiveText } from "./redact.js";
 
 export interface ProContextOptions {
   title?: string;
@@ -297,6 +298,7 @@ export async function exportProContext(
 ): Promise<ProContextResult> {
   await ensureAiBridge(config, guard, workspace);
   const built = await buildProContext(config, guard, workspace, options);
+  built.markdown = redactSensitiveText(built.markdown);
   const relPath = `${config.contextDir}/pro-context.md`;
   const write = await writeTextFile(config, guard, workspace, relPath, built.markdown, {
     createDirs: true,

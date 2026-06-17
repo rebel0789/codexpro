@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
+import { redactSensitiveText } from "./redact.js";
 
 function runGit(workspace: Workspace, args: string[], maxOutputBytes: number): string {
   const result = spawnSync("git", args, {
@@ -18,7 +19,7 @@ function runGit(workspace: Workspace, args: string[], maxOutputBytes: number): s
     const stdout = result.stdout?.trim() || "";
     return stderr || stdout || `git exited with status ${result.status}`;
   }
-  return result.stdout.trim() || "(no output)";
+  return redactSensitiveText(result.stdout.trim() || "(no output)");
 }
 
 export function gitStatus(config: CodexProConfig, workspace: Workspace): string {
@@ -26,7 +27,7 @@ export function gitStatus(config: CodexProConfig, workspace: Workspace): string 
 }
 
 export function gitDiff(config: CodexProConfig, guard: PathGuard, workspace: Workspace, filePath?: string, staged = false): string {
-  const args = ["diff", "--no-color"];
+  const args = ["diff", "--no-color", "--no-ext-diff", "--no-textconv"];
   if (staged) args.push("--staged");
   if (filePath?.trim()) {
     const resolved = guard.resolve(workspace, filePath);

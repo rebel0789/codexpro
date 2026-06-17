@@ -5,6 +5,7 @@ import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { listFiles } from "./fsOps.js";
+import { redactSensitiveText } from "./redact.js";
 
 export interface SearchOptions {
   query: string;
@@ -70,7 +71,7 @@ async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: W
         const rel = path.relative(workspace.root, absPath).split(path.sep).join("/");
         if (rel.startsWith("..")) continue;
         if (guard.isBlockedRelativePath(rel)) continue;
-        matches.push({ path: rel || ".", line: Number(match[2]), text: truncateLine(match[3]) });
+        matches.push({ path: rel || ".", line: Number(match[2]), text: redactSensitiveText(truncateLine(match[3])) });
         if (matches.length >= options.maxResults) break;
       }
       const text = matches.map((m) => `${m.path}:${m.line}: ${m.text}`).join("\n") || "No matches.";
@@ -101,7 +102,7 @@ async function runNodeSearch(config: CodexProConfig, guard: PathGuard, workspace
         const line = lines[i];
         const hit = matcher ? matcher.test(line) : line.includes(options.query);
         if (hit) {
-          matches.push({ path: rel, line: i + 1, text: truncateLine(line) });
+          matches.push({ path: rel, line: i + 1, text: redactSensitiveText(truncateLine(line)) });
           if (matches.length >= options.maxResults) break;
         }
       }

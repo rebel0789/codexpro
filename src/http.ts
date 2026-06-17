@@ -293,7 +293,46 @@ async function main(): Promise<void> {
   });
   app.use(express.json({ limit: "20mb" }));
 
-  const transports: Record<string, StreamableHTTPServerTransport> = {};
+  type TransportRecord = {
+    transport: StreamableHTTPServerTransport;
+    createdAt: number;
+    lastSeenAt: number;
+  };
+
+  const transports = new Map<string, TransportRecord>();
+  const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function closeTransport(record: TransportRecord): void {
+    void record.transport.close?.();
+  }
+
+  function pruneTransports(): void {
+    const now = Date.now();
+    for (const [sessionId, record] of transports) {
+      if (now - record.lastSeenAt > config.httpSessionTtlMs) {
+        transports.delete(sessionId);
+        closeTransport(record);
+      }
+    }
+    while (transports.size > config.maxHttpSessions) {
+      const oldest = [...transports.entries()].sort((a, b) => a[1].lastSeenAt - b[1].lastSeenAt)[0];
+      if (!oldest) break;
+      transports.delete(oldest[0]);
+      closeTransport(oldest[1]);
+    }
+  }
+
+  function getTransport(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
+    if (!sessionId || !sessionIdPattern.test(sessionId)) return undefined;
+    pruneTransports();
+    const record = transports.get(sessionId);
+    if (!record) return undefined;
+    record.lastSeenAt = Date.now();
+    return record.transport;
+  }
+
+  const pruneTimer = setInterval(pruneTransports, Math.min(config.httpSessionTtlMs, 60_000));
+  pruneTimer.unref();
 
   app.get("/", (_req, res) => {
     res.type("html").send(onboardingPage(config));
@@ -322,19 +361,26 @@ async function main(): Promise<void> {
       const sessionId = req.headers["mcp-session-id"] as string | undefined;
       let transport: StreamableHTTPServerTransport;
 
-      if (sessionId && transports[sessionId]) {
-        transport = transports[sessionId];
+      const existingTransport = getTransport(sessionId);
+      if (existingTransport) {
+        transport = existingTransport;
       } else if (!sessionId && isInitializeRequest(req.body)) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
-            transports[newSessionId] = transport;
+            pruneTransports();
+            transports.set(newSessionId, {
+              transport,
+              createdAt: Date.now(),
+              lastSeenAt: Date.now()
+            });
+            pruneTransports();
           }
         } as any);
 
         (transport as any).onclose = () => {
           const closedSessionId = (transport as any).sessionId;
-          if (closedSessionId) delete transports[closedSessionId];
+          if (closedSessionId) transports.delete(closedSessionId);
         };
 
         const server = createCodexProServer(config);
@@ -363,11 +409,11 @@ async function main(): Promise<void> {
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = req.headers["mcp-session-id"] as string | undefined;
-    if (!sessionId || !transports[sessionId]) {
+    const transport = getTransport(sessionId);
+    if (!transport) {
       res.status(400).send("Invalid or missing MCP session id");
       return;
     }
-    const transport = transports[sessionId];
     await transport.handleRequest(req, res);
   };
 

@@ -6,6 +6,7 @@ import { minimatch } from "minimatch";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, displayPath, normalizeRelPath, PathGuard } from "./guard.js";
+import { hasSecretValue, redactSensitiveText } from "./redact.js";
 
 export interface TreeOptions {
   path?: string;
@@ -96,7 +97,7 @@ export function makeUnifiedDiff(oldText: string, newText: string, relPath: strin
   if (diff.length > maxChars) {
     diff = diff.slice(0, maxChars) + `\n...[diff truncated to ${maxChars} chars]`;
   }
-  return { diff, additions, deletions, changed: true };
+  return { diff: redactSensitiveText(diff), additions, deletions, changed: true };
 }
 
 function isHiddenName(name: string): boolean {
@@ -241,6 +242,9 @@ export async function writeTextFile(
   if (contentBytes > config.maxWriteBytes) {
     throw new CodexProError(`Write content is too large (${contentBytes} bytes). Limit: ${config.maxWriteBytes} bytes.`);
   }
+  if (hasSecretValue(content)) {
+    throw new CodexProError("Secret-looking content is blocked from write. Use placeholders such as [REDACTED_SECRET] in handoff files.");
+  }
 
   let oldText = "";
   let existed = false;
@@ -303,6 +307,9 @@ export async function editTextFile(
   const afterBytes = Buffer.byteLength(after, "utf8");
   if (afterBytes > config.maxWriteBytes) {
     throw new CodexProError(`Edited file would be too large (${afterBytes} bytes). Limit: ${config.maxWriteBytes} bytes.`);
+  }
+  if (hasSecretValue(after)) {
+    throw new CodexProError("Secret-looking content is blocked from edit. Use placeholders such as [REDACTED_SECRET] in handoff files.");
   }
 
   const diff = makeUnifiedDiff(before, after, resolved.relPath);
