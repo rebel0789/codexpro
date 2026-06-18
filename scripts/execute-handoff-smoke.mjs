@@ -126,7 +126,7 @@ const watchCommand = [
   '--agent',
   'custom',
   '--command',
-  `${process.execPath} watch-agent.mjs --task-file {{plan_file}}`,
+  `${quoteArg(process.execPath)} watch-agent.mjs --task-file {{plan_file}}`,
   '--once',
   '--yes',
   '--debounce-ms',
