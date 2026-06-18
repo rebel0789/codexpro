@@ -19,6 +19,8 @@ Options:
   --max-files <n>           Maximum file contents to include. Default: 24.
   --max-file-bytes <n>      Maximum bytes per included file. Default: 60000.
   --max-total-bytes <n>     Maximum bytes in .ai-bridge/pro-context.md.
+  --no-important-files      Do not auto-include root config/docs such as AGENTS.md, README.md, package.json.
+  --no-changed-files        Do not auto-include currently changed files from git status.
   --no-diff                 Do not include git diff.
   --no-ai-bridge            Do not include existing .ai-bridge files.
   --copy                    Copy generated context to the macOS clipboard with pbcopy.
@@ -34,6 +36,8 @@ function parseArgs(argv) {
     const key = raw.slice(2);
     if (key === 'help') out.help = true;
     else if (key === 'copy') out.copy = true;
+    else if (key === 'no-important-files') out.noImportantFiles = true;
+    else if (key === 'no-changed-files') out.noChangedFiles = true;
     else if (key === 'no-diff') out.noDiff = true;
     else if (key === 'no-ai-bridge') out.noAiBridge = true;
     else {
@@ -84,6 +88,8 @@ async function main() {
     title: args.title,
     selectedPaths: args.paths,
     extraGlobs: args.globs,
+    includeImportantFiles: !args.noImportantFiles,
+    includeChangedFiles: !args.noChangedFiles,
     includeDiff: !args.noDiff,
     includeAiBridge: !args.noAiBridge,
     maxFiles: numberArg(args.maxFiles),

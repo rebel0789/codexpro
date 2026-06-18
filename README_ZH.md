@@ -78,11 +78,11 @@ ChatGPT Web 可以操作：
   ChatGPT 回看执行结果和 diff
 ```
 
-默认 `CODEXPRO_TOOL_MODE=standard`，只暴露常用编码循环、`show_changes`、上下文导出和 handoff。演示时可以用 `--tool-mode minimal`，需要完整兼容工具时用 `--tool-mode full`。
+默认 `CODEXPRO_TOOL_MODE=standard`，只暴露常用编码循环、`codexpro_self_test`、`show_changes`、上下文导出和 handoff。演示时可以用 `--tool-mode minimal`，需要完整兼容工具时用 `--tool-mode full`。
 
 默认工具数量较少是故意的：ChatGPT 面对少量高信号工具时更稳定。workspace open 仍会发现已安装的 user/plugin skills，并可用 `load_skill` 按名称、source 和显示出的 path 加载需要的 `SKILL.md`；如果仍有重名匹配，CodexPro 会报歧义错误，不会随便选一个，也不会把几十个 skill 变成单独 action。
 
-ChatGPT 里只有关键动作会显示卡片：open workspace 项目摘要、write/edit diff、`show_changes` 审查和 handoff 导出。workspace 卡片默认紧凑，git、skills 和 tree 放在可展开详情里。bash 只用于测试、构建、lint、typecheck 等验证命令，并保持纯数据，避免刷屏。`CODEXPRO_WIDGET_DOMAIN` 用于设置 ChatGPT widget iframe 的专用 HTTPS origin，正式提交 app 前应换成你控制的独立域名。
+ChatGPT 里每个 CodexPro 工具都可以显示紧凑 v9 卡片：server config、自测、workspace 摘要、读写 diff、bash 验证、git/tree/search/context 和 handoff/export 都有结构化视图。git、skills、tree、terminal 输出、context 和 raw diff 默认折叠或截断，避免在聊天里刷出大段原始数据。`CODEXPRO_WIDGET_DOMAIN` 用于设置 ChatGPT widget iframe 的专用 HTTPS origin，正式提交 app 前应换成你控制的独立域名。
 
 ## 快速开始
 
@@ -317,6 +317,8 @@ git status
 推荐流程：
 
 ```text
+先调用 server_config 和 codexpro_self_test
+如果 self-test 失败，先停下来报告失败项
 先调用 open_current_workspace，include_tree=false
 再调用 codex_context，target_path 指向要改的文件，include_diff=false
 然后只读取当前任务需要的文件

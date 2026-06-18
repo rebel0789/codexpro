@@ -149,7 +149,7 @@ export async function workspaceSummary(
   config: CodexProConfig,
   guard: PathGuard,
   workspace: Workspace,
-  options: { includeTree?: boolean; maxDepth?: number; bootstrapContext?: boolean; includeSkills?: boolean; includeGlobalSkills?: boolean } = {}
+  options: { includeTree?: boolean; maxDepth?: number; maxEntries?: number; bootstrapContext?: boolean; includeSkills?: boolean; includeGlobalSkills?: boolean } = {}
 ): Promise<WorkspaceSummary> {
   if (options.bootstrapContext) {
     await ensureAiBridge(config, guard, workspace);
@@ -171,7 +171,7 @@ export async function workspaceSummary(
       path: ".",
       maxDepth: Math.max(1, Math.min(options.maxDepth ?? 3, 8)),
       includeHidden: false,
-      maxEntries: 500
+      maxEntries: Math.max(1, Math.min(options.maxEntries ?? 500, 3000))
     });
     treeText = tree.text;
   }

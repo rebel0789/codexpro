@@ -1,4 +1,4 @@
-export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v8.html";
+export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v9.html";
 export const TOOL_CARD_MIME_TYPE = "text/html;profile=mcp-app";
 
 export const toolCardWidgetHtml = String.raw`
@@ -447,12 +447,22 @@ export const toolCardWidgetHtml = String.raw`
 
   function titleFor(tool) {
     const titles = {
+      server_config: "Server config",
+      codexpro_self_test: "Self-test",
+      codexpro_inventory: "Inventory",
+      load_skill: "Skill",
+      list_workspaces: "Workspaces",
       open_current_workspace: "Workspace",
       open_workspace: "Workspace",
+      workspace_snapshot: "Workspace snapshot",
+      tree: "File tree",
       write: "File write",
       edit: "Exact edit",
+      git_status: "Git Status",
       git_diff: "Git Diff",
       show_changes: "Change review",
+      read_handoff: "Handoff context",
+      codex_context: "Codex context",
       export_pro_context: "Pro context",
       handoff_to_agent: "Agent handoff",
       handoff_to_codex: "Codex handoff",
@@ -464,11 +474,20 @@ export const toolCardWidgetHtml = String.raw`
   }
 
   function iconFor(tool) {
+    if (tool === "server_config") return "S";
+    if (tool === "codexpro_self_test") return "T";
+    if (tool === "codexpro_inventory") return "I";
+    if (tool === "load_skill") return "L";
+    if (tool === "list_workspaces") return "W";
     if (tool === "open_current_workspace" || tool === "open_workspace") return "W";
+    if (tool === "workspace_snapshot") return "W";
+    if (tool === "tree") return "T";
     if (tool === "write") return "W";
     if (tool === "edit") return "E";
-    if (tool === "git_diff") return "G";
+    if (tool === "git_status" || tool === "git_diff") return "G";
     if (tool === "show_changes") return "D";
+    if (tool === "read_handoff") return "H";
+    if (tool === "codex_context") return "C";
     if (tool === "export_pro_context") return "P";
     if (tool === "handoff_to_agent") return "A";
     if (tool === "handoff_to_codex") return "H";
@@ -488,6 +507,18 @@ export const toolCardWidgetHtml = String.raw`
       if (!count && !data?.changed) return "Workspace is clean";
       return count === 1 ? "1 changed file" : count + " changed files";
     }
+    if (data?.codexpro_tool === "codexpro_self_test") return data?.status ? "Status " + data.status : "Local diagnostic";
+    if (data?.codexpro_tool === "codexpro_inventory") return (data?.skill_count ?? 0) + " skills, " + (data?.mcp_server_count ?? 0) + " MCP servers";
+    if (data?.codexpro_tool === "list_workspaces") return (data?.count ?? 0) + " open workspaces";
+    if (data?.codexpro_tool === "server_config") return "tools " + (data?.toolMode || data?.tool_mode || "-") + ", bash " + (data?.bashMode || data?.bash_mode || "-");
+    if (data?.codexpro_tool === "workspace_snapshot") return data?.root || "Workspace snapshot";
+    if (data?.codexpro_tool === "git_status") {
+      const count = Array.isArray(data?.changed_files) ? data.changed_files.length : 0;
+      return count ? count + " changed entries" : "Working tree clean";
+    }
+    if (data?.codexpro_tool === "codex_context") return (data?.agents_files?.length ?? 0) + " AGENTS, " + (data?.ai_context_files?.length ?? 0) + " bridge files";
+    if (data?.codexpro_tool === "read_handoff") return (data?.file_count ?? 0) + " bridge files";
+    if (data?.codexpro_tool === "load_skill" && data?.skill?.name) return data.skill.name;
     if (data?.codexpro_tool === "handoff_to_agent" && data?.agent_name) return data.agent_name;
     if (data?.path) return data.path;
     if (data?.plan_path) return data.plan_path;
@@ -702,6 +733,130 @@ export const toolCardWidgetHtml = String.raw`
       '<div class="body"><div class="search">' + hits + '</div></div></article>';
   }
 
+  function renderSelfTest(data) {
+    const checks = Array.isArray(data.checks) ? data.checks : [];
+    const status = String(data.status || "unknown");
+    const pills = [
+      pill(status, status === "pass" ? "good" : status === "fail" ? "bad" : "warn"),
+      pill((data.expected_tool_count ?? "-") + " tools", "info"),
+      pill((data.duration_ms ?? "-") + " ms")
+    ].join("");
+    const rows = checks.slice(0, 16).map((check) => {
+      const state = String(check?.status || "?").toUpperCase();
+      const cls = check?.status === "pass" ? "good" : check?.status === "fail" ? "bad" : "warn";
+      return '<div class="file-row"><span class="file-code ' + esc(cls) + '">' + esc(state) + '</span><span class="file-name">' + esc((check?.name || "check") + ": " + (check?.detail || "")) + '</span></div>';
+    }).join("");
+    const terms = data.terms_boundary
+      ? '<div class="file-list">' +
+          '<div class="file-row"><span class="file-code">tos</span><span class="file-name">local repo bridge only; no model access, quota, resale, or bypass behavior</span></div>' +
+        '</div>'
+      : "";
+    return '<article class="card">' + header(data, pills) + '<div class="body">' +
+      '<div class="summary">' +
+      summaryItem("Passed", data.passed ?? 0) +
+      summaryItem("Warned", data.warned ?? 0) +
+      summaryItem("Failed", data.failed ?? 0) +
+      '</div>' +
+      '<div class="file-list">' + (rows || '<div class="empty">No checks returned.</div>') + '</div>' +
+      fold("Terms boundary", "", terms, false) +
+      fold("Expected tools", Array.isArray(data.expected_tools) ? data.expected_tools.length + " tools" : "", codebox("tools", esc((data.expected_tools || []).join("\\n")), ""), false) +
+      '</div></article>';
+  }
+
+  function renderInventory(data) {
+    const skills = Array.isArray(data.skills) ? data.skills : [];
+    const servers = Array.isArray(data.mcp_servers) ? data.mcp_servers : [];
+    const skillRows = skills.slice(0, 18).map((skill) =>
+      '<div class="file-row"><span class="file-code">' + esc(shortSource(skill?.source)) + '</span><span class="file-name">' + esc((skill?.name || "skill") + (skill?.description ? " — " + skill.description : "")) + '</span></div>'
+    ).join("");
+    const serverRows = servers.slice(0, 18).map((server) =>
+      '<div class="file-row"><span class="file-code">mcp</span><span class="file-name">' + esc((server?.name || "server") + (server?.source ? " — " + server.source : "")) + '</span></div>'
+    ).join("");
+    return '<article class="card">' + header(data, pill((data.skill_count ?? skills.length) + " skills", "info") + pill((data.mcp_server_count ?? servers.length) + " MCP")) +
+      '<div class="body">' +
+      '<div class="summary">' +
+      summaryItem("Write", data.write_mode || "-") +
+      summaryItem("Bash", data.bash_mode || "-") +
+      summaryItem("Tools", data.tool_mode || "-") +
+      '</div>' +
+      fold("Skills", (data.skill_count ?? skills.length) + " found", '<div class="file-list">' + (skillRows || '<div class="empty">No skills discovered.</div>') + '</div>', false) +
+      fold("MCP servers", (data.mcp_server_count ?? servers.length) + " found", '<div class="file-list">' + (serverRows || '<div class="empty">No MCP server names discovered.</div>') + '</div>', false) +
+      '</div></article>';
+  }
+
+  function renderWorkspaces(data) {
+    const spaces = Array.isArray(data.workspaces) ? data.workspaces : [];
+    const rows = spaces.map((workspace) =>
+      '<div class="file-row"><span class="file-code">ws</span><span class="file-name">' + esc((workspace?.id || "workspace") + " — " + (workspace?.root || "")) + '</span></div>'
+    ).join("");
+    return '<article class="card">' + header(data, pill((data.count ?? spaces.length) + " open", "info")) +
+      '<div class="body"><div class="file-list">' + (rows || '<div class="empty">No workspaces opened yet.</div>') + '</div></div></article>';
+  }
+
+  function renderServerConfig(data) {
+    const blocked = Array.isArray(data.blockedGlobs) ? data.blockedGlobs : [];
+    const allowed = Array.isArray(data.allowedRoots) ? data.allowedRoots : [];
+    const rootRows = [
+      '<div class="file-row"><span class="file-code">root</span><span class="file-name">' + esc(data.defaultRoot || "-") + '</span></div>',
+      '<div class="file-row"><span class="file-code">url</span><span class="file-name">' + esc((data.host || "127.0.0.1") + ":" + (data.port || "-")) + '</span></div>',
+      '<div class="file-row"><span class="file-code">ui</span><span class="file-name">' + esc(data.widgetDomain || "-") + '</span></div>'
+    ].join("");
+    const allowedRows = allowed.map((root) =>
+      '<div class="file-row"><span class="file-code">allow</span><span class="file-name">' + esc(root) + '</span></div>'
+    ).join("");
+    const blockedRows = blocked.slice(0, 24).map((pattern) =>
+      '<div class="file-row"><span class="file-code">block</span><span class="file-name">' + esc(pattern) + '</span></div>'
+    ).join("");
+    const limits = [
+      summaryItem("Read", data.maxReadBytes ?? "-"),
+      summaryItem("Write", data.maxWriteBytes ?? "-"),
+      summaryItem("Output", data.maxOutputBytes ?? "-")
+    ].join("");
+    return '<article class="card">' + header(data, [
+      pill("tools " + (data.toolMode || "-"), "info"),
+      pill("bash " + (data.bashMode || "-")),
+      pill(data.authEnabled ? "auth on" : "auth off", data.authEnabled ? "good" : "warn")
+    ].join("")) + '<div class="body">' +
+      '<div class="summary">' +
+      summaryItem("Write", data.writeMode || "-") +
+      summaryItem("Bash", data.bashMode || "-") +
+      summaryItem("Tools", data.toolMode || "-") +
+      '</div>' +
+      '<div class="section-label">Runtime</div><div class="file-list">' + rootRows + '</div>' +
+      fold("Allowed roots", allowed.length + " roots", '<div class="file-list">' + (allowedRows || '<div class="empty">No roots configured.</div>') + '</div>', false) +
+      fold("Limits", "", '<div class="summary">' + limits + '</div>', false) +
+      fold("Blocked paths", blocked.length + " patterns", '<div class="file-list">' + (blockedRows || '<div class="empty">No blocked globs configured.</div>') + '</div>', false) +
+      fold("Raw config", "", codebox("config", esc(truncate(JSON.stringify(data || {}, null, 2), 8000)), ""), false) +
+      '</div></article>';
+  }
+
+  function renderStatus(data) {
+    const files = Array.isArray(data.changed_files) ? data.changed_files : [];
+    const rows = files.slice(0, 14).map((line) => {
+      const status = String(line).slice(0, 2).trim() || "?";
+      const name = String(line).slice(2).trim() || String(line);
+      return '<div class="file-row"><span class="file-code">' + esc(status) + '</span><span class="file-name">' + esc(name) + '</span></div>';
+    }).join("");
+    const state = data.status_error ? '<div class="empty">' + esc(data.status_error) + '</div>' : rows || '<div class="empty">Working tree clean.</div>';
+    return '<article class="card">' + header(data, pill(files.length ? files.length + " changed" : "clean", files.length ? "info" : "good")) +
+      '<div class="body"><div class="file-list">' + state + '</div>' +
+      fold("Raw status", countLines(data.status) + " lines", codebox("git status", esc(previewLines(data.status, 40)), ""), false) +
+      '</div></article>';
+  }
+
+  function renderTextSummary(data, label) {
+    const files = Array.isArray(data.files) ? data.files : Array.isArray(data.ai_context_files) ? data.ai_context_files : [];
+    const preview = data.preview || data.text || data.status || "";
+    const rows = files.slice(0, 14).map((file) =>
+      '<div class="file-row"><span class="file-code">file</span><span class="file-name">' + esc(file) + '</span></div>'
+    ).join("");
+    return '<article class="card">' + header(data, pill(files.length + " files", "info")) +
+      '<div class="body">' +
+      (rows ? '<div class="file-list">' + rows + '</div>' : '<div class="empty">No files listed.</div>') +
+      fold(label || "Preview", countLines(preview) + " lines", codebox(label || "preview", esc(previewLines(preview, 40)), ""), false) +
+      '</div></article>';
+  }
+
   function renderGeneric(data) {
     const keys = Object.keys(data || {}).filter((key) => !key.startsWith("codexpro_"));
     const metrics = keys.slice(0, 3).map((key) => metric(key, typeof data[key] === "object" ? JSON.stringify(data[key]) : data[key])).join("");
@@ -737,8 +892,18 @@ export const toolCardWidgetHtml = String.raw`
       return;
     }
     const tool = data.codexpro_tool;
-    if (tool === "open_current_workspace" || tool === "open_workspace") {
+    if (tool === "server_config") {
+      root.innerHTML = renderServerConfig(data);
+    } else if (tool === "codexpro_self_test") {
+      root.innerHTML = renderSelfTest(data);
+    } else if (tool === "codexpro_inventory") {
+      root.innerHTML = renderInventory(data);
+    } else if (tool === "list_workspaces") {
+      root.innerHTML = renderWorkspaces(data);
+    } else if (tool === "open_current_workspace" || tool === "open_workspace" || tool === "workspace_snapshot") {
       root.innerHTML = renderWorkspace(data);
+    } else if (tool === "git_status") {
+      root.innerHTML = renderStatus(data);
     } else if (tool === "show_changes") {
       root.innerHTML = renderChanges(data);
     } else if (tool === "handoff_to_agent" || tool === "handoff_to_codex") {
@@ -749,6 +914,10 @@ export const toolCardWidgetHtml = String.raw`
       root.innerHTML = renderBash(data);
     } else if (tool === "search") {
       root.innerHTML = renderSearch(data);
+    } else if (tool === "read_handoff") {
+      root.innerHTML = renderTextSummary(data, "handoff");
+    } else if (tool === "codex_context") {
+      root.innerHTML = renderTextSummary(data, "context");
     } else {
       root.innerHTML = renderGeneric(data);
     }

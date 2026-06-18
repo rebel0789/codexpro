@@ -95,11 +95,23 @@ Account tier and model tool support are separate things. Plus/Pro can expose App
 
 ## Status
 
-CodexPro is a public open-source MCP bridge with conservative defaults: workspace-only writes, safe bash by default, blocked secret paths, token-protected public URLs, and compact visual cards for high-signal code changes.
+CodexPro is a public open-source MCP bridge with conservative defaults: workspace-only writes, safe bash by default, blocked secret paths, token-protected public URLs, and compact visual cards for every tool result.
 
 CodexPro does not bypass, avoid, increase, pool, resell, or modify ChatGPT, Codex, OpenAI, or third-party model limits. It does not provide models or account access. It only exposes local repo tools to the ChatGPT session the user already controls through official MCP and Developer Mode.
 
 ChatGPT can do MCP-backed agentic coding in your local repo, while Codex remains available for terminal execution, review, or handoff workflows. Model, tool, and quota behavior are controlled by the product and account you connect CodexPro to.
+
+### Compliance boundary
+
+CodexPro is designed for the official ChatGPT Developer Mode / MCP app path:
+
+- It exposes local workspace files, git state, safe verification commands, and `.ai-bridge` handoff files selected by the user.
+- It does not ask for raw ChatGPT transcripts or broad conversation history. Context exports use explicit workspace files and bounded previews.
+- It does not scrape or act as pass-through middleware for third-party services unless the user connects an authorized local integration that follows that service's terms.
+- It does not automate ChatGPT, Codex, or terminal approval flows to bypass product security, rate limits, quota limits, account access, or review prompts.
+- Remote MCP tools do not execute Codex/OpenCode/Pi/local agents. Agent execution is a separate user-started CLI/watch process on the user's machine.
+
+Relevant OpenAI references: [ChatGPT Developer Mode](https://developers.openai.com/api/docs/guides/developer-mode), [MCP servers for ChatGPT Apps](https://developers.openai.com/api/docs/mcp), and [Apps SDK submission guidelines](https://developers.openai.com/apps-sdk/app-submission-guidelines).
 
 ## Tools exposed to ChatGPT
 
@@ -110,6 +122,7 @@ The smaller default tool list is deliberate. ChatGPT behaves better when routine
 Standard mode exposes:
 
 - `server_config` — show safety modes, limits, blocked globs, and allowed roots.
+- `codexpro_self_test` — run one local-only diagnostic for modes, expected tools, safe bash policy, `.ai-bridge` write/edit, and selected-only Pro context.
 - `open_current_workspace` — open the configured default workspace without accepting a path. Fastest/safest first call.
 - `open_workspace` — open a local project directory using `root` or `path` and return workspace id, git status, AGENTS.md status, optional skill discovery, and optional file tree.
 - `tree` — inspect files.
@@ -128,6 +141,7 @@ Minimal mode exposes only:
 
 ```text
 server_config
+codexpro_self_test
 open_current_workspace / open_workspace
 read / write / edit
 bash
@@ -185,44 +199,31 @@ The watcher writes the same review files as `execute-handoff`:
 
 ## Visual ChatGPT cards
 
-v0.8+ registers a reusable Apps SDK widget resource:
+v0.28.5+ registers a reusable Apps SDK widget resource:
 
 ```text
-ui://widget/codexpro-tool-card-v8.html
+ui://widget/codexpro-tool-card-v9.html
 ```
 
-Only high-signal workflow tools attach that resource through `_meta.ui.resourceUri` and the ChatGPT compatibility key `_meta["openai/outputTemplate"]`. In ChatGPT Developer Mode this renders compact cards for:
+Every CodexPro tool descriptor attaches that resource through `_meta.ui.resourceUri` and the ChatGPT compatibility key `_meta["openai/outputTemplate"]`. In ChatGPT Developer Mode this renders compact cards for:
 
 ```text
+server_config and codexpro_self_test
 open_current_workspace / open_workspace project summaries
+codexpro_inventory, list_workspaces, workspace_snapshot
+tree, search, load_skill, read
 write/edit diffs
-show_changes review summaries
+bash verification commands
+git_status, git_diff, show_changes review summaries
+read_handoff, codex_context
 handoff/pro-context exports
 ```
 
-Workspace cards stay compact by default. Git details, discovered skills, and optional file tree output are folded into disclosure rows so the chat does not fill with project inventory unless you open it.
+Cards stay compact by default. Git details, discovered skills, file trees, terminal output, context bundles, and raw diffs are folded or bounded so the chat does not fill with project inventory unless you open it.
 
-Routine plumbing tools intentionally stay data-only and compact:
+ChatGPT may still show some raw tool transcript around a card depending on the host UI and model behavior. CodexPro minimizes that by returning structured data, bounded previews, and a v9 card for every tool, but the ChatGPT client controls final transcript rendering.
 
-```text
-server_config
-codexpro_inventory
-tree
-search
-load_skill
-read
-bash
-git_status / git_diff
-read_handoff
-workspace_snapshot
-codex_context
-```
-
-`bash` and `git_diff` are intentionally data-only. Use `bash` for focused verification commands, and use `show_changes` when you want the visual review card. Empty or large raw diffs should not create a visual card or trigger a widget fetch just to say there is no output.
-
-This avoids the noisy "every tool call becomes a card" behavior. It follows the Apps SDK decoupled pattern: data-processing tools return normal tool results, while render-worthy tools attach the widget template.
-
-The visual cards are not unlocked by "normal coding mode" alone; the MCP server has to register an HTML resource with `text/html;profile=mcp-app` and point selected tool descriptors at it.
+The visual cards are not unlocked by "normal coding mode" alone; the MCP server has to register an HTML resource with `text/html;profile=mcp-app` and point tool descriptors at it.
 
 The widget sets both domain and CSP metadata surfaces:
 
@@ -691,6 +692,20 @@ This writes:
 
 The bundle includes the file tree, git status, current diff, recent commits, selected important config files, changed files, and existing `.ai-bridge` handoff context. `--copy` also copies the bundle to the macOS clipboard when `pbcopy` is available.
 
+For an exact selected-file bundle, disable the automatic config/docs and changed-file inclusions:
+
+```bash
+codexpro pro-bundle \
+  --root /absolute/path/to/your/repo \
+  --path README.md \
+  --path package.json \
+  --no-important-files \
+  --no-changed-files \
+  --no-diff \
+  --no-ai-bridge \
+  --copy
+```
+
 Useful options:
 
 ```bash
@@ -1050,14 +1065,16 @@ CODEXPRO_BLOCKED_GLOBS='**/secrets/**,**/*.sqlite,**/*.db' codexpro start --root
 ```text
 Use CodexPro.
 
-Call server_config first.
+Call server_config first, then codexpro_self_test.
+If self-test fails, stop and report the failed checks.
 Then call open_current_workspace with include_tree=false.
-If you need global skill or MCP server names, ask me to restart CodexPro with --tool-mode full.
 
-Act as a coding agent. Inspect the relevant files, make the requested source edits with write/edit, then verify with search/read/bash and show_changes when useful.
+Act as a coding agent. Inspect the relevant files, make the requested source edits with write/edit, then verify with search/read/bash and show_changes when useful. Use bash only for focused verification commands such as build, test, lint, or typecheck.
 
 Keep changes scoped to the request. Do not use handoff_to_agent unless I explicitly ask for planning-only handoff.
 ```
+
+After upgrading CodexPro or changing the Server URL, refresh the app actions in ChatGPT before judging the card UI. Existing cards do not retroactively re-render after a widget URI change.
 
 ## Prompt for a local agent
 

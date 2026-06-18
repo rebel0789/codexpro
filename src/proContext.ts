@@ -14,6 +14,8 @@ export interface ProContextOptions {
   title?: string;
   selectedPaths?: string[];
   extraGlobs?: string[];
+  includeImportantFiles?: boolean;
+  includeChangedFiles?: boolean;
   includeDiff?: boolean;
   includeAiBridge?: boolean;
   maxDepth?: number;
@@ -173,10 +175,13 @@ export async function buildProContext(
 
   const status = gitStatus(config, workspace);
   const changedFiles = parseChangedFiles(status);
-  const importantFiles = await existingImportantFiles(guard, workspace);
+  const includeImportantFiles = options.includeImportantFiles !== false;
+  const includeChangedFiles = options.includeChangedFiles !== false;
+  const importantFiles = includeImportantFiles ? await existingImportantFiles(guard, workspace) : [];
+  const changedFileCandidates = includeChangedFiles ? changedFiles : [];
   const selectedPaths = unique(options.selectedPaths ?? []);
   const extraGlobFiles = await filesForGlobs(guard, workspace, options.extraGlobs ?? [], maxFiles);
-  const candidates = unique([...importantFiles, ...changedFiles, ...selectedPaths, ...extraGlobFiles])
+  const candidates = unique([...importantFiles, ...changedFileCandidates, ...selectedPaths, ...extraGlobFiles])
     .filter((rel) => rel !== `${config.contextDir}/pro-context.md`)
     .sort((a, b) => {
       const aImportant = isLikelyImportantConfig(a) ? 0 : 1;
@@ -232,6 +237,8 @@ export async function buildProContext(
     "Selected Files",
     [
       `Changed files detected: ${changedFiles.length ? changedFiles.join(", ") : "none"}`,
+      `Auto-include important root files: ${includeImportantFiles ? "yes" : "no"}`,
+      `Auto-include changed files: ${includeChangedFiles ? "yes" : "no"}`,
       `Explicit selected paths: ${selectedPaths.length ? selectedPaths.join(", ") : "none"}`,
       `Extra globs: ${(options.extraGlobs ?? []).length ? (options.extraGlobs ?? []).join(", ") : "none"}`,
       `Files included below: ${candidates.length ? candidates.join(", ") : "none"}`

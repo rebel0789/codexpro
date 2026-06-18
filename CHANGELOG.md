@@ -4,6 +4,11 @@
 
 - Fixed path-scoped `show_changes` so unrelated workspace status is not reported for a clean requested path.
 - Kept duplicate `load_skill` matches ambiguous until the caller supplies the exact displayed skill path.
+- Added `codexpro_self_test`, a local-only diagnostic that checks modes, expected tools, safe bash policy, selected-only Pro context, and an optional `.ai-bridge/codexpro-self-test.md` write/edit probe without touching source files.
+- Upgraded ChatGPT cards to `ui://widget/codexpro-tool-card-v9.html` and attached compact card metadata to every CodexPro tool, with large git/tree/context/bash payloads folded or bounded instead of printed as a giant chat block.
+- Added `include_important_files` and `include_changed_files` controls to `export_pro_context` plus CLI smoke coverage for exact selected-only bundles.
+- Added a dedicated compact `server_config` renderer and accepted model-friendly aliases `workspace_snapshot.max_files` plus `git_diff.include_diff=false` to reduce avoidable retry/error loops in ChatGPT.
+- Reconfirmed the compliance boundary in runtime diagnostics and docs: CodexPro is a local workspace MCP bridge, not a model provider, model proxy, quota bypass, resale layer, or remote executor.
 
 ## 0.28.4
 

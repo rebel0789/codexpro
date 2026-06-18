@@ -9,7 +9,7 @@ import { searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
 import { gitDiff, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
-import { exportProContext } from "./proContext.js";
+import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
 import { TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
@@ -92,7 +92,7 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
                 resourceDomains: []
               }
             },
-            "openai/widgetDescription": "Renders CodexPro workspace orientation, file diffs, change reviews, Pro context exports, and handoff plans as compact developer cards. Bash stays data-only.",
+            "openai/widgetDescription": "Renders CodexPro workspace orientation, diagnostics, file diffs, change reviews, terminal checks, Pro context exports, and handoff plans as compact developer cards with bounded previews.",
             "openai/widgetPrefersBorder": true,
             "openai/widgetDomain": config.widgetDomain,
             "openai/widgetCSP": {
@@ -168,8 +168,9 @@ function registerToolCompat(
   throw new Error("Unsupported MCP SDK: McpServer has neither registerTool nor tool.");
 }
 
-const MINIMAL_TOOLS = new Set([
+const MINIMAL_TOOL_NAMES = [
   "server_config",
+  "codexpro_self_test",
   "open_current_workspace",
   "open_workspace",
   "read",
@@ -177,17 +178,51 @@ const MINIMAL_TOOLS = new Set([
   "edit",
   "bash",
   "show_changes"
-]);
+] as const;
 
-const STANDARD_TOOLS = new Set([
-  ...MINIMAL_TOOLS,
+const STANDARD_TOOL_NAMES = [
+  ...MINIMAL_TOOL_NAMES,
   "tree",
   "search",
   "load_skill",
   "read_handoff",
   "export_pro_context",
   "handoff_to_agent"
-]);
+] as const;
+
+const FULL_TOOL_NAMES = [
+  "server_config",
+  "codexpro_self_test",
+  "codexpro_inventory",
+  "load_skill",
+  "list_workspaces",
+  "open_current_workspace",
+  "open_workspace",
+  "workspace_snapshot",
+  "tree",
+  "search",
+  "read",
+  "write",
+  "edit",
+  "bash",
+  "git_status",
+  "git_diff",
+  "show_changes",
+  "read_handoff",
+  "codex_context",
+  "export_pro_context",
+  "handoff_to_agent",
+  "handoff_to_codex"
+] as const;
+
+function toolNamesForMode(config: CodexProConfig): string[] {
+  if (config.toolMode === "full") return [...FULL_TOOL_NAMES];
+  if (config.toolMode === "minimal") return [...MINIMAL_TOOL_NAMES];
+  return [...STANDARD_TOOL_NAMES];
+}
+
+const MINIMAL_TOOLS = new Set<string>(MINIMAL_TOOL_NAMES);
+const STANDARD_TOOLS = new Set<string>(STANDARD_TOOL_NAMES);
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (config.toolMode === "full") return true;
@@ -255,6 +290,11 @@ function normalizeGitOutput(output: string): string {
 function looksLikeGitError(output: string): boolean {
   const trimmed = output.trim();
   return trimmed.startsWith("fatal:") || trimmed.startsWith("error:") || trimmed.startsWith("git unavailable or failed:");
+}
+
+function previewText(value: string, maxLines = 40, maxChars = 12_000): string {
+  const lines = value.replace(/\r\n/g, "\n").split("\n").slice(0, maxLines).join("\n");
+  return lines.length > maxChars ? `${lines.slice(0, maxChars)}\n...[preview truncated]` : lines;
 }
 
 function changedStatusLines(status: string): string[] {
@@ -467,7 +507,7 @@ function getSharedWorkspaceManager(config: CodexProConfig): WorkspaceManager {
 export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = getSharedWorkspaceManager(config);
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.28.4" }, { instructions: serverInstructions(config) });
+  const server = new McpServer({ name: "CodexPro", version: "0.28.5" }, { instructions: serverInstructions(config) });
   registerToolCardResource(server, config);
 
   registerCodexTool(
@@ -480,6 +520,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {},
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Reading CodexPro server config...",
         "openai/toolInvocation/invoked": "CodexPro server config ready"
       }
@@ -510,6 +551,212 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
   registerCodexTool(
     config,
     server,
+    "codexpro_self_test",
+    {
+      title: "CodexPro Self Test",
+      description:
+        "Run one controlled, local-only CodexPro diagnostic. It checks modes, expected tools, workspace access, skills, git, safe bash policy, selected-only Pro context, and optional .ai-bridge write/edit without touching source files.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
+        write_probe: z.boolean().optional().describe("Create/edit only .ai-bridge/codexpro-self-test.md. Default: true."),
+        bash_probe: z.boolean().optional().describe("Check bash policy with safe local commands only. Default: true."),
+        pro_context_probe: z.boolean().optional().describe("Build a selected-only Pro context bundle in memory without writing pro-context.md. Default: true."),
+        include_global_skills: z.boolean().optional().describe("Include user/plugin skill discovery in the inventory check. Default: true."),
+        max_skills: z.number().int().min(1).max(120).optional().describe("Maximum skills to inspect during the inventory check. Default: 40.")
+      },
+      annotations: HANDOFF_WRITE_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Running CodexPro self-test...",
+        "openai/toolInvocation/invoked": "CodexPro self-test complete"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const started = Date.now();
+      const checks: Array<{ name: string; status: "pass" | "warn" | "fail"; detail: string }> = [];
+      const filesTouched: string[] = [];
+      const probePath = `${config.contextDir}/codexpro-self-test.md`;
+
+      const check = (name: string, status: "pass" | "warn" | "fail", detail: string) => {
+        checks.push({ name, status, detail: cleanOneLine(detail, detail, 260) });
+      };
+
+      check("workspace", "pass", workspace.root);
+      check("tool mode", config.toolMode === "full" ? "pass" : "warn", `${config.toolMode}; expected tools: ${toolNamesForMode(config).length}`);
+      check("write mode", config.writeMode === "off" ? "warn" : "pass", config.writeMode);
+      check("bash mode", config.bashMode === "full" ? "warn" : "pass", config.bashMode);
+      check(
+        "http auth",
+        config.requireHttpToken && !config.authToken ? "fail" : "pass",
+        config.requireHttpToken ? "token required for public/non-loopback access" : "loopback token not required"
+      );
+      check("registered tool set", "pass", `${toolNamesForMode(config).length} tools for ${config.toolMode} mode`);
+
+      try {
+        const inventory = await codexproInventory(config, workspace, {
+          includeGlobalSkills: parseBool(args.include_global_skills, true),
+          includeMcpServers: true,
+          maxSkills: limitInt(args.max_skills, 40, 1, 120)
+        });
+        check("inventory", "pass", `${inventory.skills.length} skills inspected, ${inventory.mcpServers.length} MCP server names visible`);
+      } catch (error) {
+        check("inventory", "fail", errorText(error));
+      }
+
+      try {
+        const status = gitStatus(config, workspace);
+        const gitFailed = looksLikeGitError(status);
+        const changed = gitFailed ? 0 : changedStatusLines(status).length;
+        check("git status", gitFailed ? "warn" : "pass", gitFailed ? status : `${changed} changed entries`);
+      } catch (error) {
+        check("git status", "fail", errorText(error));
+      }
+
+      if (parseBool(args.write_probe, true)) {
+        if (config.writeMode === "off") {
+          check("write/edit probe", "warn", "skipped because CODEXPRO_WRITE_MODE=off");
+        } else {
+          try {
+            assertWriteToolAllowed(config, probePath);
+            const content = [
+              "# CodexPro Self Test",
+              "",
+              `Updated: ${new Date().toISOString()}`,
+              `Workspace: ${workspace.root}`,
+              "marker: before",
+              ""
+            ].join("\n");
+            await writeTextFile(config, guard, workspace, probePath, content, { createDirs: true, overwrite: true });
+            await editTextFile(config, guard, workspace, probePath, "marker: before", "marker: after", { expectedReplacements: 1 });
+            const readBack = await readTextFile(config, guard, workspace, probePath, { maxBytes: 20_000 });
+            if (!readBack.text.includes("marker: after")) throw new CodexProError("self-test edit marker was not found after edit.");
+            const scopedStatus = gitStatus(config, workspace, guard, probePath);
+            const scopedFiles = changedStatusLines(scopedStatus);
+            filesTouched.push(probePath);
+            check(
+              "write/edit probe",
+              scopedFiles.length && scopedFiles.every((line) => line.includes(probePath)) ? "pass" : "warn",
+              scopedFiles.length ? `path-scoped status: ${scopedFiles.join(", ")}` : "path-scoped status clean after write/edit"
+            );
+          } catch (error) {
+            check("write/edit probe", "fail", errorText(error));
+          }
+        }
+      } else {
+        check("write/edit probe", "warn", "skipped by request");
+      }
+
+      if (parseBool(args.pro_context_probe, true)) {
+        try {
+          if (!filesTouched.includes(probePath)) {
+            check("selected-only pro context", "warn", "skipped because write probe did not create the selected file");
+          } else {
+            const context = await buildProContext(config, guard, workspace, {
+              title: "CodexPro Self Test Context",
+              selectedPaths: [probePath],
+              includeImportantFiles: false,
+              includeChangedFiles: false,
+              includeDiff: false,
+              includeAiBridge: false,
+              maxFiles: 4,
+              maxTotalBytes: 80_000
+            });
+            const exactOnly = context.filesIncluded.length === 1 && context.filesIncluded[0] === probePath;
+            check(
+              "selected-only pro context",
+              exactOnly ? "pass" : "fail",
+              exactOnly ? `included only ${probePath}` : `included ${context.filesIncluded.join(", ") || "no files"}`
+            );
+          }
+        } catch (error) {
+          check("selected-only pro context", "fail", errorText(error));
+        }
+      } else {
+        check("selected-only pro context", "warn", "skipped by request");
+      }
+
+      if (parseBool(args.bash_probe, true)) {
+        try {
+          if (config.bashMode === "off") {
+            check("bash policy", "warn", "bash disabled");
+          } else {
+            const pwd = await runBash(config, guard, workspace, "pwd", { timeoutMs: 10_000 });
+            if (config.bashMode === "safe") {
+              try {
+                await runBash(config, guard, workspace, "ls $HOME", { timeoutMs: 10_000 });
+                check("bash policy", "fail", "safe bash allowed environment expansion unexpectedly");
+              } catch {
+                check("bash policy", pwd.exitCode === 0 ? "pass" : "warn", "safe bash allowed pwd and blocked environment expansion");
+              }
+            } else {
+              check("bash policy", pwd.exitCode === 0 ? "warn" : "fail", "full bash is enabled; use only for trusted local repos");
+            }
+          }
+        } catch (error) {
+          check("bash policy", "fail", errorText(error));
+        }
+      } else {
+        check("bash policy", "warn", "skipped by request");
+      }
+
+      check(
+        "terms boundary",
+        "pass",
+        "local workspace bridge only; does not provide models, proxy model access, bypass quotas, or execute remote/local agents from MCP"
+      );
+
+      const failed = checks.filter((item) => item.status === "fail").length;
+      const warned = checks.filter((item) => item.status === "warn").length;
+      const passed = checks.filter((item) => item.status === "pass").length;
+      const status = failed ? "fail" : warned ? "warn" : "pass";
+      const text = [
+        "# CodexPro Self Test",
+        "",
+        `Status: ${status}`,
+        `Workspace: ${workspace.root}`,
+        `Mode: tools=${config.toolMode}, write=${config.writeMode}, bash=${config.bashMode}`,
+        `Expected tools: ${toolNamesForMode(config).length}`,
+        `Duration: ${Date.now() - started} ms`,
+        "",
+        "## Checks",
+        "",
+        ...checks.map((item) => `- ${item.status.toUpperCase()} ${item.name}: ${item.detail}`),
+        "",
+        "## Terms Boundary",
+        "",
+        "CodexPro exposes local repo tools to the ChatGPT session the user controls. It does not provide models, proxy model access, resell access, modify quotas, bypass limits, or run local implementation agents through remote MCP tools."
+      ].join("\n");
+
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        status,
+        passed,
+        warned,
+        failed,
+        duration_ms: Date.now() - started,
+        expected_tools: toolNamesForMode(config),
+        expected_tool_count: toolNamesForMode(config).length,
+        bash_mode: config.bashMode,
+        write_mode: config.writeMode,
+        tool_mode: config.toolMode,
+        files_touched: filesTouched,
+        checks,
+        terms_boundary: {
+          local_workspace_bridge: true,
+          provides_models: false,
+          proxies_model_access: false,
+          bypasses_quotas: false,
+          remote_agent_execution: false
+        }
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
     "codexpro_inventory",
     {
       title: "CodexPro Inventory",
@@ -523,6 +770,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Reading CodexPro inventory...",
         "openai/toolInvocation/invoked": "CodexPro inventory ready"
       }
@@ -539,8 +787,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         root: workspace.root,
         bash_mode: config.bashMode,
         write_mode: config.writeMode,
+        tool_mode: config.toolMode,
         skills: inventory.skills,
+        skill_count: inventory.skills.length,
         mcp_servers: inventory.mcpServers,
+        mcp_server_count: inventory.mcpServers.length,
         widget_uri: TOOL_CARD_URI
       });
     }
@@ -564,6 +815,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Loading skill instructions...",
         "openai/toolInvocation/invoked": "Skill instructions loaded"
       }
@@ -601,6 +853,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {},
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Listing CodexPro workspaces...",
         "openai/toolInvocation/invoked": "CodexPro workspaces listed"
       }
@@ -610,7 +863,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const text = current.length
         ? current.map((workspace) => `- ${workspace.id} — ${workspace.root} (opened ${workspace.openedAt})`).join("\n")
         : "No workspaces opened yet. Call open_workspace first.";
-      return textResult(text, { workspaces: current });
+      return textResult(text, { workspaces: current, count: current.length });
     }
   );
 
@@ -674,6 +927,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         path: z.string().optional().describe("Alias for root. Useful for clients that naturally send path instead of root."),
         include_tree: z.boolean().optional().describe("Include a compact file tree. Default: true."),
         max_depth: z.number().int().min(1).max(8).optional().describe("Tree depth. Default: 3."),
+        max_files: z.number().int().min(1).max(3000).optional().describe("Alias for maximum tree entries. Default: 500."),
         include_skills: z.boolean().optional().describe("Discover workspace, user, and plugin skills by name/description. Default: true."),
         include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills when include_skills=true. Default: true."),
         bootstrap_context: z.boolean().optional().describe("Deprecated and ignored. Use handoff_to_agent to create .ai-bridge files.")
@@ -693,6 +947,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: args.include_tree !== false,
         maxDepth: limitInt(args.max_depth, 3, 1, 8),
+        maxEntries: limitInt(args.max_files, 500, 1, 3000),
         includeSkills: parseBool(args.include_skills, true),
         includeGlobalSkills: parseBool(args.include_global_skills, true),
         bootstrapContext: false
@@ -724,11 +979,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         max_depth: z.number().int().min(1).max(8).optional().describe("Tree depth. Default: 3."),
+        max_files: z.number().int().min(1).max(3000).optional().describe("Alias for maximum tree entries. Default: 500."),
         include_skills: z.boolean().optional().describe("Discover repo-local skills. Default: false for speed."),
         include_global_skills: z.boolean().optional().describe("Also scan home-level skill folders when include_skills=true. Default: false.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Collecting workspace snapshot...",
         "openai/toolInvocation/invoked": "Workspace snapshot ready"
       }
@@ -738,12 +995,27 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: true,
         maxDepth: limitInt(args.max_depth, 3, 1, 8),
+        maxEntries: limitInt(args.max_files, 500, 1, 3000),
         includeSkills: parseBool(args.include_skills, false),
         includeGlobalSkills: parseBool(args.include_global_skills, false)
       });
       const ai = await readAiBridgeContext(config, guard, workspace);
       const text = `${summary.text}\n\n## AI handoff context\n\n${ai.text}`;
-      return textResult(text, { workspace_id: workspace.id, root: workspace.root, ai_context_files: ai.files });
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        agents_loaded: summary.agentsLoaded,
+        agents_path: summary.agentsPath,
+        skills: summary.skills,
+        skill_inventory: summary.skillInventory,
+        skill_counts: summary.skillCounts,
+        tree: summary.tree,
+        git_status: summary.gitStatus,
+        ai_context_files: ai.files,
+        bash_mode: config.bashMode,
+        write_mode: config.writeMode,
+        tool_mode: config.toolMode
+      });
     }
   );
 
@@ -763,6 +1035,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Listing workspace files...",
         "openai/toolInvocation/invoked": "Workspace files listed"
       }
@@ -797,6 +1070,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Searching workspace...",
         "openai/toolInvocation/invoked": "Workspace search complete"
       }
@@ -831,6 +1105,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Reading file...",
         "openai/toolInvocation/invoked": "File read"
       }
@@ -952,6 +1227,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: BASH_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Running bash command...",
         "openai/toolInvocation/invoked": "Bash command finished"
       }
@@ -979,6 +1255,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Reading git status...",
         "openai/toolInvocation/invoked": "Git status ready"
       }
@@ -986,7 +1263,16 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const status = gitStatus(config, workspace);
-      return textResult(status, { workspace_id: workspace.id, root: workspace.root, status });
+      const statusError = looksLikeGitError(status) ? status : "";
+      const changedFiles = statusError ? [] : changedStatusLines(status);
+      return textResult(status, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        status,
+        status_error: statusError || undefined,
+        changed_files: changedFiles,
+        changed: !statusError && changedFiles.length > 0
+      });
     }
   );
 
@@ -1000,18 +1286,44 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         path: z.string().optional().describe("Optional file path relative to workspace root."),
-        staged: z.boolean().optional().describe("Show staged diff. Default: false.")
+        staged: z.boolean().optional().describe("Show staged diff. Default: false."),
+        include_diff: z.boolean().optional().describe("Include the raw unified diff in the response. Default: true. Set false for stats-only checks.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Reading git diff...",
         "openai/toolInvocation/invoked": "Git diff ready"
       }
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const diff = gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false));
-      return textResult(diff, { workspace_id: workspace.id, root: workspace.root, diff });
+      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false)));
+      const stats = diffStats(rawDiff);
+      const includeDiff = parseBool(args.include_diff, true);
+      const text = includeDiff
+        ? rawDiff
+        : [
+            "# Git Diff",
+            "",
+            `Workspace: ${workspace.root}`,
+            `Path: ${args.path ?? "workspace diff"}`,
+            `Staged: ${parseBool(args.staged, false)}`,
+            `Diff stats: +${stats.additions} -${stats.deletions}`,
+            "",
+            "Raw diff omitted by include_diff=false."
+          ].join("\n");
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        path: args.path ?? "workspace diff",
+        staged: parseBool(args.staged, false),
+        include_diff: includeDiff,
+        additions: stats.additions,
+        deletions: stats.deletions,
+        changed: stats.changed,
+        diff: includeDiff ? rawDiff : ""
+      });
     }
   );
 
@@ -1089,6 +1401,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Reading agent handoff context...",
         "openai/toolInvocation/invoked": "Agent handoff context ready"
       }
@@ -1096,7 +1409,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const context = await readAiBridgeContext(config, guard, workspace);
-      return textResult(context.text, { workspace_id: workspace.id, root: workspace.root, files: context.files });
+      return textResult(context.text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        files: context.files,
+        file_count: context.files.length,
+        preview: previewText(context.text)
+      });
     }
   );
 
@@ -1118,6 +1437,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
+        ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Loading Codex context...",
         "openai/toolInvocation/invoked": "Codex context ready"
       }
@@ -1138,7 +1458,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         agents_files: context.agentsFiles,
         ai_context_files: context.aiContextFiles,
         included_git_status: context.gitStatus !== undefined,
-        included_git_diff: context.gitDiff !== undefined
+        included_git_diff: context.gitDiff !== undefined,
+        preview: previewText(context.text)
       });
     }
   );
@@ -1156,6 +1477,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         title: z.string().optional().describe("Markdown title for the context bundle."),
         selected_paths: z.array(z.string()).optional().describe("Specific workspace-relative files to include."),
         extra_globs: z.array(z.string()).optional().describe("Additional workspace-relative glob patterns to include, for example src/**/*.ts."),
+        include_important_files: z.boolean().optional().describe("Auto-include important root config/docs such as AGENTS.md, README.md, and package.json. Default: true."),
+        include_changed_files: z.boolean().optional().describe("Auto-include currently changed files from git status. Default: true."),
         include_diff: z.boolean().optional().describe("Include the current git diff. Default: true."),
         include_ai_bridge: z.boolean().optional().describe("Include existing .ai-bridge planning files. Default: true."),
         max_depth: z.number().int().min(1).max(6).optional().describe("Repository tree depth. Default: 3."),
@@ -1176,6 +1499,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         title: args.title,
         selectedPaths: args.selected_paths,
         extraGlobs: args.extra_globs,
+        includeImportantFiles: args.include_important_files,
+        includeChangedFiles: args.include_changed_files,
         includeDiff: args.include_diff,
         includeAiBridge: args.include_ai_bridge,
         maxDepth: args.max_depth,

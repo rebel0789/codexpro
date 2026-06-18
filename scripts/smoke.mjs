@@ -122,10 +122,10 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
-const toolCardUri = 'ui://widget/codexpro-tool-card-v8.html';
+const toolCardUri = 'ui://widget/codexpro-tool-card-v9.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
@@ -141,11 +141,8 @@ async function expectToolError(name, args, pattern) {
     throw new Error(`${name} error did not match ${pattern}: ${text}`);
   }
 }
-for (const visualTool of ['open_current_workspace', 'open_workspace', 'write', 'edit', 'show_changes', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
+for (const visualTool of toolNames) {
   if (!hasWidgetMeta(visualTool)) throw new Error(`${visualTool} should render the CodexPro widget`);
-}
-for (const quietTool of ['server_config', 'codexpro_inventory', 'list_workspaces', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'read', 'bash', 'git_status', 'git_diff', 'read_handoff', 'codex_context']) {
-  if (hasWidgetMeta(quietTool)) throw new Error(`${quietTool} should stay data-only without widget metadata`);
 }
 const resources = await client.request('resources/list', {});
 const toolCard = resources.resources.find((resource) => resource.uri === toolCardUri);
@@ -154,7 +151,7 @@ if (toolCard.mimeType !== 'text/html;profile=mcp-app') throw new Error(`unexpect
 const widget = await client.request('resources/read', { uri: toolCardUri });
 const widgetText = widget.contents?.[0]?.text ?? '';
 const widgetMeta = widget.contents?.[0]?._meta ?? {};
-if (!widgetText.includes('Waiting for tool result') || !widgetText.includes('renderWorkspace') || !widgetText.includes('details class="fold"') || !widgetText.includes('ui/notifications/tool-result')) {
+if (!widgetText.includes('Waiting for tool result') || !widgetText.includes('renderWorkspace') || !widgetText.includes('renderSelfTest') || !widgetText.includes('details class="fold"') || !widgetText.includes('ui/notifications/tool-result')) {
   throw new Error('tool-card widget resource did not include expected Apps bridge code');
 }
 if (!widgetMeta.ui?.csp || !widgetMeta['openai/widgetCSP']) {
@@ -170,6 +167,31 @@ if (current.structuredContent.codexpro_tool !== 'open_current_workspace') throw 
 if (current.structuredContent.tool_mode !== 'full') throw new Error(`open_current_workspace did not expose tool_mode: ${current.structuredContent.tool_mode}`);
 if (!current.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'smoke-skill')) {
   throw new Error('open_current_workspace did not discover workspace skill inventory');
+}
+const selfTest = await client.request('tools/call', {
+  name: 'codexpro_self_test',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    max_skills: 12
+  }
+});
+if (selfTest.structuredContent.status === 'fail' || !selfTest.structuredContent.expected_tools?.includes?.('codexpro_self_test')) {
+  throw new Error(`codexpro_self_test failed: ${JSON.stringify(selfTest.structuredContent)}`);
+}
+if (!selfTest.structuredContent.files_touched?.includes?.('.ai-bridge/codexpro-self-test.md')) {
+  throw new Error('codexpro_self_test did not run the .ai-bridge write/edit probe');
+}
+const snapshotAlias = await client.request('tools/call', {
+  name: 'workspace_snapshot',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    max_depth: 1,
+    max_files: 20,
+    include_skills: false
+  }
+});
+if (!snapshotAlias.structuredContent.tree) {
+  throw new Error('workspace_snapshot did not accept max_files alias or return a tree');
 }
 await expectToolError('load_skill', { name: 'smoke-skill', source: 'workspace' }, /Multiple skills named smoke-skill/);
 const loadedSkill = await client.request('tools/call', {
@@ -219,6 +241,13 @@ const changes = await client.request('tools/call', { name: 'show_changes', argum
 if (!changes.structuredContent.changed || !changes.structuredContent.diff.includes('demo.txt')) {
   throw new Error('show_changes did not report the edited demo.txt diff');
 }
+const statsOnlyDiff = await client.request('tools/call', { name: 'git_diff', arguments: { workspace_id: ws, include_diff: false } });
+if (statsOnlyDiff.structuredContent.include_diff !== false || statsOnlyDiff.structuredContent.diff !== '') {
+  throw new Error(`git_diff include_diff=false returned raw diff: ${JSON.stringify(statsOnlyDiff.structuredContent)}`);
+}
+if (!statsOnlyDiff.content?.[0]?.text?.includes('Raw diff omitted by include_diff=false')) {
+  throw new Error('git_diff include_diff=false did not report omitted diff in text output');
+}
 const demoChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'demo.txt' } });
 if (!demoChanges.structuredContent.changed || !demoChanges.structuredContent.changed_files?.some?.((line) => line.includes('demo.txt'))) {
   throw new Error(`path-scoped show_changes did not report demo.txt: ${JSON.stringify(demoChanges.structuredContent.changed_files)}`);
@@ -246,6 +275,32 @@ if (!clientBuild.content?.[0]?.text?.includes('clients ok')) {
 const exported = await client.request('tools/call', { name: 'export_pro_context', arguments: { workspace_id: ws, selected_paths: ['demo.txt'], max_files: 4, max_total_bytes: 80000 } });
 if (exported.structuredContent.path !== '.ai-bridge/pro-context.md') throw new Error('export_pro_context wrote an unexpected path');
 await fs.stat(path.join(tmp, '.ai-bridge', 'pro-context.md'));
+const exactExport = await client.request('tools/call', {
+  name: 'export_pro_context',
+  arguments: {
+    workspace_id: ws,
+    selected_paths: ['demo.txt'],
+    include_important_files: false,
+    include_changed_files: false,
+    include_diff: false,
+    include_ai_bridge: false,
+    max_files: 4,
+    max_total_bytes: 80000
+  }
+});
+if (!exactExport.structuredContent.files_included?.includes('demo.txt')) {
+  throw new Error(`selected-only export did not include demo.txt: ${JSON.stringify(exactExport.structuredContent.files_included)}`);
+}
+if (exactExport.structuredContent.files_included?.some?.((file) => file !== 'demo.txt')) {
+  throw new Error(`selected-only export included unexpected files: ${JSON.stringify(exactExport.structuredContent.files_included)}`);
+}
+const exactProContext = await fs.readFile(path.join(tmp, '.ai-bridge', 'pro-context.md'), 'utf8');
+if (!exactProContext.includes('Auto-include important root files: no') || !exactProContext.includes('Auto-include changed files: no')) {
+  throw new Error('selected-only export did not record disabled auto-inclusion settings');
+}
+if (exactProContext.includes('### AGENTS.md') || exactProContext.includes('### package.json') || exactProContext.includes('### env-ref.js')) {
+  throw new Error('selected-only export leaked auto-included important or changed files');
+}
 const agentHandoff = await client.request('tools/call', {
   name: 'handoff_to_agent',
   arguments: {
@@ -317,8 +372,8 @@ async function assertToolMode(mode, expected, hidden) {
   modeClient.close();
 }
 
-await assertToolMode('', ['server_config', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
-await assertToolMode('minimal', ['server_config', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
+await assertToolMode('', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
+await assertToolMode('minimal', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
 
 const lowerAgentsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-lower-agents-'));
 await fs.writeFile(path.join(lowerAgentsRoot, 'agents.md'), '# Lowercase agents\n\n- Lowercase instruction file loaded.\n', 'utf8');

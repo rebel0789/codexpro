@@ -194,20 +194,15 @@ try {
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);
   const queryToolNames = toolNames(queryTools);
-  for (const expected of ['server_config', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'load_skill', 'show_changes', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'load_skill', 'show_changes', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
     }
   }
-  const toolCardUri = 'ui://widget/codexpro-tool-card-v8.html';
-  for (const visualTool of ['open_current_workspace', 'open_workspace', 'write', 'edit', 'show_changes', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
+  const toolCardUri = 'ui://widget/codexpro-tool-card-v9.html';
+  for (const visualTool of queryToolNames) {
     if (!hasWidgetMeta(queryTools, visualTool, toolCardUri)) {
       throw new Error(`${visualTool} should render the CodexPro widget`);
-    }
-  }
-  for (const quietTool of ['server_config', 'codexpro_inventory', 'list_workspaces', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'read', 'bash', 'git_status', 'git_diff', 'read_handoff', 'codex_context']) {
-    if (hasWidgetMeta(queryTools, quietTool, toolCardUri)) {
-      throw new Error(`${quietTool} should stay data-only without widget metadata`);
     }
   }
 
@@ -228,7 +223,7 @@ try {
     const widget = await client.readResource({ uri: toolCardUri });
     const widgetText = widget.contents?.[0]?.text ?? '';
     const widgetMeta = widget.contents?.[0]?._meta ?? {};
-    if (!widgetText.includes('Waiting for tool result') || !widgetText.includes('renderWorkspace') || !widgetText.includes('details class="fold"') || !widgetText.includes('ui/notifications/tool-result')) {
+    if (!widgetText.includes('Waiting for tool result') || !widgetText.includes('renderWorkspace') || !widgetText.includes('renderSelfTest') || !widgetText.includes('details class="fold"') || !widgetText.includes('ui/notifications/tool-result')) {
       throw new Error('HTTP tool-card widget resource did not include expected Apps bridge code');
     }
     if (!widgetMeta.ui?.csp || !widgetMeta['openai/widgetCSP']) {

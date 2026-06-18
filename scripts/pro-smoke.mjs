@@ -24,6 +24,24 @@ const proContext = await fs.readFile(path.join(root, '.ai-bridge', 'pro-context.
 if (!proContext.includes('CodexPro Context Bundle') || !proContext.includes('demo.txt')) {
   throw new Error('pro context bundle did not include expected content');
 }
+run([
+  'scripts/pro-bundle.mjs',
+  '--root', root,
+  '--path', 'demo.txt',
+  '--no-important-files',
+  '--no-changed-files',
+  '--no-diff',
+  '--no-ai-bridge',
+  '--max-files', '4',
+  '--max-total-bytes', '80000'
+]);
+const exactProContext = await fs.readFile(path.join(root, '.ai-bridge', 'pro-context.md'), 'utf8');
+if (!exactProContext.includes('Auto-include important root files: no') || !exactProContext.includes('Auto-include changed files: no')) {
+  throw new Error('selected-only pro context did not record disabled auto-inclusion settings');
+}
+if (!exactProContext.includes('### demo.txt') || exactProContext.includes('### README.md')) {
+  throw new Error('selected-only pro context did not include exactly the requested file');
+}
 
 const planFile = path.join(root, 'plan.md');
 await fs.writeFile(planFile, 'Inspect demo.txt and keep changes narrow.\n', 'utf8');
