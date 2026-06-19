@@ -9,6 +9,7 @@
 - Added `include_important_files` and `include_changed_files` controls to `export_pro_context` plus CLI smoke coverage for exact selected-only bundles.
 - Added a dedicated compact `server_config` renderer and accepted model-friendly aliases `workspace_snapshot.max_files` plus `git_diff.include_diff=false` to reduce avoidable retry/error loops in ChatGPT.
 - Reconfirmed the compliance boundary in runtime diagnostics and docs: CodexPro is a local workspace MCP bridge, not a model provider, model proxy, quota bypass, resale layer, or remote executor.
+- Added `codexpro start --no-bash` and documented that CodexPro does not bind MCP bash to a Codex app conversation id.
 
 ## 0.28.4
 

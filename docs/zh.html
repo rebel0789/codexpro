@@ -309,6 +309,11 @@ codexpro start</code></pre>
             <p>safe 模式允许常见检查、git、test、lint、typecheck 和 build 命令。只在信任的本地仓库里使用 full bash。</p>
           </article>
           <article>
+            <small>不突然跑 shell</small>
+            <h3>关闭 ChatGPT 触发的 bash</h3>
+            <p>正在 Codex 里工作时可以用 <code>codexpro start --no-bash</code>。CodexPro 不会把 MCP bash 绑定到某个 Codex 会话 id。</p>
+          </article>
+          <article>
             <small>可视卡片</small>
             <h3>只给关键动作卡片</h3>
             <p>open workspace 摘要、write/edit diff、show_changes 审查和 handoff 导出会显示紧凑卡片。skills、git 和 tree 详情默认折叠；<code>load_skill</code> 按需加载有限长度的说明，bash 保持纯数据。</p>
@@ -370,6 +375,7 @@ codexpro start</code></pre>
           <li>公网 tunnel 默认使用 token 保护。</li>
           <li><code>.env</code>、私钥、<code>.git</code>、<code>node_modules</code> 和 symlink 逃逸默认阻止。</li>
           <li>safe bash 用于常见检查和测试，不是任意 shell 控制。</li>
+          <li><code>--no-bash</code> 会关闭所有 ChatGPT 触发的 shell 命令。</li>
           <li>只想让 ChatGPT 做计划时，用 handoff 模式。</li>
         </ul>
       </section>

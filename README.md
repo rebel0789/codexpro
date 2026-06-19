@@ -468,8 +468,10 @@ Startup modes:
 
 ```bash
 codexpro start                 # normal coding mode: read/write/edit/search/bash
+codexpro start --no-bash       # normal coding mode without ChatGPT-triggered shell commands
 codexpro setup                 # guided onboarding for new users
 codexpro start --mode handoff  # planning-only .ai-bridge handoff
+codexpro start --mode handoff --no-bash
 codexpro start --mode pro      # export context for models without MCP tools
 codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
 codexpro ngrok --hostname your-domain.ngrok-free.dev
@@ -1028,7 +1030,7 @@ pytest, go test, cargo test, cargo check, cargo clippy, tsc, eslint, biome check
 
 Use the MCP `read` and `search` tools for file contents. The safe shell blocks obvious destructive commands, redirects, pipes, `curl`, `wget`, `ssh`, `docker`, `git push/reset/clean/checkout/switch/restore`, `find -exec`, `find -delete`, and file-content shell readers such as `cat`, `grep`, `rg`, `head`, and `tail`.
 
-`CODEXPRO_BASH_MODE=off` disables bash completely.
+`CODEXPRO_BASH_MODE=off` disables bash completely. `codexpro start --no-bash` is the CLI shortcut for the same setting.
 
 `CODEXPRO_BASH_MODE=full` allows arbitrary shell commands. Use this only for trusted local repos; MCP itself is not an OS sandbox.
 
@@ -1036,6 +1038,28 @@ By default the bash environment is sanitized. To inherit your full local environ
 
 ```bash
 CODEXPRO_INHERIT_ENV=1 CODEXPRO_BASH_MODE=full npm run start:http
+```
+
+### No-surprise shell mode
+
+CodexPro does not attach to, read from, or execute inside a specific Codex app conversation or terminal session. The MCP `bash` tool belongs to the CodexPro server process you started for one workspace. ChatGPT can ask that server to run allowed commands only when bash is enabled.
+
+If you are already working in Codex and do not want any ChatGPT-triggered shell command in that workspace, start CodexPro with bash disabled:
+
+```bash
+codexpro start --no-bash
+```
+
+If you want ChatGPT to plan while Codex or another local agent edits and runs commands, combine handoff mode with disabled bash:
+
+```bash
+codexpro start --mode handoff --no-bash
+```
+
+For parallel work, run a separate CodexPro server for the other repo, port, or tunnel profile instead of trying to bind CodexPro to an existing Codex conversation id:
+
+```bash
+codexpro start --root /path/to/other/repo --port 8788 --no-bash
 ```
 
 ## Safety boundaries

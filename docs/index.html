@@ -454,6 +454,11 @@ codexpro settings delete --yes</code></pre>
             <p>Safe mode allows common repo inspection, git, tests, lint, typecheck, and build commands. Use full bash only for trusted local repos.</p>
           </article>
           <article>
+            <small>No surprise shell</small>
+            <h3>Disable ChatGPT-triggered bash</h3>
+            <p>Use <code>codexpro start --no-bash</code> when you are already working in Codex. CodexPro does not bind MCP bash to a Codex conversation id.</p>
+          </article>
+          <article>
             <small>Visual widgets</small>
             <h3>Compact cards for every tool</h3>
             <p>Every CodexPro tool can render a compact v9 card. Skills, git, tree, context, terminal output, and raw diffs stay folded or bounded until opened; <code>load_skill</code> loads bounded instructions on demand.</p>
@@ -546,6 +551,7 @@ codexpro settings delete --yes</code></pre>
           <li>Public tunnels are token-protected by default.</li>
           <li><code>.env</code>, private keys, <code>.git</code>, <code>node_modules</code>, and symlink escapes are blocked.</li>
           <li>Safe bash allows common inspection and test commands, not arbitrary shell control.</li>
+          <li><code>--no-bash</code> disables all ChatGPT-triggered shell commands.</li>
           <li>Use handoff mode when you want ChatGPT to plan and Codex to edit.</li>
         </ul>
       </section>

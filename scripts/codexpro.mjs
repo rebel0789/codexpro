@@ -48,6 +48,7 @@ Options:
   --host <host>             Local bind host. Default: 127.0.0.1.
   --port <port>             Local port. Default: 8787.
   --bash <off|safe|full>    Bash mode. Default: safe.
+  --no-bash                 Shortcut for --bash off.
   --write <off|handoff|workspace>
                              Write mode. Default: workspace in agent mode, handoff otherwise.
                              handoff = ChatGPT can write .ai-bridge only; Codex edits source.
@@ -249,6 +250,7 @@ function parseArgs(argv) {
     if (key === 'help') out.help = true;
     else if (key === 'allow-home') out.allowHome = true;
     else if (key === 'no-auth') out.noAuth = true;
+    else if (key === 'no-bash') out.bash = 'off';
     else if (key === 'copy-url') out.copyUrl = true;
     else if (key === 'no-copy-url') out.noCopyUrl = true;
     else if (key === 'dry-run') out.dryRun = true;
@@ -1498,6 +1500,7 @@ function printModeHelp() {
   console.log('');
   console.log('Modes');
   console.log('  codexpro start                 agent mode: read/write/edit/search/bash');
+  console.log('  codexpro start --no-bash       agent mode without ChatGPT-triggered shell commands');
   console.log('  codexpro start --mode handoff  planning-only .ai-bridge handoff');
   console.log('  codexpro start --mode pro      export context for models without MCP tools');
   console.log('  codexpro start --tool-mode minimal   expose only the tight coding loop');

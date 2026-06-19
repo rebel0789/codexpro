@@ -83,7 +83,9 @@ codexpro start \
 - Preview local handoff execution with `codexpro execute-handoff --dry-run` before running an unfamiliar adapter or custom command.
 - Keep `execute-handoff` local. Do not wrap it in a remote MCP tool unless you add a stronger approval and sandbox story.
 - Use default agent mode only with trusted ChatGPT sessions and repo-specific roots.
+- Use `--no-bash` when ChatGPT should never trigger shell commands in the workspace.
 - Use `--bash full` only for trusted local repos.
+- Do not treat MCP session ids as Codex conversation ids. CodexPro does not bind bash to a Codex app session.
 - Prefer a repo-specific `--root` instead of `--allow-home`.
 - Use `--no-install-cloudflared --cloudflared <path>` if your organization requires a managed Cloudflare Tunnel binary.
 

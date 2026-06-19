@@ -156,6 +156,12 @@ codexpro start
 
 适合小改动、文档更新、定位 bug、查看 diff、跑 lint/test/build。
 
+如果你正在另一个 Codex 会话里工作，不希望 ChatGPT 触发任何 shell 命令，用：
+
+```bash
+codexpro start --no-bash
+```
+
 ### 2. Handoff
 
 规划模式。ChatGPT 不直接写源码，只写入：
@@ -175,6 +181,7 @@ codexpro execute-handoff --agent opencode --model provider/model
 
 ```bash
 codexpro start --mode handoff
+codexpro start --mode handoff --no-bash
 codexpro watch-handoff --agent opencode --model provider/model --yes
 ```
 
@@ -337,9 +344,22 @@ CodexPro 是本地开发桥，不是操作系统级沙箱。
 - 常见敏感路径会被拒绝：`.env`、私钥、`.git`、`node_modules`、生成目录、缓存目录。
 - symlink 逃逸会被阻止。
 - safe bash 只允许常见检查、搜索、git、lint、test、typecheck、build 等命令。
+- `codexpro start --no-bash` 会完全关闭 ChatGPT 可调用的 bash 工具。
 - `execute-handoff` 和 `watch-handoff` 是本地 CLI 命令，不是远程 MCP 工具。
 
 只有在你信任当前仓库和命令时，才考虑更宽的权限，例如 full bash、自定义执行器、额外 allow root。
+
+### Codex 会话边界
+
+CodexPro 不能绑定、读取或复用某一个 Codex App 会话 id。MCP 里的 session id 只是 ChatGPT 和 CodexPro HTTP 服务器之间的传输会话，不代表 Codex 里的某个聊天或终端会话。
+
+`bash` 工具属于你启动的 CodexPro 本地服务器进程，并在配置的 workspace root 下运行。想并行处理另一个任务时，请为另一个仓库、端口或 tunnel profile 启动单独的 CodexPro；不要把它理解成“远程控制当前 Codex 会话”。
+
+如果只想让 ChatGPT 规划、由你本地决定是否执行：
+
+```bash
+codexpro start --mode handoff --no-bash
+```
 
 ## 常用命令
 
