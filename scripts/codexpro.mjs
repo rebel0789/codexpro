@@ -49,6 +49,8 @@ Options:
   --port <port>             Local port. Default: 8787.
   --bash <off|safe|full>    Bash mode. Default: safe.
   --no-bash                 Shortcut for --bash off.
+  --bash-session <id>       Local bash session label exposed to ChatGPT.
+  --require-bash-session    Require bash calls to include matching session_id.
   --write <off|handoff|workspace>
                              Write mode. Default: workspace in agent mode, handoff otherwise.
                              handoff = ChatGPT can write .ai-bridge only; Codex edits source.
@@ -251,6 +253,7 @@ function parseArgs(argv) {
     else if (key === 'allow-home') out.allowHome = true;
     else if (key === 'no-auth') out.noAuth = true;
     else if (key === 'no-bash') out.bash = 'off';
+    else if (key === 'require-bash-session') out.requireBashSession = true;
     else if (key === 'copy-url') out.copyUrl = true;
     else if (key === 'no-copy-url') out.noCopyUrl = true;
     else if (key === 'dry-run') out.dryRun = true;
@@ -445,6 +448,30 @@ function optionValue(args, profile, field, envNames = [], fallback = undefined) 
   }
   if (profile?.[field] !== undefined && profile[field] !== '') return profile[field];
   return fallback;
+}
+
+function boolFromValue(value, fallback = false) {
+  if (value === undefined || value === null || value === '') return fallback;
+  if (typeof value === 'boolean') return value;
+  return ['1', 'true', 'yes', 'y', 'on'].includes(String(value).toLowerCase());
+}
+
+function optionBool(args, profile, field, envNames = [], fallback = false) {
+  if (args[field] !== undefined) return boolFromValue(args[field], fallback);
+  for (const envName of envNames) {
+    if (process.env[envName] !== undefined && process.env[envName] !== '') return boolFromValue(process.env[envName], fallback);
+  }
+  if (profile?.[field] !== undefined && profile[field] !== '') return boolFromValue(profile[field], fallback);
+  return fallback;
+}
+
+function validateBashSession(value) {
+  if (!value) return '';
+  const trimmed = String(value).trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(trimmed)) {
+    throw new Error('--bash-session must be 1-64 characters using letters, numbers, dot, underscore, or dash, and must start with a letter or number.');
+  }
+  return trimmed;
 }
 
 function stableToken(existing = '') {
@@ -1461,6 +1488,7 @@ function printConnectorBlock(endpoint, token, options = {}) {
   console.log(paint('bold', 'CodexPro ready'));
   if (options.root) console.log(`  Workspace  ${options.root}`);
   console.log(`  Mode       ${modeTitle}  tools=${options.toolMode ?? 'standard'}  write=${options.write ?? 'workspace'}  bash=${options.bash ?? 'safe'}`);
+  if (options.bashSession) console.log(`  Bash       session=${options.bashSession}${options.requireBashSession ? ' required' : ''}`);
   console.log(`  Connector  ${publicHttps ? 'public HTTPS' : 'local HTTP'}`);
   if (copied.ok) {
     console.log(`  URL        copied with ${copied.command}`);
@@ -1501,6 +1529,7 @@ function printModeHelp() {
   console.log('Modes');
   console.log('  codexpro start                 agent mode: read/write/edit/search/bash');
   console.log('  codexpro start --no-bash       agent mode without ChatGPT-triggered shell commands');
+  console.log('  codexpro start --bash-session main --require-bash-session');
   console.log('  codexpro start --mode handoff  planning-only .ai-bridge handoff');
   console.log('  codexpro start --mode pro      export context for models without MCP tools');
   console.log('  codexpro start --tool-mode minimal   expose only the tight coding loop');
@@ -1749,6 +1778,8 @@ function profileFromPreference(root, args, profile, preference) {
   const mode = optionValue(args, profile, 'mode', ['CODEXPRO_MODE'], 'agent');
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], '');
+  const bashSession = validateBashSession(optionValue(args, profile, 'bashSession', ['CODEXPRO_BASH_SESSION_ID'], ''));
+  const requireBashSession = optionBool(args, profile, 'requireBashSession', ['CODEXPRO_REQUIRE_BASH_SESSION'], false);
   const write = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], '');
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
@@ -1765,6 +1796,8 @@ function profileFromPreference(root, args, profile, preference) {
     ...(preference.cloudflareTokenFile ? { cloudflareTokenFile: preference.cloudflareTokenFile } : {}),
     ...(token ? { token } : {}),
     ...(bash ? { bash } : {}),
+    ...(bashSession ? { bashSession } : {}),
+    ...(requireBashSession ? { requireBashSession: true } : {}),
     ...(write ? { write } : {}),
     ...(toolMode ? { toolMode } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
@@ -1888,6 +1921,10 @@ async function runSetupWizard(argv) {
     const toolMode = optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
     const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
     if (bash) args.push('--bash', bash);
+    const bashSession = validateBashSession(optionValue(defaults, profile, 'bashSession', ['CODEXPRO_BASH_SESSION_ID'], ''));
+    const requireBashSession = optionBool(defaults, profile, 'requireBashSession', ['CODEXPRO_REQUIRE_BASH_SESSION'], false);
+    if (bashSession) args.push('--bash-session', bashSession);
+    if (requireBashSession) args.push('--require-bash-session');
     if (write) args.push('--write', write);
     if (toolMode) args.push('--tool-mode', toolMode);
     if (widgetDomain) args.push('--widget-domain', widgetDomain);
@@ -2003,6 +2040,7 @@ function printProfile(root, profile) {
     ...(safe.hostname ? [labelValue('Hostname', safe.hostname)] : []),
     ...(safe.port ? [labelValue('Port', safe.port)] : []),
     ...(safe.mode ? [labelValue('Mode', safe.mode)] : []),
+    ...(safe.bashSession ? [labelValue('Bash session', `${safe.bashSession}${safe.requireBashSession ? ' required' : ''}`)] : []),
     ...(safe.token ? [labelValue('Token', safe.token)] : [])
   ]);
 }
@@ -2031,6 +2069,8 @@ function saveSettingsFromArgs(root, args, profile) {
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], profile.toolMode ?? '');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], profile.widgetDomain ?? '');
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], profile.port ?? '8787'));
+  const bashSession = validateBashSession(optionValue(args, profile, 'bashSession', ['CODEXPRO_BASH_SESSION_ID'], profile.bashSession ?? ''));
+  const requireBashSession = optionBool(args, profile, 'requireBashSession', ['CODEXPRO_REQUIRE_BASH_SESSION'], Boolean(profile.requireBashSession));
   const token = tunnel === 'none'
     ? optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], profile.token ?? '')
     : stableToken(optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], profile.token ?? ''));
@@ -2045,6 +2085,8 @@ function saveSettingsFromArgs(root, args, profile) {
     ...(args.cloudflareTokenFile ?? profile.cloudflareTokenFile ? { cloudflareTokenFile: args.cloudflareTokenFile ?? profile.cloudflareTokenFile } : {}),
     ...(token ? { token } : {}),
     ...(args.bash ?? profile.bash ? { bash: args.bash ?? profile.bash } : {}),
+    ...(bashSession ? { bashSession } : {}),
+    ...(requireBashSession ? { requireBashSession: true } : {}),
     ...(args.write ?? profile.write ? { write: args.write ?? profile.write } : {}),
     ...(toolMode ? { toolMode } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
@@ -2365,10 +2407,13 @@ async function main() {
   const host = optionValue(args, profile, 'host', ['CODEXPRO_HOST'], '127.0.0.1');
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], 'safe');
+  const bashSession = validateBashSession(optionValue(args, profile, 'bashSession', ['CODEXPRO_BASH_SESSION_ID'], ''));
+  const requireBashSession = optionBool(args, profile, 'requireBashSession', ['CODEXPRO_REQUIRE_BASH_SESSION'], false);
   const write = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], mode === 'agent' ? 'workspace' : 'handoff');
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], 'https://rebel0789.github.io');
   if (!['off', 'safe', 'full'].includes(bash)) throw new Error('--bash must be off, safe, or full');
+  if (requireBashSession && !bashSession) throw new Error('--require-bash-session requires --bash-session <id>.');
   if (!['off', 'handoff', 'workspace'].includes(write)) throw new Error('--write must be off, handoff, or workspace');
   if (!['minimal', 'standard', 'full'].includes(toolMode)) throw new Error('--tool-mode must be minimal, standard, or full');
 
@@ -2382,6 +2427,8 @@ async function main() {
     CODEXPRO_HOST: host,
     CODEXPRO_PORT: port,
     CODEXPRO_BASH_MODE: bash,
+    CODEXPRO_BASH_SESSION_ID: bashSession,
+    CODEXPRO_REQUIRE_BASH_SESSION: requireBashSession ? '1' : '0',
     CODEXPRO_WRITE_MODE: write,
     CODEXPRO_TOOL_MODE: toolMode,
     CODEXPRO_WIDGET_DOMAIN: widgetDomain,
@@ -2407,6 +2454,7 @@ async function main() {
   printBox('CodexPro start', [
     labelValue('Workspace', root),
     labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}`),
+    ...(bashSession ? [labelValue('Bash session', `${bashSession}${requireBashSession ? ' required' : ''}`)] : []),
     labelValue('Local URL', `http://${host}:${port}/mcp`),
     labelValue(
       'Tunnel',
@@ -2445,7 +2493,9 @@ async function main() {
       toolMode,
       root,
       write,
-      bash
+      bash,
+      bashSession,
+      requireBashSession
     });
     await runControlPanel(details);
     return;
@@ -2483,7 +2533,9 @@ async function main() {
       toolMode,
       root,
       write,
-      bash
+      bash,
+      bashSession,
+      requireBashSession
     });
     await runControlPanel(details);
     return;
@@ -2502,7 +2554,9 @@ async function main() {
       toolMode,
       root,
       write,
-      bash
+      bash,
+      bashSession,
+      requireBashSession
     });
     await runControlPanel(details);
     return;
@@ -2520,7 +2574,9 @@ async function main() {
       toolMode,
       root,
       write,
-      bash
+      bash,
+      bashSession,
+      requireBashSession
     });
     await runControlPanel(details);
     return;
@@ -2583,7 +2639,9 @@ async function main() {
     toolMode,
     root,
     write,
-    bash
+    bash,
+    bashSession,
+    requireBashSession
   });
   await runControlPanel(details);
 }

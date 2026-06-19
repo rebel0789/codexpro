@@ -162,6 +162,14 @@ codexpro start
 codexpro start --no-bash
 ```
 
+如果想保留 bash，但要求 ChatGPT 明确命中你启动的这个 CodexPro 终端会话标签，用：
+
+```bash
+codexpro start --bash-session main --require-bash-session
+```
+
+开启后，`bash` 工具调用必须带上 `session_id: "main"` 才会执行。
+
 ### 2. Handoff
 
 规划模式。ChatGPT 不直接写源码，只写入：
@@ -354,6 +362,14 @@ CodexPro 是本地开发桥，不是操作系统级沙箱。
 CodexPro 不能绑定、读取或复用某一个 Codex App 会话 id。MCP 里的 session id 只是 ChatGPT 和 CodexPro HTTP 服务器之间的传输会话，不代表 Codex 里的某个聊天或终端会话。
 
 `bash` 工具属于你启动的 CodexPro 本地服务器进程，并在配置的 workspace root 下运行。想并行处理另一个任务时，请为另一个仓库、端口或 tunnel profile 启动单独的 CodexPro；不要把它理解成“远程控制当前 Codex 会话”。
+
+如果要减少误触发，可以给这个本地 CodexPro 进程设置 bash session guard：
+
+```bash
+codexpro start --bash-session main --require-bash-session
+```
+
+这不是 Codex App 聊天会话 id，而是 CodexPro 本地 bash 工具的显式匹配标签。
 
 如果只想让 ChatGPT 规划、由你本地决定是否执行：
 

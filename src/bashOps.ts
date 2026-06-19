@@ -15,6 +15,7 @@ export interface BashResult {
   stdout: string;
   stderr: string;
   truncated: boolean;
+  bashSessionId?: string;
 }
 
 const SAFE_ALLOWED_PREFIXES = [
@@ -151,6 +152,26 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
   }
 }
 
+function assertBashSession(config: CodexProConfig, sessionId?: string): string | undefined {
+  const requested = sessionId?.trim();
+  if (!config.bashSessionId) {
+    if (config.requireBashSession) {
+      throw new CodexProError("bash session guard is enabled but no server bash session id is configured.");
+    }
+    return undefined;
+  }
+  if (!requested) {
+    if (config.requireBashSession) {
+      throw new CodexProError(`bash session id is required. Retry with session_id="${config.bashSessionId}".`);
+    }
+    return config.bashSessionId;
+  }
+  if (requested !== config.bashSessionId) {
+    throw new CodexProError(`bash session id mismatch. This CodexPro server accepts session_id="${config.bashSessionId}".`);
+  }
+  return config.bashSessionId;
+}
+
 function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   if (config.inheritEnv) {
     return { ...process.env, NO_COLOR: "1", CI: process.env.CI ?? "1" };
@@ -183,9 +204,10 @@ export async function runBash(
   guard: PathGuard,
   workspace: Workspace,
   command: string,
-  options: { cwd?: string; timeoutMs?: number } = {}
+  options: { cwd?: string; timeoutMs?: number; sessionId?: string } = {}
 ): Promise<BashResult> {
   if (!command?.trim()) throw new CodexProError("command is required.");
+  const bashSessionId = assertBashSession(config, options.sessionId);
   assertSafeCommand(config, command);
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
@@ -236,7 +258,8 @@ export async function runBash(
         durationMs: Date.now() - start,
         stdout: out.value,
         stderr: err.value,
-        truncated: out.truncated || err.truncated
+        truncated: out.truncated || err.truncated,
+        ...(bashSessionId ? { bashSessionId } : {})
       });
     });
   });

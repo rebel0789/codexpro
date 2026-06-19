@@ -131,8 +131,8 @@ function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
   return meta.ui?.resourceUri === toolCardUri || meta['openai/outputTemplate'] === toolCardUri;
 }
-async function expectToolError(name, args, pattern) {
-  const result = await client.request('tools/call', { name, arguments: args });
+async function expectToolError(name, args, pattern, targetClient = client) {
+  const result = await targetClient.request('tools/call', { name, arguments: args });
   if (!result.isError) {
     throw new Error(`${name} unexpectedly succeeded`);
   }
@@ -374,6 +374,45 @@ async function assertToolMode(mode, expected, hidden) {
 
 await assertToolMode('', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
 await assertToolMode('minimal', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
+
+const sessionGuardClient = new McpStdioClient('node', [
+  'dist/stdio.js',
+  '--root',
+  tmp,
+  '--allow-root',
+  tmp,
+  '--bash',
+  'safe',
+  '--bash-session',
+  'codex-main',
+  '--require-bash-session'
+], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_ROOT: tmp,
+    CODEXPRO_ALLOWED_ROOTS: tmp,
+    CODEXPRO_BASH_SESSION_ID: '',
+    CODEXPRO_REQUIRE_BASH_SESSION: ''
+  }
+});
+await sessionGuardClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-bash-session-smoke', version: '0.1.0' }
+});
+sessionGuardClient.notify('notifications/initialized');
+const guardedConfig = await sessionGuardClient.request('tools/call', { name: 'server_config', arguments: {} });
+if (guardedConfig.structuredContent.bashSessionId !== 'codex-main' || guardedConfig.structuredContent.requireBashSession !== true) {
+  throw new Error(`server_config did not expose bash session guard: ${JSON.stringify(guardedConfig.structuredContent)}`);
+}
+await expectToolError('bash', { command: 'pwd' }, /bash session/i, sessionGuardClient);
+await expectToolError('bash', { command: 'pwd', session_id: 'other-session' }, /codex-main/i, sessionGuardClient);
+const guardedBash = await sessionGuardClient.request('tools/call', { name: 'bash', arguments: { command: 'pwd', session_id: 'codex-main' } });
+if (guardedBash.structuredContent.bash_session_id !== 'codex-main' || !guardedBash.content?.[0]?.text?.includes('Exit: 0')) {
+  throw new Error(`bash session guard did not allow matching session id: ${JSON.stringify(guardedBash.structuredContent)}`);
+}
+sessionGuardClient.close();
 
 const nonGitRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-non-git-'));
 await fs.writeFile(path.join(nonGitRoot, 'README.md'), '# Non-git fixture\n', 'utf8');

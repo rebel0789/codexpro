@@ -310,8 +310,8 @@ codexpro start</code></pre>
           </article>
           <article>
             <small>不突然跑 shell</small>
-            <h3>关闭 ChatGPT 触发的 bash</h3>
-            <p>正在 Codex 里工作时可以用 <code>codexpro start --no-bash</code>。CodexPro 不会把 MCP bash 绑定到某个 Codex 会话 id。</p>
+            <h3>关闭或显式命中 bash</h3>
+            <p>正在 Codex 里工作时可以用 <code>codexpro start --no-bash</code>，也可以用 <code>--bash-session main --require-bash-session</code>。这个标签属于本地 CodexPro，不是 Codex App 聊天。</p>
           </article>
           <article>
             <small>可视卡片</small>
@@ -376,6 +376,7 @@ codexpro start</code></pre>
           <li><code>.env</code>、私钥、<code>.git</code>、<code>node_modules</code> 和 symlink 逃逸默认阻止。</li>
           <li>safe bash 用于常见检查和测试，不是任意 shell 控制。</li>
           <li><code>--no-bash</code> 会关闭所有 ChatGPT 触发的 shell 命令。</li>
+          <li><code>--bash-session</code> 加 <code>--require-bash-session</code> 会要求 bash 调用显式命中本地会话标签。</li>
           <li>只想让 ChatGPT 做计划时，用 handoff 模式。</li>
         </ul>
       </section>

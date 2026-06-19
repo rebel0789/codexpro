@@ -227,6 +227,7 @@ function onboardingPage(config: CodexProConfig): string {
           <div class="row"><span class="label">Write mode</span><span class="pill ${config.writeMode === "workspace" ? "" : "warn"}">${escapeHtml(writeTone)}</span></div>
           <div class="row"><span class="label">Tool mode</span><span class="pill ${config.toolMode === "standard" ? "" : "warn"}">${escapeHtml(config.toolMode)}</span></div>
           <div class="row"><span class="label">Bash mode</span><span class="pill ${config.bashMode === "safe" ? "" : "warn"}">${escapeHtml(config.bashMode)}</span></div>
+          <div class="row"><span class="label">Bash session</span><span class="pill ${config.requireBashSession ? "warn" : ""}">${escapeHtml(config.bashSessionId ? `${config.bashSessionId}${config.requireBashSession ? " required" : ""}` : "not set")}</span></div>
           <div class="row"><span class="label">Widget domain</span><span class="mono">${escapeHtml(config.widgetDomain)}</span></div>
           <div class="row"><span class="label">Auth</span><span class="pill">${escapeHtml(authLabel)}</span></div>
         </div>
@@ -351,6 +352,8 @@ async function main(): Promise<void> {
       defaultRoot: config.defaultRoot,
       allowedRoots: config.allowedRoots,
       bashMode: config.bashMode,
+      bashSessionId: config.bashSessionId ?? null,
+      requireBashSession: config.requireBashSession,
       writeMode: config.writeMode,
       toolMode: config.toolMode,
       widgetDomain: config.widgetDomain,

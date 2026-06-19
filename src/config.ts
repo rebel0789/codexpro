@@ -15,6 +15,8 @@ export interface CodexProConfig {
   authToken?: string;
   requireHttpToken: boolean;
   bashMode: BashMode;
+  bashSessionId?: string;
+  requireBashSession: boolean;
   writeMode: WriteMode;
   toolMode: ToolMode;
   inheritEnv: boolean;
@@ -140,6 +142,15 @@ function bashModeFrom(value: string | undefined): BashMode {
   return "safe";
 }
 
+function bashSessionIdFrom(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(trimmed)) {
+    throw new Error("CODEXPRO_BASH_SESSION_ID must be 1-64 characters using letters, numbers, dot, underscore, or dash, and must start with a letter or number.");
+  }
+  return trimmed;
+}
+
 function writeModeFrom(value: string | undefined): WriteMode {
   if (value === "off" || value === "handoff" || value === "workspace") return value;
   return "workspace";
@@ -200,6 +211,13 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   const portArg = typeof args.port === "string" ? args.port : undefined;
   const hostArg = typeof args.host === "string" ? args.host : undefined;
   const bashArg = typeof args.bash === "string" ? args.bash : undefined;
+  const bashSessionArg = typeof args["bash-session"] === "string" ? args["bash-session"] : undefined;
+  const requireBashSessionArg =
+    args["require-bash-session"] === true
+      ? "true"
+      : typeof args["require-bash-session"] === "string"
+        ? args["require-bash-session"]
+        : undefined;
   const writeArg = typeof args.write === "string" ? args.write : undefined;
   const toolModeArg = typeof args["tool-mode"] === "string" ? args["tool-mode"] : undefined;
   const widgetDomainArg = typeof args["widget-domain"] === "string" ? args["widget-domain"] : undefined;
@@ -211,6 +229,11 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     boolFrom(process.env.CODEXPRO_REQUIRE_HTTP_TOKEN, false) ||
     boolFrom(process.env.CODEXPRO_TUNNEL_MODE, false) ||
     (!isLoopbackHost(host) && !allowNoToken);
+  const bashSessionId = bashSessionIdFrom(bashSessionArg ?? process.env.CODEXPRO_BASH_SESSION_ID);
+  const requireBashSession = boolFrom(requireBashSessionArg ?? process.env.CODEXPRO_REQUIRE_BASH_SESSION, false);
+  if (requireBashSession && !bashSessionId) {
+    throw new Error("CODEXPRO_REQUIRE_BASH_SESSION requires CODEXPRO_BASH_SESSION_ID or --bash-session.");
+  }
 
   return {
     defaultRoot,
@@ -221,6 +244,8 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     authToken,
     requireHttpToken,
     bashMode: bashModeFrom(bashArg ?? process.env.CODEXPRO_BASH_MODE),
+    bashSessionId,
+    requireBashSession,
     writeMode: writeModeFrom(writeArg ?? process.env.CODEXPRO_WRITE_MODE),
     toolMode: toolModeFrom(toolModeArg ?? process.env.CODEXPRO_TOOL_MODE),
     inheritEnv: process.env.CODEXPRO_INHERIT_ENV === "1",

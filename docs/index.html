@@ -455,8 +455,8 @@ codexpro settings delete --yes</code></pre>
           </article>
           <article>
             <small>No surprise shell</small>
-            <h3>Disable ChatGPT-triggered bash</h3>
-            <p>Use <code>codexpro start --no-bash</code> when you are already working in Codex. CodexPro does not bind MCP bash to a Codex conversation id.</p>
+            <h3>Disable or target bash</h3>
+            <p>Use <code>codexpro start --no-bash</code>, or keep bash enabled with <code>--bash-session main --require-bash-session</code>. Session labels target this local CodexPro server, not a Codex app chat.</p>
           </article>
           <article>
             <small>Visual widgets</small>
@@ -552,6 +552,7 @@ codexpro settings delete --yes</code></pre>
           <li><code>.env</code>, private keys, <code>.git</code>, <code>node_modules</code>, and symlink escapes are blocked.</li>
           <li>Safe bash allows common inspection and test commands, not arbitrary shell control.</li>
           <li><code>--no-bash</code> disables all ChatGPT-triggered shell commands.</li>
+          <li><code>--bash-session</code> with <code>--require-bash-session</code> requires explicit session targeting before bash runs.</li>
           <li>Use handoff mode when you want ChatGPT to plan and Codex to edit.</li>
         </ul>
       </section>

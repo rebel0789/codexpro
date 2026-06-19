@@ -112,11 +112,19 @@ Safety defaults block common sensitive paths:
 
 Use handoff mode if you want ChatGPT to write a plan only and let Codex execute locally.
 
-## Can CodexPro bind bash to a specific Codex session id?
+## Can CodexPro bind bash to a specific session id?
 
-No. CodexPro cannot attach to, read, or execute inside a specific Codex app conversation or terminal session.
+CodexPro cannot attach to, read, or execute inside a specific Codex app conversation or terminal session.
 
 The MCP `bash` tool runs from the CodexPro server process you started for the configured workspace. MCP session ids are HTTP transport state between ChatGPT and CodexPro; they are not Codex conversation ids.
+
+What CodexPro can do is require a matching local bash session label before it runs shell commands:
+
+```bash
+codexpro start --bash-session main --require-bash-session
+```
+
+Then `bash` calls must include `session_id: "main"`. This helps avoid accidental shell execution in the wrong CodexPro terminal, but it is not remote control of an existing Codex app chat.
 
 If you do not want ChatGPT to trigger shell commands while you work in Codex, start CodexPro with bash disabled:
 

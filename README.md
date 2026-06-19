@@ -469,6 +469,7 @@ Startup modes:
 ```bash
 codexpro start                 # normal coding mode: read/write/edit/search/bash
 codexpro start --no-bash       # normal coding mode without ChatGPT-triggered shell commands
+codexpro start --bash-session main --require-bash-session
 codexpro setup                 # guided onboarding for new users
 codexpro start --mode handoff  # planning-only .ai-bridge handoff
 codexpro start --mode handoff --no-bash
@@ -1050,13 +1051,21 @@ If you are already working in Codex and do not want any ChatGPT-triggered shell 
 codexpro start --no-bash
 ```
 
+If you want shell commands enabled but tied to the CodexPro terminal you intentionally started, require a matching local bash session label:
+
+```bash
+codexpro start --bash-session main --require-bash-session
+```
+
+With that guard enabled, the `bash` MCP tool rejects commands unless the call includes `session_id: "main"`. The session label is a local UX guard, not a secret and not a Codex app conversation id.
+
 If you want ChatGPT to plan while Codex or another local agent edits and runs commands, combine handoff mode with disabled bash:
 
 ```bash
 codexpro start --mode handoff --no-bash
 ```
 
-For parallel work, run a separate CodexPro server for the other repo, port, or tunnel profile instead of trying to bind CodexPro to an existing Codex conversation id:
+For parallel work, run a separate CodexPro server for the other repo, port, tunnel profile, or bash session label instead of trying to bind CodexPro to an existing Codex conversation id:
 
 ```bash
 codexpro start --root /path/to/other/repo --port 8788 --no-bash

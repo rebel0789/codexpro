@@ -510,7 +510,10 @@ export const toolCardWidgetHtml = String.raw`
     if (data?.codexpro_tool === "codexpro_self_test") return data?.status ? "Status " + data.status : "Local diagnostic";
     if (data?.codexpro_tool === "codexpro_inventory") return (data?.skill_count ?? 0) + " skills, " + (data?.mcp_server_count ?? 0) + " MCP servers";
     if (data?.codexpro_tool === "list_workspaces") return (data?.count ?? 0) + " open workspaces";
-    if (data?.codexpro_tool === "server_config") return "tools " + (data?.toolMode || data?.tool_mode || "-") + ", bash " + (data?.bashMode || data?.bash_mode || "-");
+    if (data?.codexpro_tool === "server_config") {
+      const session = data?.bashSessionId || data?.bash_session_id;
+      return "tools " + (data?.toolMode || data?.tool_mode || "-") + ", bash " + (data?.bashMode || data?.bash_mode || "-") + (session ? ", session " + session : "");
+    }
     if (data?.codexpro_tool === "workspace_snapshot") return data?.root || "Workspace snapshot";
     if (data?.codexpro_tool === "git_status") {
       const count = Array.isArray(data?.changed_files) ? data.changed_files.length : 0;
@@ -796,10 +799,13 @@ export const toolCardWidgetHtml = String.raw`
   function renderServerConfig(data) {
     const blocked = Array.isArray(data.blockedGlobs) ? data.blockedGlobs : [];
     const allowed = Array.isArray(data.allowedRoots) ? data.allowedRoots : [];
+    const bashSession = data.bashSessionId || data.bash_session_id || "";
+    const bashSessionRequired = Boolean(data.requireBashSession || data.require_bash_session);
     const rootRows = [
       '<div class="file-row"><span class="file-code">root</span><span class="file-name">' + esc(data.defaultRoot || "-") + '</span></div>',
       '<div class="file-row"><span class="file-code">url</span><span class="file-name">' + esc((data.host || "127.0.0.1") + ":" + (data.port || "-")) + '</span></div>',
-      '<div class="file-row"><span class="file-code">ui</span><span class="file-name">' + esc(data.widgetDomain || "-") + '</span></div>'
+      '<div class="file-row"><span class="file-code">ui</span><span class="file-name">' + esc(data.widgetDomain || "-") + '</span></div>',
+      bashSession ? '<div class="file-row"><span class="file-code">bash</span><span class="file-name">' + esc("session " + bashSession + (bashSessionRequired ? " required" : "")) + '</span></div>' : ""
     ].join("");
     const allowedRows = allowed.map((root) =>
       '<div class="file-row"><span class="file-code">allow</span><span class="file-name">' + esc(root) + '</span></div>'
@@ -815,11 +821,13 @@ export const toolCardWidgetHtml = String.raw`
     return '<article class="card">' + header(data, [
       pill("tools " + (data.toolMode || "-"), "info"),
       pill("bash " + (data.bashMode || "-")),
+      bashSession ? pill("session " + bashSession, bashSessionRequired ? "warn" : "info") : "",
       pill(data.authEnabled ? "auth on" : "auth off", data.authEnabled ? "good" : "warn")
     ].join("")) + '<div class="body">' +
       '<div class="summary">' +
       summaryItem("Write", data.writeMode || "-") +
       summaryItem("Bash", data.bashMode || "-") +
+      summaryItem("Session", bashSession ? bashSession + (bashSessionRequired ? " required" : "") : "-") +
       summaryItem("Tools", data.toolMode || "-") +
       '</div>' +
       '<div class="section-label">Runtime</div><div class="file-list">' + rootRows + '</div>' +

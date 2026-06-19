@@ -252,9 +252,14 @@ function serverInstructions(config: CodexProConfig): string {
     "4. Edit with write/edit. After edits, call show_changes once for git status, diff stats, and review diff.",
     "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.",
     "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad bash/git calls.",
+    config.requireBashSession && config.bashSessionId
+      ? `7. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
+      : config.bashSessionId
+        ? `7. Bash session label for this server is "${config.bashSessionId}".`
+        : "",
     "",
     `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function limitInt(value: unknown, fallback: number, min: number, max: number): number {
@@ -542,6 +547,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         widgetDomain: config.widgetDomain,
         authEnabled: Boolean(config.authToken),
         bashMode: config.bashMode,
+        bashSessionId: config.bashSessionId ?? null,
+        requireBashSession: config.requireBashSession,
         writeMode: config.writeMode,
         toolMode: config.toolMode,
         inheritEnv: config.inheritEnv,
@@ -723,7 +730,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         "",
         `Status: ${status}`,
         `Workspace: ${workspace.root}`,
-        `Mode: tools=${config.toolMode}, write=${config.writeMode}, bash=${config.bashMode}`,
+        `Mode: tools=${config.toolMode}, write=${config.writeMode}, bash=${config.bashMode}${config.bashSessionId ? `, bash_session=${config.bashSessionId}${config.requireBashSession ? " required" : ""}` : ""}`,
         `Expected tools: ${toolNamesForMode(config).length}`,
         `Duration: ${Date.now() - started} ms`,
         "",
@@ -747,6 +754,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         expected_tools: toolNamesForMode(config),
         expected_tool_count: toolNamesForMode(config).length,
         bash_mode: config.bashMode,
+        bash_session_id: config.bashSessionId ?? null,
+        require_bash_session: config.requireBashSession,
         write_mode: config.writeMode,
         tool_mode: config.toolMode,
         files_touched: filesTouched,
@@ -1230,6 +1239,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         command: z.string().describe("Command to run."),
+        session_id: z.string().optional().describe(config.requireBashSession && config.bashSessionId ? `Required bash session id for this server: ${config.bashSessionId}.` : "Optional bash session id. If configured on the server, a provided value must match it."),
         cwd: z.string().optional().describe("Working directory relative to workspace root. Default: ."),
         timeout_ms: z.number().int().min(1000).max(180000).optional().describe("Timeout in milliseconds. Default: 30000.")
       },
@@ -1244,10 +1254,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const result = await runBash(config, guard, workspace, String(args.command ?? ""), {
         cwd: args.cwd,
-        timeoutMs: args.timeout_ms
+        timeoutMs: args.timeout_ms,
+        sessionId: args.session_id
       });
       const text = `# Bash\n\n\`\`\`bash\n$ ${result.command}\n\`\`\`\n\nCWD: ${result.cwd}\nExit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}\nDuration: ${result.durationMs} ms\n\n## stdout\n\n\`\`\`text\n${result.stdout || ""}\n\`\`\`\n\n## stderr\n\n\`\`\`text\n${result.stderr || ""}\n\`\`\``;
-      return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result });
+      return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result, bash_session_id: result.bashSessionId ?? null });
     }
   );
 
