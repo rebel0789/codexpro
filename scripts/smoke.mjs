@@ -412,6 +412,13 @@ const guardedBash = await sessionGuardClient.request('tools/call', { name: 'bash
 if (guardedBash.structuredContent.bash_session_id !== 'codex-main' || !guardedBash.content?.[0]?.text?.includes('Exit: 0')) {
   throw new Error(`bash session guard did not allow matching session id: ${JSON.stringify(guardedBash.structuredContent)}`);
 }
+const guardedSelfTest = await sessionGuardClient.request('tools/call', {
+  name: 'codexpro_self_test',
+  arguments: { write_probe: false, pro_context_probe: false }
+});
+if (guardedSelfTest.structuredContent.status === 'fail') {
+  throw new Error(`codexpro_self_test failed under bash session guard: ${JSON.stringify(guardedSelfTest.structuredContent.checks)}`);
+}
 sessionGuardClient.close();
 
 const nonGitRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-non-git-'));

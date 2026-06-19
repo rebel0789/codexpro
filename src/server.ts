@@ -696,10 +696,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           if (config.bashMode === "off") {
             check("bash policy", "warn", "bash disabled");
           } else {
-            const pwd = await runBash(config, guard, workspace, "pwd", { timeoutMs: 10_000 });
+            const bashProbeOptions = { timeoutMs: 10_000, sessionId: config.bashSessionId };
+            const pwd = await runBash(config, guard, workspace, "pwd", bashProbeOptions);
             if (config.bashMode === "safe") {
               try {
-                await runBash(config, guard, workspace, "ls $HOME", { timeoutMs: 10_000 });
+                await runBash(config, guard, workspace, "ls $HOME", bashProbeOptions);
                 check("bash policy", "fail", "safe bash allowed environment expansion unexpectedly");
               } catch {
                 check("bash policy", pwd.exitCode === 0 ? "pass" : "warn", "safe bash allowed pwd and blocked environment expansion");

@@ -16,6 +16,22 @@ function run(args, env) {
   return `${result.stdout}\n${result.stderr}`;
 }
 
+function runFail(args, env, pattern) {
+  const result = spawnSync(process.execPath, ['scripts/codexpro.mjs', ...args], {
+    cwd: path.resolve('.'),
+    env,
+    encoding: 'utf8'
+  });
+  if (result.status === 0) {
+    throw new Error(`codexpro ${args.join(' ')} unexpectedly succeeded\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  }
+  const output = `${result.stdout}\n${result.stderr}`;
+  if (pattern && !pattern.test(output)) {
+    throw new Error(`codexpro ${args.join(' ')} failed for the wrong reason\n${output}`);
+  }
+  return output;
+}
+
 async function readProfile(root, home) {
   const realRoot = await fs.realpath(root);
   const id = createHash('sha256').update(realRoot).digest('hex').slice(0, 24);
@@ -68,6 +84,39 @@ if (shown.includes('codexpro-settings-token')) {
 const profile = await readProfile(root, home);
 if (profile.toolMode !== 'full' || profile.widgetDomain !== 'https://widgets.codexpro.test') {
   throw new Error(`settings profile did not persist tool/widget options: ${JSON.stringify(profile)}`);
+}
+
+runFail([
+  'settings',
+  'set',
+  '--root',
+  root,
+  '--tunnel',
+  'ngrok',
+  '--hostname',
+  'codexpro-test.ngrok-free.app',
+  '--require-bash-session'
+], env, /requires --bash-session/i);
+
+const guarded = run([
+  'settings',
+  'set',
+  '--root',
+  root,
+  '--tunnel',
+  'ngrok',
+  '--hostname',
+  'codexpro-test.ngrok-free.app',
+  '--bash-session',
+  'guarded-main',
+  '--require-bash-session'
+], env);
+if (!guarded.includes('Bash session') || !guarded.includes('guarded-main required')) {
+  throw new Error(`settings save did not display guarded bash session\n${guarded}`);
+}
+const guardedProfile = await readProfile(root, home);
+if (guardedProfile.bashSession !== 'guarded-main' || guardedProfile.requireBashSession !== true) {
+  throw new Error(`settings profile did not persist bash session guard: ${JSON.stringify(guardedProfile)}`);
 }
 
 const listed = run(['settings', 'list'], env);
