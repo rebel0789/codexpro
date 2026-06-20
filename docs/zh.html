@@ -20,7 +20,7 @@
     <a class="skip-link" href="#quickstart">跳到设置</a>
     <header class="site-header">
       <a class="brand" href="#top" aria-label="CodexPro 中文首页">
-        <span class="brand-mark">CP</span>
+        <img class="brand-mark" src="./favicon.svg" width="34" height="34" alt="" aria-hidden="true" />
         <span>CodexPro</span>
       </a>
       <nav aria-label="主导航">
@@ -37,68 +37,73 @@
     <main id="top">
       <section class="hero">
         <div class="hero-copy">
-          <p class="launch-pill"><img src="./star.svg" alt="" aria-hidden="true" />面向 ChatGPT Plus / Pro 的开源 MCP 桥</p>
-          <p class="eyebrow">ChatGPT plus 本地仓库工具</p>
-          <h1>把 ChatGPT 变成本地代码代理。</h1>
+          <p class="launch-pill"><img src="./star.svg" alt="" aria-hidden="true" />简单安装</p>
+          <p class="eyebrow">在仓库里安装</p>
+          <h1>把 ChatGPT 连接到本地代码。</h1>
           <p class="hero-lede">
-            CodexPro 把 ChatGPT Developer Mode 连接到你机器上的仓库。一个 setup 命令之后，ChatGPT 可以读取文件、搜索代码、精确编辑、查看 git 状态和 diff、运行安全检查，并读取 Codex 风格上下文。它不绕过限制，也不提供模型。
+            安装 CLI，在项目里运行 setup，然后把复制好的 Server URL 粘贴到 ChatGPT Developer Mode。CodexPro 会处理本地 server、token、tunnel 和 workspace 工具。
           </p>
-          <div class="hero-proof" aria-label="核心能力">
-            <span>AGENTS.md 上下文</span>
-            <span>.ai-bridge handoff</span>
-            <span>ngrok / Cloudflare 稳定 URL</span>
-          </div>
-          <div class="hero-actions">
-            <a class="button primary" href="#quickstart">开始设置</a>
-            <a class="button secondary star-button" href="https://github.com/rebel0789/codexpro"><img src="./star.svg" alt="" aria-hidden="true" />GitHub 点星</a>
-            <a class="button secondary" href="https://www.npmjs.com/package/codexpro">查看 npm</a>
-          </div>
           <div class="install-line" role="group" aria-label="安装命令">
             <code>npm install -g codexpro
 codexpro setup</code>
             <button class="copy-button" data-copy="npm install -g codexpro&#10;codexpro setup">复制</button>
           </div>
+          <div class="hero-proof" aria-label="核心能力">
+            <span>AGENTS.md 上下文</span>
+            <span>.ai-bridge handoff</span>
+            <span>紧凑卡片</span>
+            <span>Codex session metadata 可选开启</span>
+          </div>
+          <div class="hero-actions">
+            <a class="button primary" href="#quickstart">安装 CodexPro</a>
+            <a class="button secondary star-button" href="https://github.com/rebel0789/codexpro"><img src="./star.svg" alt="" aria-hidden="true" />GitHub 点星</a>
+            <a class="button secondary" href="https://www.npmjs.com/package/codexpro">查看 npm</a>
+          </div>
         </div>
 
         <div class="hero-visual" aria-label="CodexPro 工作区预览">
           <div class="workspace-demo">
-            <div class="demo-toolbar">
-              <div class="window-dots" aria-hidden="true"><span></span><span></span><span></span></div>
-              <strong>ChatGPT + CodexPro</strong>
-              <small>connected</small>
+            <div class="demo-status">
+              <span class="status-dot" aria-hidden="true"></span>
+              <div class="status-label">
+                <strong>Workspace bridge</strong>
+                <small>/path/to/repo · token protected</small>
+              </div>
+              <span class="status-badge">setup</span>
             </div>
             <div class="demo-grid">
               <div class="chat-pane">
-                <small>ChatGPT</small>
-                <p>“打开当前仓库，读取 Codex 上下文，修复失败测试，然后给我看 diff。”</p>
-                <div class="message-chip">Developer Mode app: CodexPro</div>
+                <small>安装</small>
+                <p><code>npm install -g codexpro</code><br /><code>codexpro setup</code></p>
+                <div class="message-chip">Server URL 自动复制</div>
               </div>
               <div class="tool-pane">
-                <small>CodexPro tools</small>
+                <small>然后 ChatGPT 可以</small>
                 <div class="tool-card-mini active">
-                  <span>codex_context</span>
-                  <strong>AGENTS.md + .ai-bridge + git 状态</strong>
+                  <span>read/search</span>
+                  <strong>读取文件并搜索代码</strong>
                 </div>
                 <div class="tool-card-mini">
-                  <span>edit</span>
+                  <span>edit/review</span>
                   <strong>工作区内精确替换</strong>
                 </div>
                 <div class="tool-card-mini">
-                  <span>bash</span>
-                  <strong>安全运行 npm test / lint / build</strong>
+                  <span>verify</span>
+                  <strong>紧凑显示 npm test / lint / build 结果</strong>
                 </div>
               </div>
             </div>
             <div class="repo-pane">
-              <div class="repo-row"><span>README.md</span><strong>加入中文文档入口</strong></div>
-              <div class="repo-row"><span>src/http.ts</span><strong>token auth checked</strong></div>
+              <div class="repo-row"><span>README.md</span><strong>只导出选中的上下文</strong></div>
+              <div class="repo-row"><span>src/server.ts</span><strong>仅在 workspace 内编辑</strong></div>
               <div class="repo-row"><span>.ai-bridge/current-plan.md</span><strong>handoff ready</strong></div>
+              <div class="repo-row"><span>~/.codex/sessions</span><strong>metadata 模式才读取</strong></div>
             </div>
           </div>
           <div class="floating-note">
-            <span>日常命令</span>
+            <span>setup 之后</span>
             <strong>codexpro start</strong>
-            <small>用 ngrok 或 Cloudflare named tunnel 保持同一个 ChatGPT URL。</small>
+            <small>以后在同一个仓库里运行这个命令，就能重新连接 ChatGPT。</small>
           </div>
         </div>
       </section>
@@ -106,18 +111,18 @@ codexpro setup</code>
       <section class="strip" aria-label="核心流程">
         <div>
           <span>01</span>
-          <strong>Start</strong>
-          <p>全局安装一次，在目标仓库里运行 setup。</p>
+          <strong>Install</strong>
+          <p>先运行 <code>npm install -g codexpro</code>。</p>
         </div>
         <div>
           <span>02</span>
-          <strong>Paste</strong>
-          <p>复制好的 Server URL 已包含私有 token。</p>
+          <strong>Setup</strong>
+          <p>在你的项目里运行 <code>codexpro setup</code>。</p>
         </div>
         <div>
           <span>03</span>
-          <strong>Build</strong>
-          <p>ChatGPT 获得本地仓库工具和显式上下文。</p>
+          <strong>Paste</strong>
+          <p>把复制好的 Server URL 粘贴到 ChatGPT Create app。</p>
         </div>
       </section>
 
@@ -132,7 +137,7 @@ codexpro setup</code>
             Codex 和 ChatGPT 是不同产品界面。某个工作流暂时不可用时，如果另一个你本来就有权限的界面仍然可用，CodexPro 可以让它继续在同一个本地仓库上工作，但不会修改任何产品限制。
           </p>
           <p>
-            如果你的 ChatGPT 账号在 Web 产品里提供 GPT-5.5 或更强模型，并且该模型界面可以调用 Developer Mode Apps，CodexPro 可以让它通过 MCP 使用本地仓库工具。CodexPro 不提供、不代理、不转售、也不解锁模型。
+            如果你的 ChatGPT 账号在 Web 产品里提供更强模型，并且该模型界面可以调用 Developer Mode Apps，CodexPro 可以让它通过 MCP 使用本地仓库工具。CodexPro 不提供、不代理、不转售、也不解锁模型。
           </p>
         </div>
         <div class="value-matrix">
@@ -314,6 +319,16 @@ codexpro start</code></pre>
             <p>正在 Codex 里工作时可以用 <code>codexpro start --no-bash</code>，也可以用 <code>--bash-session main --require-bash-session</code>。这个标签属于本地 CodexPro，不是 Codex App 聊天。</p>
           </article>
           <article>
+            <small>本地页面</small>
+            <h3>状态和重启命令</h3>
+            <p>终端按 <code>o</code> 打开 token-protected 本地页面。页面显示 mode、session 状态、allowed roots，并提供 no-bash、required bash session、Codex session metadata/read 和 full transcript 的复制按钮。</p>
+          </article>
+          <article>
+            <small>Codex 会话</small>
+            <h3>显式开启本地历史列表</h3>
+            <p><code>--codex-sessions metadata</code> 会列出本地 Codex session id、标题、cwd 和 resume 命令。<code>read</code> 模式才允许有限 transcript 读取；两者都不会附加到正在运行的 Codex 聊天。</p>
+          </article>
+          <article>
             <small>可视卡片</small>
             <h3>只给关键动作卡片</h3>
             <p>open workspace 摘要、write/edit diff、show_changes 审查和 handoff 导出会显示紧凑卡片。skills、git 和 tree 详情默认折叠；<code>load_skill</code> 按需加载有限长度的说明，bash 保持纯数据。</p>
@@ -322,6 +337,11 @@ codexpro start</code></pre>
             <small>上下文持久化</small>
             <h3>用文件保持连续性</h3>
             <p>把项目规则写进 <code>AGENTS.md</code>，把计划和决策写进 <code>.ai-bridge</code>，让 ChatGPT 换会话后也能恢复上下文。</p>
+          </article>
+          <article>
+            <small>本地网页后台</small>
+            <h3>修改下一次启动的 profile</h3>
+            <p>token-protected 本地页面可以保存 tunnel、hostname、port、mode、bash、Codex sessions、write/tool mode、widget origin 和 tunnel config 路径，下一次 <code>codexpro start</code> 生效。原始 tunnel token、账号切换和后台服务管理仍不放进浏览器。</p>
           </article>
         </div>
       </section>
@@ -377,6 +397,7 @@ codexpro start</code></pre>
           <li>safe bash 用于常见检查和测试，不是任意 shell 控制。</li>
           <li><code>--no-bash</code> 会关闭所有 ChatGPT 触发的 shell 命令。</li>
           <li><code>--bash-session</code> 加 <code>--require-bash-session</code> 会要求 bash 调用显式命中本地会话标签。</li>
+          <li><code>--codex-sessions</code> 默认关闭；开启后只读取本地 Codex JSONL 历史，不进入正在运行的 Codex 聊天。</li>
           <li>只想让 ChatGPT 做计划时，用 handoff 模式。</li>
         </ul>
       </section>

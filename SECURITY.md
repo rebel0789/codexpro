@@ -79,12 +79,14 @@ codexpro start \
 - Public tunnel mode and non-loopback binds fail closed if `CODEXPRO_HTTP_TOKEN` is missing.
 - Do not commit printed connector URLs that include `codexpro_token`.
 - Do not commit Cloudflare tunnel tokens.
+- Do not paste raw Cloudflare tunnel tokens into browser pages or screenshots. Use `--cloudflare-token-file` or the local page's Cloudflare token file field instead.
 - Use `--mode handoff` for planning workflows where ChatGPT should not edit source files.
 - Preview local handoff execution with `codexpro execute-handoff --dry-run` before running an unfamiliar adapter or custom command.
 - Keep `execute-handoff` local. Do not wrap it in a remote MCP tool unless you add a stronger approval and sandbox story.
 - Use default agent mode only with trusted ChatGPT sessions and repo-specific roots.
 - Use `--no-bash` when ChatGPT should never trigger shell commands in the workspace.
 - Use `--bash-session <id> --require-bash-session` when bash should be enabled only for calls that explicitly target this local CodexPro terminal label.
+- Keep Codex session history access off unless needed. `--codex-sessions metadata` only lists local Codex JSONL metadata; `--codex-sessions read` allows bounded transcript reads.
 - Use `--bash full` only for trusted local repos.
 - Do not treat MCP session ids or bash session labels as Codex conversation ids. CodexPro does not execute inside a Codex app session.
 - Prefer a repo-specific `--root` instead of `--allow-home`.

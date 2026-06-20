@@ -31,16 +31,36 @@
   <a href="SECURITY.md">安全说明</a>
 </p>
 
-CodexPro 把 ChatGPT Developer Mode 变成本地仓库的 MCP 代码代理。你在目标仓库里运行 `codexpro setup`，把复制好的 Server URL 粘贴到 ChatGPT 的 Create app 页面，ChatGPT 就能读取文件、搜索代码、查看 git 状态、写入或精确编辑文件，并运行安全范围内的验证命令。
+## 安装
+
+CodexPro 需要 Node.js 20+，以及能使用 Apps / Developer Mode 的 ChatGPT Plus 或 Pro 账号。
+
+先安装 CLI：
+
+```bash
+npm install -g codexpro
+```
+
+进入你想让 ChatGPT 工作的仓库，然后运行 setup：
+
+```bash
+cd /path/to/your/repo
+codexpro setup
+```
+
+CodexPro 会自动复制 ChatGPT Server URL。到 ChatGPT 打开 `Settings -> Apps -> Advanced settings -> Create app`，粘贴这个 URL，并选择 `Authentication: No Authentication / None`。
+
+以后同一个仓库日常启动只需要：
+
+```bash
+codexpro start
+```
+
+CodexPro 把 ChatGPT Developer Mode 变成本地仓库的 MCP 代码代理。ChatGPT 可以读取文件、搜索代码、查看 git 状态、写入或精确编辑文件，并运行安全范围内的验证命令。
 
 CodexPro 不是速率限制绕过工具。它不会绕过、提升、合并、转售或修改 ChatGPT、Codex、OpenAI 或第三方模型的限制。它只是通过官方 Developer Mode / MCP App 路径，把你自己的 ChatGPT 会话连接到你自己的本地仓库。
 
 如果 Codex 当前工作流暂时不可用，而你的 ChatGPT 页面仍然可用，CodexPro 可以让你继续在同一个本地仓库上工作。反过来也一样：ChatGPT 负责高上下文规划，Codex、OpenCode、Pi 或其他本地执行器负责终端里的实际执行。
-
-```bash
-npm install -g codexpro
-codexpro setup
-```
 
 ## 适合谁
 
@@ -84,28 +104,7 @@ ChatGPT Web 可以操作：
 
 ChatGPT 里每个 CodexPro 工具都可以显示紧凑 v9 卡片：server config、自测、workspace 摘要、读写 diff、bash 验证、git/tree/search/context 和 handoff/export 都有结构化视图。git、skills、tree、terminal 输出、context 和 raw diff 默认折叠或截断，避免在聊天里刷出大段原始数据。`CODEXPRO_WIDGET_DOMAIN` 用于设置 ChatGPT widget iframe 的专用 HTTPS origin，正式提交 app 前应换成你控制的独立域名。
 
-## 快速开始
-
-先全局安装一次：
-
-```bash
-npm install -g codexpro
-```
-
-进入你想让 ChatGPT 工作的仓库：
-
-```bash
-cd /path/to/your/repo
-codexpro setup
-```
-
-`setup` 会引导你选择端口、模式和公网 URL 方式，并保存当前仓库的配置。它会启动本地 MCP HTTP 服务、生成私有 CodexPro token、启动隧道，并把完整 Server URL 复制到剪贴板。
-
-以后同一个仓库的日常启动只需要：
-
-```bash
-codexpro start
-```
+## 其他启动方式
 
 不想全局安装时，也可以用：
 
@@ -371,6 +370,23 @@ codexpro start --bash-session main --require-bash-session
 
 这不是 Codex App 聊天会话 id，而是 CodexPro 本地 bash 工具的显式匹配标签。
 
+bash 结果默认使用紧凑 transcript，避免 ChatGPT 对话里突然铺开大段 stdout/stderr。完整 stdout/stderr 仍在结构化工具数据里，CodexPro 卡片里的输出预览默认折叠。需要旧行为时可以显式打开：
+
+```bash
+codexpro start --bash-transcript full
+```
+
+CodexPro 也可以在 full tools 下显式开启只读的本地 Codex 会话列表：
+
+```bash
+codexpro start --tool-mode full --codex-sessions metadata
+codexpro start --tool-mode full --codex-sessions read
+```
+
+`metadata` 会增加 `codex_sessions` 工具，从 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 读取本地 JSONL 历史，列出 session id、标题、cwd、来源文件和 `codex resume <session-id>` 命令。`read` 还会增加 `read_codex_session`，用于有限长度的 transcript 读取。它类似本地 session manager 扫描 Codex 历史文件，但仍然不会附加到正在运行的 Codex App 聊天，也不会在那个会话里执行命令或绕过产品限制。
+
+如果 Codex 历史不在默认位置，可以用 `--codex-dir <dir>`。
+
 如果只想让 ChatGPT 规划、由你本地决定是否执行：
 
 ```bash
@@ -397,10 +413,16 @@ codexpro watch-handoff --agent opencode --model provider/model --yes
 ```text
 Enter  打开 ChatGPT connector 设置
 c      再次复制 Server URL
-o      打开本地 setup/status 页面
+o      打开本地 admin dashboard
 h      显示帮助
 q      停止 CodexPro
 ```
+
+本地 admin dashboard 是带 token 保护的 setup/settings 页面。它会显示当前 workspace、local MCP endpoint、安全模式、安装/启动命令、ChatGPT 连接步骤、saved profile 设置和 allowed roots。
+
+页面也提供 GitHub、npm、docs 链接，以及 global install、guided setup、daily start、source checkout setup 和高级重启命令的复制按钮。它能修改下一次启动使用的 saved profile：tunnel provider、public hostname、port、mode、bash mode、transcript、Codex session 模式、write mode、tool mode、widget origin 和 tunnel config 路径。修改后需要重新运行 `codexpro start` 才会生效。
+
+浏览器 admin 页面只负责 setup/settings/status 和 MCP endpoint；不能切换 ChatGPT 账号，不能直接保存原始 Cloudflare tunnel token，也不能把 CodexPro 作为后台服务开关。Cloudflare dashboard-managed tunnel 请把 token 放在本地文件里，再填写 Cloudflare token file。
 
 ## FAQ
 

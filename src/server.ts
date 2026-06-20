@@ -11,6 +11,7 @@ import { gitDiff, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
+import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 
@@ -25,6 +26,32 @@ function textResult(text: string, structuredContent: Record<string, unknown> = {
     structuredContent: redactStructured(structuredContent),
     _meta: meta
   };
+}
+
+function countTextLines(value: string | undefined): number {
+  if (!value) return 0;
+  return value.split(/\r?\n/).filter((line) => line.length > 0).length;
+}
+
+function bashTextResult(config: CodexProConfig, result: Awaited<ReturnType<typeof runBash>>): string {
+  if (config.bashTranscript === "full") {
+    return `# Bash\n\n\`\`\`bash\n$ ${result.command}\n\`\`\`\n\nCWD: ${result.cwd}\nExit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}\nDuration: ${result.durationMs} ms\n\n## stdout\n\n\`\`\`text\n${result.stdout || ""}\n\`\`\`\n\n## stderr\n\n\`\`\`text\n${result.stderr || ""}\n\`\`\``;
+  }
+
+  const stdoutLines = countTextLines(result.stdout);
+  const stderrLines = countTextLines(result.stderr);
+  return [
+    "# Bash",
+    "",
+    `\`${result.command}\``,
+    "",
+    `CWD: ${result.cwd}`,
+    `Exit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}`,
+    `Duration: ${result.durationMs} ms`,
+    `Output: stdout ${stdoutLines} line${stdoutLines === 1 ? "" : "s"}, stderr ${stderrLines} line${stderrLines === 1 ? "" : "s"}.`,
+    "",
+    "Raw stdout/stderr are in the structured CodexPro card. Start with `--bash-transcript full` to print raw output in chat."
+  ].join("\n");
 }
 
 function errorResult(error: unknown): any {
@@ -216,9 +243,17 @@ const FULL_TOOL_NAMES = [
 ] as const;
 
 function toolNamesForMode(config: CodexProConfig): string[] {
-  if (config.toolMode === "full") return [...FULL_TOOL_NAMES];
-  if (config.toolMode === "minimal") return [...MINIMAL_TOOL_NAMES];
-  return [...STANDARD_TOOL_NAMES];
+  const names: string[] =
+    config.toolMode === "full"
+      ? [...FULL_TOOL_NAMES]
+      : config.toolMode === "minimal"
+        ? [...MINIMAL_TOOL_NAMES]
+        : [...STANDARD_TOOL_NAMES];
+  if (config.toolMode === "full" && config.codexSessions !== "off") {
+    names.push("codex_sessions");
+    if (config.codexSessions === "read") names.push("read_codex_session");
+  }
+  return names;
 }
 
 const MINIMAL_TOOLS = new Set<string>(MINIMAL_TOOL_NAMES);
@@ -252,10 +287,13 @@ function serverInstructions(config: CodexProConfig): string {
     "4. Edit with write/edit. After edits, call show_changes once for git status, diff stats, and review diff.",
     "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.",
     "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad bash/git calls.",
+    config.codexSessions !== "off"
+      ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
+      : "",
     config.requireBashSession && config.bashSessionId
-      ? `7. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
+      ? `8. Bash session guard is enabled. Every bash call must include session_id="${config.bashSessionId}".`
       : config.bashSessionId
-        ? `7. Bash session label for this server is "${config.bashSessionId}".`
+        ? `8. Bash session label for this server is "${config.bashSessionId}".`
         : "",
     "",
     `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
@@ -547,8 +585,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         widgetDomain: config.widgetDomain,
         authEnabled: Boolean(config.authToken),
         bashMode: config.bashMode,
+        bashTranscript: config.bashTranscript,
         bashSessionId: config.bashSessionId ?? null,
         requireBashSession: config.requireBashSession,
+        codexSessions: config.codexSessions,
+        codexDir: config.codexDir,
         writeMode: config.writeMode,
         toolMode: config.toolMode,
         inheritEnv: config.inheritEnv,
@@ -1258,7 +1299,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         timeoutMs: args.timeout_ms,
         sessionId: args.session_id
       });
-      const text = `# Bash\n\n\`\`\`bash\n$ ${result.command}\n\`\`\`\n\nCWD: ${result.cwd}\nExit: ${result.exitCode}${result.signal ? ` (${result.signal})` : ""}\nDuration: ${result.durationMs} ms\n\n## stdout\n\n\`\`\`text\n${result.stdout || ""}\n\`\`\`\n\n## stderr\n\n\`\`\`text\n${result.stderr || ""}\n\`\`\``;
+      const text = bashTextResult(config, result);
       return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result, bash_session_id: result.bashSessionId ?? null });
     }
   );
@@ -1544,6 +1585,86 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       });
     }
   );
+
+  if (config.codexSessions !== "off") {
+    registerCodexTool(
+      config,
+      server,
+      "codex_sessions",
+      {
+        title: "Codex Sessions",
+        description:
+          "Opt-in, read-only local Codex session history browser. Lists metadata from the user's configured Codex session JSONL files without reading full transcripts.",
+        inputSchema: {
+          max_sessions: z.number().int().min(1).max(200).optional().describe("Maximum sessions to return. Default: 30."),
+          query: z.string().optional().describe("Optional case-insensitive search over session id, title, summary, cwd, and source path.")
+        },
+        annotations: READ_ONLY_ANNOTATIONS,
+        _meta: {
+          ...toolCardMeta(),
+          "openai/toolInvocation/invoking": "Listing local Codex sessions...",
+          "openai/toolInvocation/invoked": "Codex sessions ready"
+        }
+      },
+      async (args) => {
+        const result = await listCodexSessions(config, {
+          maxSessions: args.max_sessions,
+          query: args.query
+        });
+        const rows = result.sessions.length
+          ? result.sessions.map((session) => `- ${session.session_id}  ${session.title || "(untitled)"}${session.project_dir ? `  cwd=${session.project_dir}` : ""}`).join("\n")
+          : "- No Codex sessions found.";
+        const text = `# Codex Sessions\n\nCodex dir: ${result.codex_dir}\nMode: ${config.codexSessions}\nTotal matched: ${result.total_found}\n\n${rows}`;
+        return textResult(text, {
+          codex_dir: result.codex_dir,
+          roots: result.roots,
+          sessions: result.sessions,
+          total_found: result.total_found,
+          codex_sessions_mode: config.codexSessions
+        });
+      }
+    );
+
+    if (config.codexSessions === "read") {
+      registerCodexTool(
+        config,
+        server,
+        "read_codex_session",
+        {
+          title: "Read Codex Session",
+          description:
+            "Opt-in, read-only local Codex transcript reader. Requires --codex-sessions read and returns a bounded transcript from a local Codex session JSONL file.",
+          inputSchema: {
+            session_id: z.string().optional().describe("Codex session id from codex_sessions."),
+            source_path: z.string().optional().describe("Source path from codex_sessions. Must be inside the configured Codex session roots."),
+            max_messages: z.number().int().min(1).max(400).optional().describe("Maximum transcript messages. Default: 80."),
+            max_total_bytes: z.number().int().min(4000).max(400000).optional().describe("Maximum transcript content bytes. Default: 80000.")
+          },
+          annotations: READ_ONLY_ANNOTATIONS,
+          _meta: {
+            ...toolCardMeta(),
+            "openai/toolInvocation/invoking": "Reading local Codex session...",
+            "openai/toolInvocation/invoked": "Codex session read"
+          }
+        },
+        async (args) => {
+          const result = await readCodexSession(config, {
+            sessionId: args.session_id,
+            sourcePath: args.source_path,
+            maxMessages: args.max_messages,
+            maxTotalBytes: args.max_total_bytes
+          });
+          return textResult(result.text, {
+            session: result.session,
+            messages: result.messages,
+            message_count: result.messages.length,
+            truncated: result.truncated,
+            codex_sessions_mode: config.codexSessions
+          });
+        }
+      );
+    }
+  }
 
   registerCodexTool(
     config,

@@ -1,3 +1,6 @@
+/* Hallmark preflight: P4 H4 E4 S4 R4 V4. Genre: modern minimal developer tool. */
+/* Hallmark critique: remove fake chrome, reduce decorative glow, preserve truthful local-workspace flows. */
+
 :root {
   color-scheme: dark;
   --bg: #0f1115;
@@ -23,6 +26,7 @@
 }
 
 html {
+  overflow-x: clip;
   scroll-behavior: smooth;
 }
 
@@ -32,11 +36,10 @@ html {
 
 body {
   margin: 0;
-  overflow-x: hidden;
+  overflow-x: clip;
   background:
-    radial-gradient(circle at 18% 18%, rgba(232, 111, 67, 0.22), transparent 28rem),
-    radial-gradient(circle at 78% 26%, rgba(112, 214, 255, 0.16), transparent 32rem),
-    linear-gradient(180deg, rgba(246, 196, 83, 0.06), transparent 38rem),
+    linear-gradient(180deg, rgba(112, 214, 255, 0.08), transparent 34rem),
+    linear-gradient(180deg, rgba(246, 196, 83, 0.055), transparent 54rem),
     var(--bg);
   color: var(--text);
   font-family: var(--sans);
@@ -53,19 +56,6 @@ body::before {
     linear-gradient(90deg, rgba(148, 163, 184, 0.045) 1px, transparent 1px);
   background-size: 48px 48px;
   mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.8), transparent 75%);
-}
-
-body::after {
-  content: "";
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.14;
-  background-image:
-    radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.35) 0 1px, transparent 1px),
-    radial-gradient(circle at 70% 60%, rgba(255, 255, 255, 0.22) 0 1px, transparent 1px);
-  background-size: 34px 34px, 58px 58px;
-  mix-blend-mode: overlay;
 }
 
 .skip-link {
@@ -118,6 +108,7 @@ main {
   align-items: center;
   gap: 24px;
   padding: 18px 0;
+  background: linear-gradient(180deg, rgba(15, 17, 21, 0.92), rgba(15, 17, 21, 0.62));
   backdrop-filter: blur(18px);
 }
 
@@ -130,22 +121,19 @@ main {
 }
 
 .brand-mark {
-  display: grid;
   width: 34px;
   height: 34px;
-  place-items: center;
-  border: 1px solid rgba(246, 196, 83, 0.38);
-  border-radius: 9px;
-  background: linear-gradient(135deg, rgba(246, 196, 83, 0.22), rgba(112, 214, 255, 0.14));
-  color: #fde68a;
-  font-family: var(--mono);
-  font-size: 12px;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  box-shadow: 0 0 0 1px rgba(246, 196, 83, 0.42);
 }
 
 nav {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  justify-content: flex-end;
 }
 
 nav a {
@@ -221,7 +209,7 @@ button:focus-visible {
   grid-template-columns: minmax(0, 1.02fr) minmax(420px, 0.98fr);
   align-items: center;
   gap: 56px;
-  min-height: calc(100dvh - 76px);
+  min-height: min(760px, calc(100dvh - 112px));
   padding: 52px 0 64px;
 }
 
@@ -337,7 +325,7 @@ p {
   gap: 10px;
   max-width: 100%;
   border: 1px solid var(--line);
-  border-radius: 14px;
+  border-radius: 8px;
   background: rgba(11, 18, 32, 0.78);
   padding: 8px;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
@@ -347,7 +335,8 @@ p {
   padding: 0 12px;
   color: #dbeafe;
   font-size: 14px;
-  white-space: nowrap;
+  line-height: 1.45;
+  white-space: pre;
 }
 
 .copy-button {
@@ -364,8 +353,6 @@ p {
   min-height: 520px;
 }
 
-.terminal-window,
-.agent-panel,
 .workspace-demo,
 .floating-note,
 .strip,
@@ -386,10 +373,9 @@ p {
 .workspace-demo {
   position: relative;
   overflow: hidden;
-  border-radius: 28px;
+  border-radius: 8px;
   background:
-    linear-gradient(140deg, rgba(112, 214, 255, 0.1), transparent 34%),
-    linear-gradient(320deg, rgba(246, 196, 83, 0.11), transparent 36%),
+    linear-gradient(180deg, rgba(112, 214, 255, 0.08), transparent 42%),
     rgba(18, 22, 31, 0.92);
 }
 
@@ -402,7 +388,7 @@ p {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), inset 0 -60px 90px rgba(2, 6, 23, 0.28);
 }
 
-.demo-toolbar {
+.demo-status {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -411,11 +397,24 @@ p {
   padding: 15px 18px;
 }
 
-.demo-toolbar strong {
+.demo-status strong {
+  display: block;
   font-size: 14px;
 }
 
-.demo-toolbar small {
+.demo-status small {
+  display: block;
+  margin-top: 2px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.status-label {
+  min-width: 0;
+}
+
+.status-badge {
   margin-left: auto;
   border: 1px solid rgba(52, 211, 153, 0.26);
   border-radius: 999px;
@@ -423,26 +422,6 @@ p {
   font-family: var(--mono);
   font-size: 11px;
   padding: 5px 8px;
-}
-
-.window-dots {
-  display: flex;
-  gap: 6px;
-}
-
-.window-dots span {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: var(--rose);
-}
-
-.window-dots span:nth-child(2) {
-  background: var(--amber);
-}
-
-.window-dots span:nth-child(3) {
-  background: var(--green);
 }
 
 .demo-grid {
@@ -456,7 +435,7 @@ p {
 .tool-pane,
 .repo-pane {
   border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 18px;
+  border-radius: 8px;
   background: rgba(12, 15, 22, 0.72);
   padding: 18px;
 }
@@ -494,7 +473,7 @@ p {
 
 .tool-card-mini {
   border: 1px solid rgba(148, 163, 184, 0.12);
-  border-radius: 14px;
+  border-radius: 8px;
   background: rgba(255, 255, 255, 0.035);
   padding: 13px;
 }
@@ -556,9 +535,9 @@ p {
   right: -4px;
   bottom: 4px;
   width: min(330px, 86%);
-  border-radius: 18px;
+  border-radius: 8px;
   background:
-    linear-gradient(140deg, rgba(246, 196, 83, 0.12), transparent 60%),
+    linear-gradient(180deg, rgba(246, 196, 83, 0.12), transparent 72%),
     rgba(13, 16, 24, 0.94);
   padding: 18px;
 }
@@ -583,101 +562,6 @@ p {
   line-height: 1.5;
 }
 
-.terminal-window {
-  position: relative;
-  overflow: hidden;
-  border-radius: 18px;
-}
-
-.terminal-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 1px solid var(--line);
-  background: #121e31;
-  padding: 13px 16px;
-}
-
-.terminal-bar span {
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: #334155;
-}
-
-.terminal-bar span:first-child {
-  background: var(--rose);
-}
-
-.terminal-bar span:nth-child(2) {
-  background: var(--amber);
-}
-
-.terminal-bar span:nth-child(3) {
-  background: var(--green);
-}
-
-.terminal-bar strong {
-  margin-left: 8px;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 13px;
-}
-
-.terminal-body {
-  padding: 22px;
-}
-
-.terminal-body p {
-  margin-bottom: 12px;
-  color: #d7dee9;
-  font-family: var(--mono);
-  font-size: 14px;
-}
-
-.ok {
-  color: var(--green);
-  font-weight: 800;
-}
-
-.terminal-card {
-  display: grid;
-  gap: 8px;
-  margin-top: 28px;
-  border: 1px solid #2d3d55;
-  border-radius: 14px;
-  background: #0b1220;
-  padding: 18px;
-}
-
-.terminal-card span,
-.terminal-card small {
-  color: var(--faint);
-}
-
-.agent-panel {
-  position: absolute;
-  right: 8px;
-  bottom: 14px;
-  width: min(330px, 88%);
-  border-radius: 16px;
-  padding: 18px;
-}
-
-.panel-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-bottom: 14px;
-}
-
-.panel-head small {
-  margin-left: auto;
-  color: var(--green);
-  font-family: var(--mono);
-  font-size: 12px;
-}
-
 .status-dot {
   width: 9px;
   height: 9px;
@@ -686,7 +570,6 @@ p {
   box-shadow: 0 0 0 8px rgba(52, 211, 153, 0.08);
 }
 
-.agent-panel ul,
 .safety ul {
   display: grid;
   gap: 10px;
@@ -695,12 +578,10 @@ p {
   list-style: none;
 }
 
-.agent-panel li,
 .safety li {
   color: #d6deea;
 }
 
-.agent-panel li::before,
 .safety li::before {
   content: "";
   display: inline-block;
@@ -716,7 +597,7 @@ p {
   grid-template-columns: repeat(3, 1fr);
   gap: 1px;
   overflow: hidden;
-  border-radius: 18px;
+  border-radius: 8px;
   margin-bottom: 104px;
   background: var(--line);
 }
@@ -763,9 +644,9 @@ p {
 
 .value-matrix > div {
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: 8px;
   background:
-    linear-gradient(135deg, rgba(103, 232, 249, 0.08), transparent 60%),
+    linear-gradient(180deg, rgba(103, 232, 249, 0.08), transparent 60%),
     rgba(13, 22, 38, 0.9);
   padding: 24px;
   box-shadow: var(--shadow);
@@ -807,7 +688,7 @@ p {
   display: grid;
   gap: 1px;
   overflow: hidden;
-  border-radius: 18px;
+  border-radius: 8px;
   background: var(--line);
 }
 
@@ -850,7 +731,7 @@ p {
 .command-stack pre,
 .compare-grid pre {
   border: 1px solid #263348;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #08111f;
   color: #dbeafe;
   padding: 14px;
@@ -866,7 +747,7 @@ p {
   display: flex;
   min-height: 310px;
   flex-direction: column;
-  border-radius: 18px;
+  border-radius: 8px;
   padding: 24px;
 }
 
@@ -891,7 +772,7 @@ p {
 }
 
 .command-stack > div {
-  border-radius: 16px;
+  border-radius: 8px;
   padding: 18px;
 }
 
@@ -909,7 +790,7 @@ p {
 }
 
 .mode-row > div {
-  border-radius: 18px;
+  border-radius: 8px;
   padding: 24px;
 }
 
@@ -925,7 +806,7 @@ p {
 
 .reference-grid article {
   min-height: 270px;
-  border-radius: 18px;
+  border-radius: 8px;
   padding: 22px;
 }
 
@@ -947,9 +828,9 @@ p {
 .faq-grid article {
   min-height: 240px;
   border: 1px solid var(--line);
-  border-radius: 18px;
+  border-radius: 8px;
   background:
-    linear-gradient(145deg, rgba(250, 204, 21, 0.08), transparent 46%),
+    linear-gradient(180deg, rgba(250, 204, 21, 0.08), transparent 58%),
     rgba(13, 22, 38, 0.88);
   padding: 24px;
   box-shadow: var(--shadow);
@@ -988,7 +869,7 @@ p {
 
 .reference-grid pre {
   border: 1px solid #263348;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #08111f;
   color: #dbeafe;
   margin-bottom: 14px;
@@ -1025,7 +906,7 @@ dd {
   grid-template-columns: minmax(260px, 0.75fr) minmax(0, 1.25fr);
   gap: 28px;
   margin: 16px 0;
-  border-radius: 20px;
+  border-radius: 8px;
   padding: 26px;
 }
 
@@ -1054,7 +935,7 @@ dd {
   flex-wrap: wrap;
   gap: 10px;
   margin-top: 16px;
-  border-radius: 18px;
+  border-radius: 8px;
   padding: 16px;
 }
 
@@ -1079,7 +960,7 @@ dd {
   display: grid;
   grid-template-columns: minmax(0, 0.9fr) minmax(420px, 1.1fr);
   gap: 40px;
-  border-radius: 24px;
+  border-radius: 8px;
   padding: 34px;
 }
 
@@ -1106,8 +987,8 @@ dd {
 
   nav {
     width: 100%;
-    overflow-x: auto;
     padding-bottom: 4px;
+    justify-content: flex-start;
   }
 
   .hero,
@@ -1169,11 +1050,34 @@ dd {
   }
 
   h1 {
-    font-size: 3rem;
+    font-size: 2.7rem;
   }
 
   h2 {
     font-size: 2.35rem;
+  }
+
+  nav {
+    gap: 6px;
+  }
+
+  nav a {
+    padding: 7px 9px;
+    font-size: 13px;
+  }
+
+  .hero {
+    padding-top: 28px;
+  }
+
+  .hero-lede {
+    font-size: 17px;
+    line-height: 1.58;
+  }
+
+  .launch-pill {
+    margin-bottom: 14px;
+    font-size: 12px;
   }
 
   .install-line {
@@ -1193,12 +1097,6 @@ dd {
 
   .hero-visual {
     padding-bottom: 150px;
-  }
-
-  .agent-panel {
-    left: 18px;
-    right: auto;
-    width: calc(100% - 36px);
   }
 
   .repo-row {

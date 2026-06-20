@@ -5,6 +5,9 @@ dist/
 .env.*
 *.tgz
 .ai-bridge/
+.hallmark/
+.playwright-cli/
+output/
 CODEXPRO_MCP_REPORT.md
 *.local.md
 *.local.json

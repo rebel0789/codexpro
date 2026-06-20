@@ -134,6 +134,7 @@ async function callTool(client, name, args = {}) {
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
+const profileHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-profile-home-'));
 await fs.mkdir(path.join(root, '.codex', 'skills', 'http-smoke-skill'), { recursive: true });
 await fs.writeFile(path.join(root, '.codex', 'skills', 'http-smoke-skill', 'SKILL.md'), [
   '---',
@@ -157,7 +158,8 @@ const child = spawn('node', ['dist/http.js'], {
     CODEXPRO_BASH_MODE: 'safe',
     CODEXPRO_WRITE_MODE: 'handoff',
     CODEXPRO_TOOL_MODE: 'full',
-    CODEXPRO_WIDGET_DOMAIN: 'https://widgets.codexpro.test'
+    CODEXPRO_WIDGET_DOMAIN: 'https://widgets.codexpro.test',
+    CODEXPRO_HOME: profileHome
   },
   stdio: ['ignore', 'pipe', 'pipe']
 });
@@ -183,13 +185,88 @@ try {
     throw new Error(`expected URL-token healthz to return 200, got ${queryAuthorized.status}`);
   }
 
+  const favicon = await fetch(`${baseUrl}/favicon.ico`);
+  if (favicon.status !== 200 || !favicon.headers.get('content-type')?.includes('image/svg+xml')) {
+    throw new Error(`expected unauthenticated favicon to return SVG 200, got ${favicon.status} ${favicon.headers.get('content-type')}`);
+  }
+
   const home = await fetch(`${baseUrl}/?codexpro_token=${encodeURIComponent(token)}`);
   const homeText = await home.text();
   if (home.status !== 200 || !home.headers.get('content-type')?.includes('text/html')) {
     throw new Error(`expected authenticated onboarding page to return HTML 200, got ${home.status}`);
   }
-  if (!homeText.includes('CodexPro local bridge') || !homeText.includes('ChatGPT setup')) {
-    throw new Error('onboarding page did not include expected setup copy');
+  if (!homeText.includes('CodexPro Admin') || !homeText.includes('CLI controls') || !homeText.includes('Connect ChatGPT')) {
+    throw new Error('onboarding page did not include expected admin setup copy');
+  }
+  if (!homeText.includes('Connection profile') || !homeText.includes('data-profile-form')) {
+    throw new Error('onboarding page did not include the saved profile editor');
+  }
+  if (homeText.includes(token)) {
+    throw new Error('onboarding page leaked the raw auth token');
+  }
+
+  const profileBefore = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`);
+  const profileBeforeJson = await profileBefore.json();
+  if (profileBefore.status !== 200 || profileBeforeJson.exists !== false) {
+    throw new Error(`expected empty admin profile response, got ${profileBefore.status} ${JSON.stringify(profileBeforeJson)}`);
+  }
+  if (JSON.stringify(profileBeforeJson).includes(token)) {
+    throw new Error('admin profile GET leaked the raw auth token');
+  }
+
+  const invalidProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      tunnel: 'ngrok',
+      hostname: 'codexpro-http-smoke.ngrok-free.app',
+      requireBashSession: true,
+      bashSession: ''
+    })
+  });
+  if (invalidProfile.status !== 400) {
+    throw new Error(`expected invalid guarded profile to return 400, got ${invalidProfile.status}`);
+  }
+
+  const profileSave = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      tunnel: 'ngrok',
+      hostname: 'https://codexpro-http-smoke.ngrok-free.app/mcp',
+      port,
+      mode: 'agent',
+      bash: 'safe',
+      bashTranscript: 'full',
+      codexSessions: 'metadata',
+      codexDir: path.join(root, '.codex'),
+      bashSession: 'http-main',
+      requireBashSession: true,
+      write: 'workspace',
+      toolMode: 'full',
+      widgetDomain: 'https://widgets.codexpro.test',
+      ngrokConfig: path.join(root, 'ngrok.yml'),
+      cloudflareTokenFile: '~/.codexpro/cloudflare-tunnel-token'
+    })
+  });
+  const profileSaveJson = await profileSave.json();
+  if (profileSave.status !== 200 || profileSaveJson.saved !== true) {
+    throw new Error(`expected admin profile save to pass, got ${profileSave.status} ${JSON.stringify(profileSaveJson)}`);
+  }
+  if (JSON.stringify(profileSaveJson).includes(token)) {
+    throw new Error('admin profile save response leaked the raw auth token');
+  }
+  const savedProfile = JSON.parse(await fs.readFile(profileSaveJson.profile_path, 'utf8'));
+  if (
+    savedProfile.tunnel !== 'ngrok' ||
+    savedProfile.hostname !== 'codexpro-http-smoke.ngrok-free.app' ||
+    savedProfile.bashTranscript !== 'full' ||
+    savedProfile.codexSessions !== 'metadata' ||
+    savedProfile.bashSession !== 'http-main' ||
+    savedProfile.requireBashSession !== true ||
+    savedProfile.token !== token
+  ) {
+    throw new Error(`admin profile save wrote unexpected profile: ${JSON.stringify(savedProfile)}`);
   }
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);

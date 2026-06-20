@@ -711,7 +711,9 @@ export const toolCardWidgetHtml = String.raw`
     ].join("");
     const command = '<span class="prompt">$</span> ' + esc(data.command || "");
     const output = previewLines(data.stdout || data.stderr || "", 18);
-    const outputBox = output ? codebox("output preview", esc(truncate(output, 5000)), "terminal") : '<div class="empty">Command produced no output.</div>';
+    const outputBox = output
+      ? fold("Output preview", totalLines + " lines", codebox("output preview", esc(truncate(output, 5000)), "terminal"), false)
+      : '<div class="empty">Command produced no output.</div>';
     return '<article class="card">' + header(data, pills) + '<div class="body">' +
       '<div class="summary">' +
       summaryItem("Exit", data.exitCode ?? "-") +

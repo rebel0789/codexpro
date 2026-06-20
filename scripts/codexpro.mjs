@@ -49,8 +49,16 @@ Options:
   --port <port>             Local port. Default: 8787.
   --bash <off|safe|full>    Bash mode. Default: safe.
   --no-bash                 Shortcut for --bash off.
+  --bash-transcript <compact|full>
+                             Chat transcript for bash results. Default: compact.
+                             full prints raw stdout/stderr in chat.
+  --full-bash-transcript    Shortcut for --bash-transcript full.
   --bash-session <id>       Local bash session label exposed to ChatGPT.
   --require-bash-session    Require bash calls to include matching session_id.
+  --codex-sessions <off|metadata|read>
+                             Opt in to read local ~/.codex session history.
+                             metadata lists ids/titles/cwd; read allows bounded transcript reads.
+  --codex-dir <dir>          Codex config/session directory. Default: ~/.codex.
   --write <off|handoff|workspace>
                              Write mode. Default: workspace in agent mode, handoff otherwise.
                              handoff = ChatGPT can write .ai-bridge only; Codex edits source.
@@ -253,6 +261,9 @@ function parseArgs(argv) {
     else if (key === 'allow-home') out.allowHome = true;
     else if (key === 'no-auth') out.noAuth = true;
     else if (key === 'no-bash') out.bash = 'off';
+    else if (key === 'compact-bash-transcript') out.bashTranscript = 'compact';
+    else if (key === 'full-bash-transcript') out.bashTranscript = 'full';
+    else if (key === 'codex-sessions-read') out.codexSessions = 'read';
     else if (key === 'require-bash-session') out.requireBashSession = true;
     else if (key === 'copy-url') out.copyUrl = true;
     else if (key === 'no-copy-url') out.noCopyUrl = true;
@@ -360,6 +371,14 @@ function profilePathForRoot(root) {
   return path.join(profileDir(), `${profileIdForRoot(root)}.json`);
 }
 
+function runtimeDir() {
+  return path.join(codexProHome(), 'runtime');
+}
+
+function runtimeStatusPathForRoot(root) {
+  return path.join(runtimeDir(), `${profileIdForRoot(root)}.json`);
+}
+
 function readJsonFile(filePath) {
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -409,6 +428,33 @@ function saveWorkspaceProfile(root, profile) {
     root,
     updatedAt: new Date().toISOString(),
     ...profile
+  };
+  fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {}
+  return filePath;
+}
+
+function saveRuntimeConnection(root, details, options = {}) {
+  const filePath = runtimeStatusPathForRoot(root);
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const payload = {
+    version: 1,
+    root,
+    updatedAt: new Date().toISOString(),
+    endpoint: details.endpoint,
+    localBase: options.localBase ?? '',
+    localStatusUrl: details.localStatusUrl ? details.localStatusUrl.replace(/codexpro_token=[^&]+/, 'codexpro_token=<redacted>') : '',
+    tunnel: options.tunnel ?? '',
+    mode: options.mode ?? '',
+    bash: options.bash ?? '',
+    bashTranscript: options.bashTranscript ?? '',
+    codexSessions: options.codexSessions ?? '',
+    bashSession: options.bashSession ?? '',
+    requireBashSession: Boolean(options.requireBashSession),
+    write: options.write ?? '',
+    toolMode: options.toolMode ?? ''
   };
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
   try {
@@ -481,6 +527,18 @@ function bashSessionOptions(args, profile = {}) {
     throw new Error('--require-bash-session requires --bash-session <id>.');
   }
   return { bashSession, requireBashSession };
+}
+
+function bashTranscriptOption(args, profile = {}) {
+  const value = optionValue(args, profile, 'bashTranscript', ['CODEXPRO_BASH_TRANSCRIPT'], 'compact');
+  if (value === 'compact' || value === 'full') return value;
+  throw new Error('--bash-transcript must be compact or full.');
+}
+
+function codexSessionsOption(args, profile = {}) {
+  const value = optionValue(args, profile, 'codexSessions', ['CODEXPRO_CODEX_SESSIONS'], 'off');
+  if (value === 'off' || value === 'metadata' || value === 'read') return value;
+  throw new Error('--codex-sessions must be off, metadata, or read.');
 }
 
 function stableToken(existing = '') {
@@ -1497,6 +1555,8 @@ function printConnectorBlock(endpoint, token, options = {}) {
   console.log(paint('bold', 'CodexPro ready'));
   if (options.root) console.log(`  Workspace  ${options.root}`);
   console.log(`  Mode       ${modeTitle}  tools=${options.toolMode ?? 'standard'}  write=${options.write ?? 'workspace'}  bash=${options.bash ?? 'safe'}`);
+  console.log(`  Transcript bash=${options.bashTranscript ?? 'compact'}`);
+  if (options.codexSessions && options.codexSessions !== 'off') console.log(`  Codex      sessions=${options.codexSessions}`);
   if (options.bashSession) console.log(`  Bash       session=${options.bashSession}${options.requireBashSession ? ' required' : ''}`);
   console.log(`  Connector  ${publicHttps ? 'public HTTPS' : 'local HTTP'}`);
   if (copied.ok) {
@@ -1787,6 +1847,9 @@ function profileFromPreference(root, args, profile, preference) {
   const mode = optionValue(args, profile, 'mode', ['CODEXPRO_MODE'], 'agent');
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], '');
+  const bashTranscript = bashTranscriptOption(args, profile);
+  const codexSessions = codexSessionsOption(args, profile);
+  const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], '');
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
@@ -1804,6 +1867,9 @@ function profileFromPreference(root, args, profile, preference) {
     ...(preference.cloudflareTokenFile ? { cloudflareTokenFile: preference.cloudflareTokenFile } : {}),
     ...(token ? { token } : {}),
     ...(bash ? { bash } : {}),
+    ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
+    ...(codexSessions !== 'off' ? { codexSessions } : {}),
+    ...(codexDir ? { codexDir } : {}),
     ...(bashSession ? { bashSession } : {}),
     ...(requireBashSession ? { requireBashSession: true } : {}),
     ...(write ? { write } : {}),
@@ -1925,10 +1991,16 @@ async function runSetupWizard(argv) {
     const tunnelChoice = normalizeSetupChoice(tunnelAnswer, ['quick', 'stable', 'ngrok', 'local'], defaultTunnel);
     const args = ['start', '--root', root, '--port', port, '--mode', mode];
     const bash = optionValue(defaults, profile, 'bash', ['CODEXPRO_BASH_MODE'], '');
+    const bashTranscript = bashTranscriptOption(defaults, profile);
+    const codexSessions = codexSessionsOption(defaults, profile);
+    const codexDir = optionValue(defaults, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
     const write = optionValue(defaults, profile, 'write', ['CODEXPRO_WRITE_MODE'], '');
     const toolMode = optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
     const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
     if (bash) args.push('--bash', bash);
+    if (bashTranscript !== 'compact') args.push('--bash-transcript', bashTranscript);
+    if (codexSessions !== 'off') args.push('--codex-sessions', codexSessions);
+    if (codexDir) args.push('--codex-dir', codexDir);
     const { bashSession, requireBashSession } = bashSessionOptions(defaults, profile);
     if (bashSession) args.push('--bash-session', bashSession);
     if (requireBashSession) args.push('--require-bash-session');
@@ -2006,6 +2078,9 @@ async function runSetupWizard(argv) {
         ...(profileCloudflareTokenFile ? { cloudflareTokenFile: profileCloudflareTokenFile } : {}),
         ...(profileToken ? { token: profileToken } : {}),
         ...(bash ? { bash } : {}),
+        ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
+        ...(codexSessions !== 'off' ? { codexSessions } : {}),
+        ...(codexDir ? { codexDir } : {}),
         ...(bashSession ? { bashSession } : {}),
         ...(requireBashSession ? { requireBashSession: true } : {}),
         ...(write ? { write } : {}),
@@ -2049,6 +2124,9 @@ function printProfile(root, profile) {
     ...(safe.hostname ? [labelValue('Hostname', safe.hostname)] : []),
     ...(safe.port ? [labelValue('Port', safe.port)] : []),
     ...(safe.mode ? [labelValue('Mode', safe.mode)] : []),
+    labelValue('Bash transcript', safe.bashTranscript ?? 'compact'),
+    labelValue('Codex sessions', safe.codexSessions ?? 'off'),
+    ...(safe.codexDir ? [labelValue('Codex dir', safe.codexDir)] : []),
     ...(safe.bashSession ? [labelValue('Bash session', `${safe.bashSession}${safe.requireBashSession ? ' required' : ''}`)] : []),
     ...(safe.token ? [labelValue('Token', safe.token)] : [])
   ]);
@@ -2078,6 +2156,9 @@ function saveSettingsFromArgs(root, args, profile) {
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], profile.toolMode ?? '');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], profile.widgetDomain ?? '');
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], profile.port ?? '8787'));
+  const bashTranscript = bashTranscriptOption(args, profile);
+  const codexSessions = codexSessionsOption(args, profile);
+  const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], profile.codexDir ?? '');
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const token = tunnel === 'none'
     ? optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], profile.token ?? '')
@@ -2093,6 +2174,9 @@ function saveSettingsFromArgs(root, args, profile) {
     ...(args.cloudflareTokenFile ?? profile.cloudflareTokenFile ? { cloudflareTokenFile: args.cloudflareTokenFile ?? profile.cloudflareTokenFile } : {}),
     ...(token ? { token } : {}),
     ...(args.bash ?? profile.bash ? { bash: args.bash ?? profile.bash } : {}),
+    ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
+    ...(codexSessions !== 'off' ? { codexSessions } : {}),
+    ...(codexDir ? { codexDir } : {}),
     ...(bashSession ? { bashSession } : {}),
     ...(requireBashSession ? { requireBashSession: true } : {}),
     ...(args.write ?? profile.write ? { write: args.write ?? profile.write } : {}),
@@ -2415,6 +2499,9 @@ async function main() {
   const host = optionValue(args, profile, 'host', ['CODEXPRO_HOST'], '127.0.0.1');
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], 'safe');
+  const bashTranscript = bashTranscriptOption(args, profile);
+  const codexSessions = codexSessionsOption(args, profile);
+  const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], mode === 'agent' ? 'workspace' : 'handoff');
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
@@ -2433,8 +2520,11 @@ async function main() {
     CODEXPRO_HOST: host,
     CODEXPRO_PORT: port,
     CODEXPRO_BASH_MODE: bash,
+    CODEXPRO_BASH_TRANSCRIPT: bashTranscript,
     CODEXPRO_BASH_SESSION_ID: bashSession,
     CODEXPRO_REQUIRE_BASH_SESSION: requireBashSession ? '1' : '0',
+    CODEXPRO_CODEX_SESSIONS: codexSessions,
+    CODEXPRO_CODEX_DIR: codexDir,
     CODEXPRO_WRITE_MODE: write,
     CODEXPRO_TOOL_MODE: toolMode,
     CODEXPRO_WIDGET_DOMAIN: widgetDomain,
@@ -2460,6 +2550,8 @@ async function main() {
   printBox('CodexPro start', [
     labelValue('Workspace', root),
     labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}`),
+    labelValue('Bash transcript', bashTranscript),
+    labelValue('Codex sessions', codexSessions),
     ...(bashSession ? [labelValue('Bash session', `${bashSession}${requireBashSession ? ' required' : ''}`)] : []),
     labelValue('Local URL', `http://${host}:${port}/mcp`),
     labelValue(
@@ -2485,6 +2577,18 @@ async function main() {
   const localBase = `http://${host}:${port}`;
   await waitForHealth(`${localBase}/healthz`, token);
   statusLine('ok', `Local MCP ready at ${localBase}/mcp`);
+  const runtimeOptions = {
+    localBase,
+    tunnel,
+    mode,
+    toolMode,
+    write,
+    bash,
+    bashTranscript,
+    codexSessions,
+    bashSession,
+    requireBashSession
+  };
 
   if (tunnel === 'none') {
     if (effectiveArgs.installCloudflared) {
@@ -2500,9 +2604,12 @@ async function main() {
       root,
       write,
       bash,
+      bashTranscript,
+      codexSessions,
       bashSession,
       requireBashSession
     });
+    saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details);
     return;
   }
@@ -2540,9 +2647,12 @@ async function main() {
       root,
       write,
       bash,
+      bashTranscript,
+      codexSessions,
       bashSession,
       requireBashSession
     });
+    saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details);
     return;
   }
@@ -2561,9 +2671,12 @@ async function main() {
       root,
       write,
       bash,
+      bashTranscript,
+      codexSessions,
       bashSession,
       requireBashSession
     });
+    saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details);
     return;
   }
@@ -2581,9 +2694,12 @@ async function main() {
       root,
       write,
       bash,
+      bashTranscript,
+      codexSessions,
       bashSession,
       requireBashSession
     });
+    saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details);
     return;
   }
@@ -2646,9 +2762,12 @@ async function main() {
     root,
     write,
     bash,
+    bashTranscript,
+    codexSessions,
     bashSession,
     requireBashSession
   });
+  saveRuntimeConnection(root, details, runtimeOptions);
   await runControlPanel(details);
 }
 

@@ -11,6 +11,9 @@
 - Reconfirmed the compliance boundary in runtime diagnostics and docs: CodexPro is a local workspace MCP bridge, not a model provider, model proxy, quota bypass, resale layer, or remote executor.
 - Added `codexpro start --no-bash` and documented that CodexPro does not bind MCP bash to a Codex app conversation id.
 - Added an optional bash session guard with `--bash-session <id> --require-bash-session`; guarded `bash` calls must include the matching `session_id` before any shell command runs.
+- Made bash chat transcripts compact by default, with `--bash-transcript full` for the old raw stdout/stderr chat output.
+- Added opt-in local Codex session discovery with `--codex-sessions metadata|read`, including session ids, titles, cwd paths, source files, resume commands, and bounded transcript reads only in explicit `read` mode.
+- Added a token-protected local profile editor at `/admin/profile` and the setup page so users can save tunnel, hostname, port, mode, bash, Codex session, write/tool mode, widget origin, and tunnel config defaults for the next `codexpro start` without exposing raw tokens in the browser.
 
 ## 0.28.4
 
@@ -103,8 +106,8 @@
 ## 0.22.0
 
 - Added the v5 Apps SDK widget resource at `ui://widget/codexpro-tool-card-v5.html` with cleaner pending states and more polished diff/search/code cards.
-- Added a token-protected local setup/status page at `/` and `/setup` for workspace, mode, allowed-root, and ChatGPT setup visibility.
-- Added the terminal `o` control to open the local setup/status page while CodexPro is running.
+- Added a token-protected local admin dashboard at `/` and `/setup` for workspace, mode, allowed-root, setup, profile, and ChatGPT connection visibility.
+- Added the terminal `o` control to open the local admin dashboard while CodexPro is running.
 - Updated HTTP smoke coverage to verify the onboarding page and v5 widget resource.
 
 ## 0.21.0

@@ -132,6 +132,14 @@ codexpro start --bash-session main --require-bash-session
 
 之后 `bash` 调用必须包含 `session_id: "main"`。这能避免误触发到错误的 CodexPro 终端，但不是远程控制某个已有的 Codex App 聊天。
 
+如果你显式开启，CodexPro 可以列出本地 Codex session id 和标题：
+
+```bash
+codexpro start --tool-mode full --codex-sessions metadata
+```
+
+它会读取 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 下的本地 Codex JSONL 历史，返回 metadata 和 `codex resume <session-id>` 命令。只有需要有限长度 transcript 读取时才使用 `--codex-sessions read`。它不会附加到正在运行的 Codex App 聊天。
+
 如果你正在 Codex 里工作，不希望 ChatGPT 触发 shell 命令，可以关闭 bash：
 
 ```bash

@@ -63,6 +63,22 @@ const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-'));
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'config.txt'), 'OPENAI_API_KEY=sk-realSecretValue123\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'AGENTS.md'), '# Smoke Agents\n\n- Preserve demo.txt.\n', 'utf8');
+const codexHistoryDir = path.join(tmp, 'codex-history');
+const codexSessionDir = path.join(codexHistoryDir, 'sessions', '2026', '06', '20');
+await fs.mkdir(codexSessionDir, { recursive: true });
+const codexSessionPath = path.join(codexSessionDir, 'rollout-2026-06-20T01-02-03-019cc369-bd7c-7891-b371-7b20b4fe0b18.jsonl');
+await fs.writeFile(codexSessionPath, [
+  JSON.stringify({ timestamp: '2026-06-20T01:02:03Z', type: 'session_meta', payload: { id: '019cc369-bd7c-7891-b371-7b20b4fe0b18', cwd: tmp } }),
+  JSON.stringify({ timestamp: '2026-06-20T01:02:04Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Fix the smoke session browser' } }),
+  JSON.stringify({ timestamp: '2026-06-20T01:02:05Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'Session browser plan.' } }),
+  JSON.stringify({ timestamp: '2026-06-20T01:02:06Z', type: 'response_item', payload: { type: 'function_call', name: 'bash' } }),
+  JSON.stringify({ timestamp: '2026-06-20T01:02:07Z', type: 'response_item', payload: { type: 'function_call_output', output: 'ok' } })
+].join('\n') + '\n', 'utf8');
+const olderCodexSessionId = '019cc368-1111-7222-8333-123456789abc';
+await fs.writeFile(path.join(codexSessionDir, `rollout-2026-06-19T01-02-03-${olderCodexSessionId}.jsonl`), [
+  JSON.stringify({ timestamp: '2026-06-19T01:02:03Z', type: 'session_meta', payload: { id: olderCodexSessionId, cwd: tmp } }),
+  JSON.stringify({ timestamp: '2026-06-19T01:02:04Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Older session still readable by id' } })
+].join('\n') + '\n', 'utf8');
 await fs.mkdir(path.join(tmp, '.codex', 'skills', 'smoke-skill'), { recursive: true });
 await fs.writeFile(path.join(tmp, '.codex', 'skills', 'smoke-skill', 'SKILL.md'), [
   '---',
@@ -263,13 +279,20 @@ const codexContext = await client.request('tools/call', { name: 'codex_context',
 if (!codexContext.structuredContent.agents_files.includes('AGENTS.md')) throw new Error('codex_context did not include AGENTS.md');
 if (codexContext.structuredContent.agents_files.length !== 1) throw new Error(`codex_context returned duplicate AGENTS files: ${codexContext.structuredContent.agents_files.join(', ')}`);
 if (!codexContext.content?.[0]?.text?.includes('Smoke Agents')) throw new Error('codex_context did not include AGENTS.md content');
-await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'pwd' } });
+const pwdBash = await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'pwd' } });
+const pwdBashText = pwdBash.content?.[0]?.text ?? '';
+if (!pwdBashText.includes('Exit: 0') || pwdBashText.includes('## stdout') || pwdBashText.includes('## stderr')) {
+  throw new Error(`default bash transcript should be compact: ${pwdBashText}`);
+}
+if (!pwdBash.structuredContent.stdout?.includes(tmp)) {
+  throw new Error(`compact bash transcript dropped structured stdout: ${JSON.stringify(pwdBash.structuredContent)}`);
+}
 await expectToolError('bash', { workspace_id: ws, command: 'find /tmp' }, /blocked/i);
 await expectToolError('bash', { workspace_id: ws, command: 'find . -fprint leaked.txt' }, /blocked/i);
 await expectToolError('bash', { workspace_id: ws, command: 'git show HEAD:.env' }, /blocked/i);
 await expectToolError('bash', { workspace_id: ws, command: 'ls $HOME' }, /blocked/i);
 const clientBuild = await client.request('tools/call', { name: 'bash', arguments: { workspace_id: ws, command: 'npm run build:clients', timeout_ms: 60000 } });
-if (!clientBuild.content?.[0]?.text?.includes('clients ok')) {
+if (!clientBuild.structuredContent.stdout?.includes('clients ok')) {
   throw new Error('safe bash did not run npm run build:clients');
 }
 const exported = await client.request('tools/call', { name: 'export_pro_context', arguments: { workspace_id: ws, selected_paths: ['demo.txt'], max_files: 4, max_total_bytes: 80000 } });
@@ -374,6 +397,74 @@ async function assertToolMode(mode, expected, hidden) {
 
 await assertToolMode('', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
 await assertToolMode('minimal', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
+
+const fullTranscriptClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_BASH_TRANSCRIPT: 'full' }
+});
+await fullTranscriptClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-full-bash-transcript-smoke', version: '0.1.0' }
+});
+fullTranscriptClient.notify('notifications/initialized');
+const fullTranscriptBash = await fullTranscriptClient.request('tools/call', { name: 'bash', arguments: { command: 'pwd' } });
+const fullTranscriptText = fullTranscriptBash.content?.[0]?.text ?? '';
+if (!fullTranscriptText.includes('## stdout') || !fullTranscriptText.includes(tmp)) {
+  throw new Error(`full bash transcript mode did not preserve raw stdout in chat text: ${fullTranscriptText}`);
+}
+fullTranscriptClient.close();
+
+const codexSessionsClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--tool-mode', 'full'], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_ROOT: tmp,
+    CODEXPRO_ALLOWED_ROOTS: tmp,
+    CODEXPRO_CODEX_SESSIONS: 'read',
+    CODEXPRO_CODEX_DIR: codexHistoryDir
+  }
+});
+await codexSessionsClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-codex-sessions-smoke', version: '0.1.0' }
+});
+codexSessionsClient.notify('notifications/initialized');
+const codexSessionTools = await codexSessionsClient.request('tools/list', {});
+const codexSessionToolNames = codexSessionTools.tools.map((tool) => tool.name);
+for (const expectedName of ['codex_sessions', 'read_codex_session']) {
+  if (!codexSessionToolNames.includes(expectedName)) {
+    throw new Error(`codex session opt-in mode missing ${expectedName}: ${codexSessionToolNames.join(', ')}`);
+  }
+}
+const codexSessions = await codexSessionsClient.request('tools/call', { name: 'codex_sessions', arguments: { max_sessions: 5 } });
+const session = codexSessions.structuredContent.sessions?.[0];
+if (!session || session.session_id !== '019cc369-bd7c-7891-b371-7b20b4fe0b18' || session.title !== 'Fix the smoke session browser' || session.project_dir !== tmp) {
+  throw new Error(`codex_sessions did not return parsed Codex metadata: ${JSON.stringify(codexSessions.structuredContent)}`);
+}
+if (session.resume_command !== 'codex resume 019cc369-bd7c-7891-b371-7b20b4fe0b18') {
+  throw new Error(`codex_sessions returned wrong resume command: ${JSON.stringify(session)}`);
+}
+const codexTranscript = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: { session_id: '019cc369-bd7c-7891-b371-7b20b4fe0b18', max_messages: 10 }
+});
+if (!codexTranscript.content?.[0]?.text?.includes('Fix the smoke session browser') || !codexTranscript.content?.[0]?.text?.includes('[Tool: bash]')) {
+  throw new Error(`read_codex_session did not return bounded transcript text: ${codexTranscript.content?.[0]?.text}`);
+}
+const topOneSessions = await codexSessionsClient.request('tools/call', { name: 'codex_sessions', arguments: { max_sessions: 1 } });
+if (topOneSessions.structuredContent.sessions?.some?.((item) => item.session_id === olderCodexSessionId)) {
+  throw new Error(`codex_sessions max_sessions did not limit visible results: ${JSON.stringify(topOneSessions.structuredContent)}`);
+}
+const olderCodexTranscript = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: { session_id: olderCodexSessionId, max_messages: 10 }
+});
+if (!olderCodexTranscript.content?.[0]?.text?.includes('Older session still readable by id')) {
+  throw new Error(`read_codex_session only searched visible list window: ${olderCodexTranscript.content?.[0]?.text}`);
+}
+codexSessionsClient.close();
 
 const sessionGuardClient = new McpStdioClient('node', [
   'dist/stdio.js',

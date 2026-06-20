@@ -33,49 +33,78 @@
   <a href="SECURITY.md">Security</a>
 </p>
 
-CodexPro turns ChatGPT Developer Mode into a local coding agent for the folder on your machine. Install it globally, run setup in a repo, paste the copied Server URL into ChatGPT Create App, and ChatGPT can inspect files, edit code, run safe verification commands, and load the same explicit context you normally give Codex through `AGENTS.md`, `.ai-bridge`, git status, git diff, and source files.
+## Installation
 
-CodexPro is not a rate-limit bypass. It uses ChatGPT's official Developer Mode and MCP app path to connect your own ChatGPT session to your own local repo. ChatGPT and Codex remain separate product surfaces, each subject to its own plan limits, safety rules, and availability.
+CodexPro requires Node.js 20+ and a ChatGPT Plus or Pro account with Apps / Developer Mode access.
 
-If one workflow is unavailable and another product surface you already have access to is still available, CodexPro lets you keep working against the same local repo without modifying or evading either product's limits.
+Install the CLI:
 
 ```bash
 npm install -g codexpro
+```
+
+Then run setup inside the repo you want ChatGPT to work on:
+
+```bash
+cd /path/to/your/repo
 codexpro setup
 ```
 
-## Why
+CodexPro copies the ChatGPT Server URL for you. In ChatGPT, open `Settings -> Apps -> Advanced settings -> Create app`, paste that URL, and choose `Authentication: No Authentication / None`.
 
-```text
-ChatGPT web can see Codex-style context:
-  AGENTS.md
-  .ai-bridge plans and status
-  git status and diff
-  selected source files
+After setup, daily use from the same repo is just:
 
-ChatGPT web can act on your repo:
-  read files
-  write files
-  exact-edit files
-  search code
-  run safe verification commands
-
-Codex stays useful:
-  execute plans locally
-  handle deeper terminal-heavy work
-  review or continue a handoff
+```bash
+codexpro start
 ```
 
-What it gives you:
+CodexPro turns ChatGPT Developer Mode into a local coding agent for that folder. It gives ChatGPT bounded MCP tools for file reads, code search, exact edits, git inspection, safe verification commands, and explicit Codex-style context from `AGENTS.md`, `.ai-bridge`, git state, and selected source files.
 
-```text
-Normal coding mode  ChatGPT reads, writes, edits, searches, and verifies directly.
-Handoff mode        ChatGPT writes .ai-bridge/current-plan.md for a local implementation agent.
-Pro planning mode   Export a durable context bundle for sessions that cannot call MCP tools.
-Stable URLs         Use an ngrok free dev domain or Cloudflare named tunnel so the ChatGPT app URL stays fixed.
-```
+CodexPro is not a rate-limit bypass. It uses ChatGPT's official Developer Mode and MCP app path to connect your own ChatGPT session to your own local repo. ChatGPT and Codex remain separate product surfaces, each subject to its own plan limits, safety rules, and availability.
+
+## Quick Choices
+
+| Need | Use |
+| --- | --- |
+| Fast first setup | `npm install -g codexpro`, then `codexpro setup` |
+| Daily start | `codexpro start` from the same repo |
+| Stable ChatGPT URL | ngrok free dev domain or Cloudflare named tunnel |
+| Smallest tool surface | default `CODEXPRO_TOOL_MODE=standard` |
+| Full diagnostics | `codexpro start --tool-mode full` |
+| No ChatGPT-triggered shell | `codexpro start --no-bash` |
+| Compact chat transcript | default bash cards; use `--bash-transcript full` only when needed |
+| Local Codex history lookup | opt in with `--codex-sessions metadata` or `read` |
+
+## Why CodexPro?
+
+| ChatGPT gets | CodexPro provides |
+| --- | --- |
+| Repo context | `AGENTS.md`, `.ai-bridge`, git status, git diff, selected source files |
+| Coding actions | `read`, `write`, `edit`, `search`, `show_changes` |
+| Verification | safe `bash` for focused test, lint, build, and git commands |
+| Handoff | `.ai-bridge/current-plan.md` for Codex, OpenCode, Pi, or a custom local agent |
+| Fallback planning | `.ai-bridge/pro-context.md` for model surfaces that cannot call MCP tools |
+
+If one workflow is unavailable and another product surface you already have access to is still available, CodexPro lets you keep working against the same local repo without modifying or evading either product's limits.
 
 If your ChatGPT account exposes a stronger model in the web app, and that model/surface can call Developer Mode apps, CodexPro lets it work against your local repo through MCP. Some ChatGPT model surfaces may not be able to call connectors or MCP tools directly. CodexPro does not provide, proxy, resell, or unlock models; it gives compatible ChatGPT sessions local coding tools and repo context.
+
+## Preview
+
+![CodexPro preview](docs/og.svg)
+
+The website and ChatGPT cards are designed to keep repo inventory, git details, terminal output, and raw diffs folded until you ask for them. The normal path is a compact card plus a clear diff or verification result, not a chat full of raw tool data.
+
+## Feature Map
+
+| Area | Details |
+| --- | --- |
+| Workspace open | `open_current_workspace`, `open_workspace`, `tree`, `search`, `read` |
+| Editing | workspace-scoped `write` and exact-replacement `edit`, both returning diffs |
+| Review | `show_changes`, `git_status`, `git_diff`, compact visual cards |
+| Safety | workspace-only writes, safe bash by default, blocked secret/build/cache paths, token-protected public URLs |
+| Context | `codex_context`, `read_handoff`, selected-only `export_pro_context` |
+| Local execution | `execute-handoff` and `watch-handoff` run from your terminal, not as remote MCP tools |
 
 CodexPro is not an OS sandbox. It is a local developer bridge with safety defaults. Read [SECURITY.md](SECURITY.md) before exposing it through a tunnel.
 
@@ -238,25 +267,7 @@ _meta["openai/widgetCSP"]
 
 After upgrading or changing widget metadata, open the CodexPro app settings in ChatGPT Developer Mode and click `Refresh` / `Refresh actions` so ChatGPT reloads the tool descriptors and resource URI.
 
-## Install
-
-Recommended install:
-
-```bash
-npm install -g codexpro
-```
-
-First run from the repo you want ChatGPT to work on:
-
-```bash
-codexpro setup
-```
-
-Daily start after setup:
-
-```bash
-codexpro start
-```
+## Other Install Paths
 
 No-install fallback:
 
@@ -295,7 +306,7 @@ That is the intended low-friction first-run path. It:
 - starts in normal coding mode with workspace edits enabled
 - shows a compact terminal control panel
 - lets you press Enter to open ChatGPT in your browser
-- lets you press `o` to open a local setup/status page
+- lets you press `o` to open the local admin dashboard
 ```
 
 After setup, daily use from the same repo is:
@@ -400,13 +411,23 @@ codexpro doctor
 
 Use `--no-copy-url` if you do not want CodexPro to copy the connector URL. Add `--open-chatgpt` if you want the browser to open automatically instead of pressing Enter.
 
-Local setup/status page:
+Local admin dashboard:
 
 ```text
 press o in the CodexPro terminal control panel
 ```
 
-The page shows the active workspace, local MCP endpoint, safety modes, allowed roots, and the exact ChatGPT setup steps. It is served by the local CodexPro process and stays token-protected when auth is enabled.
+The page is a token-protected admin surface for setup and settings. It shows the current workspace, local MCP endpoint, safety modes, install/start commands, ChatGPT connection steps, saved profile settings, and allowed roots.
+
+It includes GitHub, npm, and docs links, plus copy buttons for global install, guided setup, daily start, source-checkout setup, and advanced restart commands. The saved profile editor controls next-run defaults:
+
+- tunnel provider and public hostname
+- local port and agent/handoff/pro mode
+- bash mode, compact/full transcript, and optional required bash session
+- Codex session metadata/read mode
+- write mode, tool mode, widget origin, and tunnel config paths
+
+Profile edits apply after the next `codexpro start`. The browser admin page exposes setup/settings/status plus the MCP endpoint; it does not accept raw Cloudflare tunnel tokens, switch ChatGPT accounts, or run CodexPro as a background service. For Cloudflare dashboard-managed tunnels, save the tunnel token in a local file and set `Cloudflare token file`.
 
 Saved workspace profile behavior:
 
@@ -428,7 +449,7 @@ If setup finds a saved ngrok or Cloudflare stable profile, CodexPro prints the s
 codexpro start
 ```
 
-That is enough from the same workspace folder. Use `codexpro setup` again only when you want to change the port, mode, tunnel provider, hostname, or CodexPro auth token.
+That is enough from the same workspace folder. Press `o` in the running CodexPro terminal to update most saved profile defaults from the local page, or use `codexpro setup` when you want the guided terminal flow or a fresh CodexPro auth token.
 
 Useful profile flags:
 
@@ -457,7 +478,7 @@ Terminal controls:
 ```text
 Enter  open ChatGPT connector settings in your browser
 c      copy Server URL again
-o      open local setup/status page
+o      open local admin dashboard
 h      show controls
 q      stop CodexPro
 ```
@@ -469,7 +490,9 @@ Startup modes:
 ```bash
 codexpro start                 # normal coding mode: read/write/edit/search/bash
 codexpro start --no-bash       # normal coding mode without ChatGPT-triggered shell commands
+codexpro start --bash-transcript full  # print raw stdout/stderr in chat instead of compact cards
 codexpro start --bash-session main --require-bash-session
+codexpro start --tool-mode full --codex-sessions metadata
 codexpro setup                 # guided onboarding for new users
 codexpro start --mode handoff  # planning-only .ai-bridge handoff
 codexpro start --mode handoff --no-bash
@@ -1058,6 +1081,23 @@ codexpro start --bash-session main --require-bash-session
 ```
 
 With that guard enabled, the `bash` MCP tool rejects commands unless the call includes `session_id: "main"`. The session label is a local UX guard, not a secret and not a Codex app conversation id.
+
+By default, bash results use a compact transcript so ChatGPT does not fill the conversation with a large stdout/stderr block. Full stdout/stderr is still returned in structured tool data and the CodexPro card keeps the output preview folded. If you want the old raw transcript behavior:
+
+```bash
+codexpro start --bash-transcript full
+```
+
+CodexPro can also expose an opt-in, read-only local Codex session browser when full tools are enabled:
+
+```bash
+codexpro start --tool-mode full --codex-sessions metadata
+codexpro start --tool-mode full --codex-sessions read
+```
+
+`metadata` adds a `codex_sessions` tool that lists local session ids, titles, cwd paths, source files, and `codex resume <session-id>` commands from `~/.codex/sessions` and `~/.codex/archived_sessions`. `read` also adds `read_codex_session` for bounded transcript reads. This is similar to local session managers that scan Codex JSONL history; it still does not attach to a live Codex app chat, execute inside that session, or bypass any product limits.
+
+Use `--codex-dir <dir>` if your Codex history lives somewhere other than `~/.codex`.
 
 If you want ChatGPT to plan while Codex or another local agent edits and runs commands, combine handoff mode with disabled bash:
 

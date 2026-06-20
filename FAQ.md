@@ -126,6 +126,14 @@ codexpro start --bash-session main --require-bash-session
 
 Then `bash` calls must include `session_id: "main"`. This helps avoid accidental shell execution in the wrong CodexPro terminal, but it is not remote control of an existing Codex app chat.
 
+CodexPro can list local Codex session ids and titles when you explicitly opt in:
+
+```bash
+codexpro start --tool-mode full --codex-sessions metadata
+```
+
+This reads local Codex JSONL history under `~/.codex/sessions` and `~/.codex/archived_sessions` and returns metadata plus `codex resume <session-id>` commands. Use `--codex-sessions read` only if you also want bounded transcript reads. It does not attach to a live Codex app conversation.
+
 If you do not want ChatGPT to trigger shell commands while you work in Codex, start CodexPro with bash disabled:
 
 ```bash

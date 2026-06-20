@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 
 export type BashMode = "off" | "safe" | "full";
+export type BashTranscriptMode = "compact" | "full";
+export type CodexSessionsMode = "off" | "metadata" | "read";
 export type WriteMode = "off" | "handoff" | "workspace";
 export type ToolMode = "minimal" | "standard" | "full";
 
@@ -15,8 +17,11 @@ export interface CodexProConfig {
   authToken?: string;
   requireHttpToken: boolean;
   bashMode: BashMode;
+  bashTranscript: BashTranscriptMode;
   bashSessionId?: string;
   requireBashSession: boolean;
+  codexSessions: CodexSessionsMode;
+  codexDir: string;
   writeMode: WriteMode;
   toolMode: ToolMode;
   inheritEnv: boolean;
@@ -142,6 +147,17 @@ function bashModeFrom(value: string | undefined): BashMode {
   return "safe";
 }
 
+function bashTranscriptFrom(value: string | undefined): BashTranscriptMode {
+  if (value === "compact" || value === "full") return value;
+  return "compact";
+}
+
+function codexSessionsFrom(value: string | undefined): CodexSessionsMode {
+  if (value === "metadata" || value === "read") return value;
+  if (value === "1" || value === "true" || value === "yes" || value === "on") return "metadata";
+  return "off";
+}
+
 function bashSessionIdFrom(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
@@ -211,7 +227,10 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   const portArg = typeof args.port === "string" ? args.port : undefined;
   const hostArg = typeof args.host === "string" ? args.host : undefined;
   const bashArg = typeof args.bash === "string" ? args.bash : undefined;
+  const bashTranscriptArg = typeof args["bash-transcript"] === "string" ? args["bash-transcript"] : undefined;
   const bashSessionArg = typeof args["bash-session"] === "string" ? args["bash-session"] : undefined;
+  const codexSessionsArg = typeof args["codex-sessions"] === "string" ? args["codex-sessions"] : undefined;
+  const codexDirArg = typeof args["codex-dir"] === "string" ? args["codex-dir"] : undefined;
   const requireBashSessionArg =
     args["require-bash-session"] === true
       ? "true"
@@ -244,8 +263,11 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     authToken,
     requireHttpToken,
     bashMode: bashModeFrom(bashArg ?? process.env.CODEXPRO_BASH_MODE),
+    bashTranscript: bashTranscriptFrom(bashTranscriptArg ?? process.env.CODEXPRO_BASH_TRANSCRIPT),
     bashSessionId,
     requireBashSession,
+    codexSessions: codexSessionsFrom(codexSessionsArg ?? process.env.CODEXPRO_CODEX_SESSIONS),
+    codexDir: expandHome(codexDirArg ?? process.env.CODEXPRO_CODEX_DIR ?? path.join(os.homedir(), ".codex")),
     writeMode: writeModeFrom(writeArg ?? process.env.CODEXPRO_WRITE_MODE),
     toolMode: toolModeFrom(toolModeArg ?? process.env.CODEXPRO_TOOL_MODE),
     inheritEnv: process.env.CODEXPRO_INHERIT_ENV === "1",
