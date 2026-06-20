@@ -415,6 +415,28 @@ if (!fullTranscriptText.includes('## stdout') || !fullTranscriptText.includes(tm
 }
 fullTranscriptClient.close();
 
+const emptyCodexDirClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_ROOT: tmp,
+    CODEXPRO_ALLOWED_ROOTS: tmp,
+    CODEXPRO_CODEX_DIR: ''
+  }
+});
+await emptyCodexDirClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-empty-codex-dir-smoke', version: '0.1.0' }
+});
+emptyCodexDirClient.notify('notifications/initialized');
+const emptyCodexDirConfig = await emptyCodexDirClient.request('tools/call', { name: 'server_config', arguments: {} });
+const expectedDefaultCodexDir = path.join(os.homedir(), '.codex');
+if (emptyCodexDirConfig.structuredContent.codexDir !== expectedDefaultCodexDir) {
+  throw new Error(`empty CODEXPRO_CODEX_DIR resolved to ${emptyCodexDirConfig.structuredContent.codexDir}, expected ${expectedDefaultCodexDir}`);
+}
+emptyCodexDirClient.close();
+
 const codexSessionsClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--tool-mode', 'full'], {
   cwd: path.resolve('.'),
   env: {
