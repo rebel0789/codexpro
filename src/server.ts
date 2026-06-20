@@ -242,6 +242,13 @@ const FULL_TOOL_NAMES = [
   "handoff_to_codex"
 ] as const;
 
+function codexSessionToolNames(config: CodexProConfig): string[] {
+  if (config.codexSessions === "off") return [];
+  return config.codexSessions === "read"
+    ? ["codex_sessions", "read_codex_session"]
+    : ["codex_sessions"];
+}
+
 function toolNamesForMode(config: CodexProConfig): string[] {
   const names: string[] =
     config.toolMode === "full"
@@ -249,9 +256,8 @@ function toolNamesForMode(config: CodexProConfig): string[] {
       : config.toolMode === "minimal"
         ? [...MINIMAL_TOOL_NAMES]
         : [...STANDARD_TOOL_NAMES];
-  if (config.toolMode === "full" && config.codexSessions !== "off") {
-    names.push("codex_sessions");
-    if (config.codexSessions === "read") names.push("read_codex_session");
+  for (const name of codexSessionToolNames(config)) {
+    if (!names.includes(name)) names.push(name);
   }
   return names;
 }
@@ -260,6 +266,8 @@ const MINIMAL_TOOLS = new Set<string>(MINIMAL_TOOL_NAMES);
 const STANDARD_TOOLS = new Set<string>(STANDARD_TOOL_NAMES);
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
+  if (name === "codex_sessions") return config.codexSessions !== "off";
+  if (name === "read_codex_session") return config.codexSessions === "read";
   if (config.toolMode === "full") return true;
   if (config.toolMode === "minimal") return MINIMAL_TOOLS.has(name);
   return STANDARD_TOOLS.has(name);

@@ -9,6 +9,8 @@ import { CodexProError } from "./guard.js";
 const CODEX_IDE_CONTEXT_PREFIX = "# Context from my IDE setup:";
 const CODEX_REQUEST_MARKER = "my request for codex";
 const UUID_RE = /[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}/;
+const META_HEAD_BYTES = 64 * 1024;
+const META_TAIL_BYTES = 64 * 1024;
 
 export interface CodexSessionMeta {
   provider_id: "codex";
@@ -85,16 +87,46 @@ async function collectJsonlFiles(root: string, files: string[], maxDepth: number
   }
 }
 
-async function readHeadTailLines(filePath: string, headLimit: number, tailLimit: number): Promise<{ head: string[]; tail: string[] }> {
-  const head: string[] = [];
-  const tail: string[] = [];
-  const rl = createInterface({ input: createReadStream(filePath, { encoding: "utf8" }), crlfDelay: Infinity });
-  for await (const line of rl) {
-    if (head.length < headLimit) head.push(line);
-    tail.push(line);
-    if (tail.length > tailLimit) tail.shift();
+async function readFileSlice(filePath: string, start: number, length: number): Promise<string> {
+  if (length <= 0) return "";
+  const handle = await fsp.open(filePath, "r");
+  try {
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    return buffer.subarray(0, bytesRead).toString("utf8");
+  } finally {
+    await handle.close();
   }
-  return { head, tail };
+}
+
+function splitJsonlLines(text: string): string[] {
+  return text.split(/\r?\n/).filter((line) => line.length > 0);
+}
+
+async function readHeadTailLines(filePath: string, headLimit: number, tailLimit: number): Promise<{ head: string[]; tail: string[] }> {
+  const fileStat = await fsp.stat(filePath);
+  const headLength = Math.min(fileStat.size, META_HEAD_BYTES);
+  const tailOffset = Math.max(0, fileStat.size - META_TAIL_BYTES);
+  const tailLength = fileStat.size - tailOffset;
+  const [headText, tailText] = await Promise.all([
+    readFileSlice(filePath, 0, headLength),
+    tailOffset === 0 && tailLength === headLength ? Promise.resolve("") : readFileSlice(filePath, tailOffset, tailLength)
+  ]);
+
+  const headLines = splitJsonlLines(headText);
+  if (headLength < fileStat.size && !headText.endsWith("\n")) headLines.pop();
+
+  const tailSource = tailText
+    ? tailOffset > 0
+      ? tailText.slice(Math.max(0, tailText.indexOf("\n") + 1))
+      : tailText
+    : headText;
+  const tailLines = splitJsonlLines(tailSource);
+
+  return {
+    head: headLines.slice(0, headLimit),
+    tail: tailLines.slice(-tailLimit)
+  };
 }
 
 function parseTimestamp(value: unknown): number | undefined {

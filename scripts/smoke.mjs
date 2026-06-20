@@ -79,6 +79,13 @@ await fs.writeFile(path.join(codexSessionDir, `rollout-2026-06-19T01-02-03-${old
   JSON.stringify({ timestamp: '2026-06-19T01:02:03Z', type: 'session_meta', payload: { id: olderCodexSessionId, cwd: tmp } }),
   JSON.stringify({ timestamp: '2026-06-19T01:02:04Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Older session still readable by id' } })
 ].join('\n') + '\n', 'utf8');
+const largeCodexSessionId = '019cc367-aaaa-7333-8444-123456789def';
+await fs.writeFile(path.join(codexSessionDir, `rollout-2026-06-18T01-02-03-${largeCodexSessionId}.jsonl`), [
+  JSON.stringify({ timestamp: '2026-06-18T01:02:03Z', type: 'session_meta', payload: { id: largeCodexSessionId, cwd: tmp } }),
+  JSON.stringify({ timestamp: '2026-06-18T01:02:04Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Large metadata session' } }),
+  JSON.stringify({ timestamp: '2026-06-18T01:02:05Z', type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(140000) } }),
+  JSON.stringify({ timestamp: '2026-06-18T01:02:06Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'Large tail summary' } })
+].join('\n') + '\n', 'utf8');
 await fs.mkdir(path.join(tmp, '.codex', 'skills', 'smoke-skill'), { recursive: true });
 await fs.writeFile(path.join(tmp, '.codex', 'skills', 'smoke-skill', 'SKILL.md'), [
   '---',
@@ -398,6 +405,32 @@ async function assertToolMode(mode, expected, hidden) {
 await assertToolMode('', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
 await assertToolMode('minimal', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
 
+const standardCodexSessionsClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_ROOT: tmp,
+    CODEXPRO_ALLOWED_ROOTS: tmp,
+    CODEXPRO_CODEX_SESSIONS: 'metadata',
+    CODEXPRO_CODEX_DIR: codexHistoryDir
+  }
+});
+await standardCodexSessionsClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-standard-codex-sessions-smoke', version: '0.1.0' }
+});
+standardCodexSessionsClient.notify('notifications/initialized');
+const standardCodexSessionTools = await standardCodexSessionsClient.request('tools/list', {});
+const standardCodexSessionToolNames = standardCodexSessionTools.tools.map((tool) => tool.name);
+if (!standardCodexSessionToolNames.includes('codex_sessions')) {
+  throw new Error(`standard mode with Codex sessions enabled missed codex_sessions: ${standardCodexSessionToolNames.join(', ')}`);
+}
+if (standardCodexSessionToolNames.includes('read_codex_session')) {
+  throw new Error(`metadata mode should not expose read_codex_session: ${standardCodexSessionToolNames.join(', ')}`);
+}
+standardCodexSessionsClient.close();
+
 const fullTranscriptClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
   cwd: path.resolve('.'),
   env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_BASH_TRANSCRIPT: 'full' }
@@ -485,6 +518,11 @@ const olderCodexTranscript = await codexSessionsClient.request('tools/call', {
 });
 if (!olderCodexTranscript.content?.[0]?.text?.includes('Older session still readable by id')) {
   throw new Error(`read_codex_session only searched visible list window: ${olderCodexTranscript.content?.[0]?.text}`);
+}
+const largeTailSessions = await codexSessionsClient.request('tools/call', { name: 'codex_sessions', arguments: { query: 'Large tail summary', max_sessions: 5 } });
+const largeTailSession = largeTailSessions.structuredContent.sessions?.find?.((item) => item.session_id === largeCodexSessionId);
+if (!largeTailSession || largeTailSession.summary !== 'Large tail summary') {
+  throw new Error(`codex_sessions did not parse summary from bounded tail window: ${JSON.stringify(largeTailSessions.structuredContent)}`);
 }
 codexSessionsClient.close();
 
