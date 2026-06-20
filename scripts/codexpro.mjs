@@ -331,14 +331,30 @@ function commandPaths(command) {
     .filter(Boolean);
 }
 
+function isWindowsBatchFile(command) {
+  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(command);
+}
+
+function isWindowsExecutableFile(command) {
+  return process.platform === 'win32' && /\.exe$/i.test(command);
+}
+
+function isWindowsCommandCandidate(command) {
+  return isWindowsExecutableFile(command) || isWindowsBatchFile(command);
+}
+
 function resolveCodexCommand() {
-  const explicit = process.env.CODEXPRO_CODEX_BIN;
-  if (explicit) return resolveExecutablePath(explicit);
+  const explicit = String(process.env.CODEXPRO_CODEX_BIN ?? '').trim();
+  if (explicit) {
+    if (isPathLike(explicit)) return resolveExecutablePath(explicit);
+    const candidates = commandPaths(explicit);
+    if (process.platform !== 'win32') return candidates[0] || explicit;
+    return candidates.find(isWindowsCommandCandidate) || explicit;
+  }
   if (process.platform !== 'win32') return 'codex';
 
   const candidates = commandPaths('codex');
-  const spawnable = candidates.find((candidate) => /\.(cmd|exe|bat)$/i.test(candidate));
-  return spawnable || 'codex';
+  return candidates.find(isWindowsCommandCandidate) || 'codex';
 }
 
 function isPathLike(command) {
@@ -1060,7 +1076,7 @@ function buildExecutorCommand(args, root, planPath, planText) {
       'Keep changes scoped to that plan.',
       'Do not modify .ai-bridge/current-plan.md.',
       'When finished, summarize changed files and verification.'
-    ].join('\n');
+    ].join(' ');
     return {
       agent,
       model,
@@ -1102,16 +1118,34 @@ function executorCommandPreview(commandInfo) {
   return shellCommandPreview([commandInfo.command, ...(commandInfo.displayArgs ?? commandInfo.args)]);
 }
 
+function quoteWindowsCmdArg(value) {
+  const text = String(value).replace(/\r?\n/g, ' ');
+  if (!text) return '""';
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function processInvocation(command, args) {
+  if (!isWindowsBatchFile(command)) return { command, args };
+  const commandLine = ['call', quoteWindowsCmdArg(command), ...args.map(quoteWindowsCmdArg)].join(' ');
+  return {
+    command: process.env.ComSpec || 'cmd.exe',
+    args: ['/d', '/s', '/c', commandLine],
+    windowsVerbatimArguments: true
+  };
+}
+
 function runProcessCaptured(command, args, options) {
   const timeoutMs = options.timeoutMs;
   const maxOutputBytes = options.maxOutputBytes;
   const started = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(command, args, {
+    const invocation = processInvocation(command, args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
       env: { ...process.env, NO_COLOR: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false
+      shell: false,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments
     });
     let stdout = '';
     let stderr = '';

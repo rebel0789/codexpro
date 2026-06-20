@@ -139,7 +139,8 @@ const fakeCodexEnv = {
   ...process.env,
   NO_COLOR: '1',
   CODEXPRO_FAKE_CODEX_LOG: fakeCodexLog,
-  PATH: `${fakeCodexBin}${path.delimiter}${process.env.PATH ?? ''}`
+  PATH: `${fakeCodexBin}${path.delimiter}${process.env.PATH ?? process.env.Path ?? ''}`,
+  Path: `${fakeCodexBin}${path.delimiter}${process.env.Path ?? process.env.PATH ?? ''}`
 };
 
 const codexDryRun = run([
@@ -182,6 +183,41 @@ if (!codexLastMessage.includes('fake codex last message')) {
 }
 if (!codexApp.includes('codex adapter executed')) {
   throw new Error(`codex adapter did not execute fake codex\n${codexApp}`);
+}
+
+const explicitCodexEnv = {
+  ...fakeCodexEnv,
+  CODEXPRO_CODEX_BIN: 'codex'
+};
+const explicitCodexDryRun = run([
+  'execute-handoff',
+  '--root',
+  root,
+  '--agent',
+  'codex',
+  '--model',
+  'gpt-explicit',
+  '--dry-run'
+], { env: explicitCodexEnv });
+requireSuccess(explicitCodexDryRun, 'execute-handoff CODEXPRO_CODEX_BIN command-name dry-run');
+if (explicitCodexDryRun.stdout.includes(path.join(root, 'codex'))) {
+  throw new Error(`CODEXPRO_CODEX_BIN=codex resolved as a cwd-relative path\n${explicitCodexDryRun.stdout}`);
+}
+
+const explicitCodexExecuted = run([
+  'execute-handoff',
+  '--root',
+  root,
+  '--agent',
+  'codex',
+  '--model',
+  'gpt-explicit',
+  '--yes'
+], { env: explicitCodexEnv });
+requireSuccess(explicitCodexExecuted, 'execute-handoff CODEXPRO_CODEX_BIN command-name');
+const explicitFakeCodexArgs = JSON.parse(await fs.readFile(fakeCodexLog, 'utf8'));
+if (!explicitFakeCodexArgs.includes('gpt-explicit')) {
+  throw new Error(`CODEXPRO_CODEX_BIN command-name did not execute through PATH\n${JSON.stringify(explicitFakeCodexArgs)}`);
 }
 
 const watchRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-watch-handoff-'));
