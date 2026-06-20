@@ -317,6 +317,12 @@ function realDir(input) {
   return fs.realpathSync(resolved);
 }
 
+function resolveCodexDir(root, input) {
+  if (!input) return '';
+  const expanded = expandHome(input);
+  return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(root, expanded);
+}
+
 function commandExists(command) {
   const result = spawnSync(process.platform === 'win32' ? 'where' : 'command', process.platform === 'win32' ? [command] : ['-v', command], {
     shell: process.platform !== 'win32',
@@ -2501,7 +2507,7 @@ async function main() {
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], 'safe');
   const bashTranscript = bashTranscriptOption(args, profile);
   const codexSessions = codexSessionsOption(args, profile);
-  const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
+  const codexDir = resolveCodexDir(root, optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], ''));
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], mode === 'agent' ? 'workspace' : 'handoff');
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');

@@ -55,6 +55,22 @@ function waitForExit(child, timeoutMs = 5000) {
   });
 }
 
+async function waitForHealthJson(url, timeoutMs = 15000) {
+  const started = Date.now();
+  let lastError = '';
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const response = await fetch(url);
+      if (response.ok) return await response.json();
+      lastError = `${response.status} ${await response.text()}`;
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`timeout waiting for ${url}\n${lastError}`);
+}
+
 async function expectHttpTokenRequired(name, overrides = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `codexpro-http-no-token-${name}-`));
   const port = await getFreePort();
@@ -393,6 +409,45 @@ try {
   await fs.stat(path.join(root, '.ai-bridge', 'pro-context.md'));
 } finally {
   child.kill('SIGTERM');
+}
+
+const cliRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-cli-http-smoke-'));
+await fs.mkdir(path.join(cliRoot, '.codex'), { recursive: true });
+const cliPort = await getFreePort();
+const cliChild = spawn(process.execPath, [
+  'scripts/codexpro.mjs',
+  'start',
+  '--root',
+  cliRoot,
+  '--tunnel',
+  'none',
+  '--no-auth',
+  '--port',
+  String(cliPort),
+  '--codex-sessions',
+  'metadata',
+  '--codex-dir',
+  '.codex'
+], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_HOME: await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-cli-http-home-'))
+  },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+try {
+  await waitForHealthJson(`http://127.0.0.1:${cliPort}/healthz`);
+  const expectedCliCodexDir = path.join(await fs.realpath(cliRoot), '.codex');
+  await withClient(`http://127.0.0.1:${cliPort}/mcp`, async (client) => {
+    const config = await callTool(client, 'server_config');
+    if (config.structuredContent.codexDir !== expectedCliCodexDir) {
+      throw new Error(`relative --codex-dir resolved to ${config.structuredContent.codexDir}, expected ${expectedCliCodexDir}`);
+    }
+  });
+} finally {
+  cliChild.kill('SIGTERM');
+  await waitForExit(cliChild).catch(() => {});
 }
 
 console.log('✓ http smoke test passed');
