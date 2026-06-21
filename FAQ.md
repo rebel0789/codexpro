@@ -163,11 +163,39 @@ For most users, the better path is a free ngrok dev domain. Create a free ngrok 
 
 If you own a domain, use Cloudflare named tunnels and route DNS to a hostname like `codexpro.example.com`.
 
+## Why does a Cloudflare quick-tunnel URL fail in ChatGPT or return Error 1033?
+
+Creating a `trycloudflare.com` URL is not proof that the tunnel is connected. ChatGPT validates the public MCP endpoint when you create the app. If `cloudflared` exits after printing the URL, ChatGPT can show a generic connection error and Cloudflare can return `530` / `Error 1033`.
+
+Start with tunnel logs enabled:
+
+```bash
+codexpro start --log-requests
+```
+
+Wait for this line before using the Server URL:
+
+```text
+Registered tunnel connection
+```
+
+If the logs instead contain an error like the following, the active system DNS resolver is returning an invalid SRV response for Cloudflare's tunnel discovery:
+
+```text
+Could not lookup srv records on _v2-origintunneld._tcp.argotunnel.com
+... cannot unmarshal DNS message
+```
+
+Set the DNS servers for the active operating-system network connection to a standards-compliant resolver, for example `1.1.1.1` and `1.0.0.1`, then reconnect the network and restart CodexPro. If a proxy client manages DNS, enable its system DNS integration or TUN DNS hijacking; changing only the proxy client's internal nameserver list may not affect `cloudflared`.
+
+After the tunnel registers, use the newly printed Server URL and keep the `codexpro start` process running. A quick-tunnel URL includes a bearer token, so do not share it in issues, screenshots, or chat messages.
+
 Official references:
 
 - ngrok dev domains: https://ngrok.com/docs/universal-gateway/domains
 - Cloudflare Tunnel routing: https://developers.cloudflare.com/tunnel/routing/
 - Cloudflare Tunnel DNS records: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/
+- Cloudflare 1.1.1.1 setup: https://developers.cloudflare.com/1.1.1.1/setting-up-1.1.1.1/
 
 ## Can I use the same ChatGPT app URL every day?
 
