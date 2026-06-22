@@ -123,7 +123,7 @@ function toolNames(tools) {
 function hasWidgetMeta(tools, name, uri) {
   const tool = tools.find((item) => item.name === name);
   const meta = tool?._meta ?? {};
-  return meta.ui?.resourceUri === uri || meta['openai/outputTemplate'] === uri;
+  return meta.ui?.resourceUri === uri && meta['openai/outputTemplate'] === uri;
 }
 
 await expectHttpTokenRequired('non-loopback', { CODEXPRO_HOST: '0.0.0.0' });
@@ -150,6 +150,7 @@ async function callTool(client, name, args = {}) {
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
+const realRoot = await fs.realpath(root);
 const profileHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-profile-home-'));
 await fs.mkdir(path.join(root, '.codex', 'skills', 'http-smoke-skill'), { recursive: true });
 await fs.writeFile(path.join(root, '.codex', 'skills', 'http-smoke-skill', 'SKILL.md'), [
@@ -211,11 +212,16 @@ try {
   if (home.status !== 200 || !home.headers.get('content-type')?.includes('text/html')) {
     throw new Error(`expected authenticated onboarding page to return HTML 200, got ${home.status}`);
   }
-  if (!homeText.includes('CodexPro Admin') || !homeText.includes('CLI controls') || !homeText.includes('Connect ChatGPT')) {
+  if (!homeText.includes('CodexPro Local Control') || !homeText.includes('CLI controls') || !homeText.includes('Connect ChatGPT') || !homeText.includes('Runtime guardrails')) {
     throw new Error('onboarding page did not include expected admin setup copy');
   }
   if (!homeText.includes('Connection profile') || !homeText.includes('data-profile-form')) {
     throw new Error('onboarding page did not include the saved profile editor');
+  }
+  for (const fieldName of ['tunnelName', 'ngrokConfig', 'cloudflareConfig', 'cloudflareTokenFile', 'noInstallCloudflared']) {
+    if (!homeText.includes(`name="${fieldName}"`)) {
+      throw new Error(`onboarding page did not include profile field ${fieldName}`);
+    }
   }
   if (homeText.includes(token)) {
     throw new Error('onboarding page leaked the raw auth token');
@@ -262,7 +268,8 @@ try {
       toolMode: 'full',
       widgetDomain: 'https://widgets.codexpro.test',
       ngrokConfig: path.join(root, 'ngrok.yml'),
-      cloudflareTokenFile: '~/.codexpro/cloudflare-tunnel-token'
+      cloudflareTokenFile: 'cloudflare-token',
+      noInstallCloudflared: true
     })
   });
   const profileSaveJson = await profileSave.json();
@@ -280,6 +287,9 @@ try {
     savedProfile.codexSessions !== 'metadata' ||
     savedProfile.bashSession !== 'http-main' ||
     savedProfile.requireBashSession !== true ||
+    savedProfile.ngrokConfig !== path.join(root, 'ngrok.yml') ||
+    savedProfile.cloudflareTokenFile !== path.join(realRoot, 'cloudflare-token') ||
+    savedProfile.noInstallCloudflared !== true ||
     savedProfile.token !== token
   ) {
     throw new Error(`admin profile save wrote unexpected profile: ${JSON.stringify(savedProfile)}`);
@@ -290,6 +300,11 @@ try {
   for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'load_skill', 'show_changes', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
+    }
+  }
+  for (const hidden of ['write', 'edit']) {
+    if (queryToolNames.includes(hidden)) {
+      throw new Error(`HTTP handoff mode should not advertise ${hidden}; got ${queryToolNames.join(', ')}`);
     }
   }
   const toolCardUri = 'ui://widget/codexpro-tool-card-v9.html';
@@ -313,6 +328,9 @@ try {
     if (toolCard.mimeType !== 'text/html;profile=mcp-app') {
       throw new Error(`unexpected HTTP tool-card mime type: ${toolCard.mimeType}`);
     }
+    const legacyToolCardUri = 'ui://widget/codexpro-tool-card-v8.html';
+    const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
+    if (!legacyToolCard) throw new Error(`HTTP MCP resources/list missing legacy ${legacyToolCardUri}`);
     const widget = await client.readResource({ uri: toolCardUri });
     const widgetText = widget.contents?.[0]?.text ?? '';
     const widgetMeta = widget.contents?.[0]?._meta ?? {};
@@ -324,6 +342,13 @@ try {
     }
     if (widgetMeta.ui?.domain !== 'https://widgets.codexpro.test' || widgetMeta['openai/widgetDomain'] !== 'https://widgets.codexpro.test') {
       throw new Error('HTTP tool-card widget resource did not expose standard and ChatGPT widget domain metadata');
+    }
+    const legacyWidget = await client.readResource({ uri: legacyToolCardUri });
+    if (legacyWidget.contents?.[0]?.uri !== legacyToolCardUri) {
+      throw new Error('HTTP legacy tool-card widget resource did not preserve requested URI');
+    }
+    if (!(legacyWidget.contents?.[0]?.text ?? '').includes('Waiting for tool result')) {
+      throw new Error('HTTP legacy tool-card widget resource did not serve widget HTML');
     }
   });
 
@@ -409,6 +434,45 @@ try {
   await fs.stat(path.join(root, '.ai-bridge', 'pro-context.md'));
 } finally {
   child.kill('SIGTERM');
+  await waitForExit(child).catch(() => {});
+}
+
+const disabledRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-disabled-tools-'));
+const disabledPort = await getFreePort();
+const disabledToken = 'codexpro-http-disabled-token';
+const disabledChild = spawn('node', ['dist/http.js'], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_ROOT: disabledRoot,
+    CODEXPRO_ALLOWED_ROOTS: disabledRoot,
+    CODEXPRO_PORT: String(disabledPort),
+    CODEXPRO_HTTP_TOKEN: disabledToken,
+    CODEXPRO_BASH_MODE: 'off',
+    CODEXPRO_WRITE_MODE: 'off',
+    CODEXPRO_TOOL_MODE: 'full'
+  },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+try {
+  await waitForListening(disabledChild);
+  const disabledBase = `http://127.0.0.1:${disabledPort}`;
+  const disabledTools = await listTools(`${disabledBase}/mcp?codexpro_token=${encodeURIComponent(disabledToken)}`);
+  const disabledToolNames = toolNames(disabledTools);
+  for (const hiddenTool of ['bash', 'write', 'edit']) {
+    if (disabledToolNames.includes(hiddenTool)) {
+      throw new Error(`HTTP disabled mode should not advertise ${hiddenTool}; got ${disabledToolNames.join(', ')}`);
+    }
+  }
+  await withClient(`${disabledBase}/mcp?codexpro_token=${encodeURIComponent(disabledToken)}`, async (client) => {
+    const config = await callTool(client, 'server_config');
+    if (config.structuredContent.bashMode !== 'off' || config.structuredContent.writeMode !== 'off') {
+      throw new Error(`HTTP disabled mode server_config mismatch: ${JSON.stringify(config.structuredContent)}`);
+    }
+  });
+} finally {
+  disabledChild.kill('SIGTERM');
+  await waitForExit(disabledChild).catch(() => {});
 }
 
 const cliRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-cli-http-smoke-'));

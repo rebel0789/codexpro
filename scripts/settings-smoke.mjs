@@ -40,6 +40,7 @@ async function readProfile(root, home) {
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-root-'));
 const reuseRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-reuse-'));
+const policyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-policy-'));
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-home-'));
 const env = { ...process.env, CODEXPRO_HOME: home };
 
@@ -86,6 +87,41 @@ if (shown.includes('codexpro-settings-token')) {
 const profile = await readProfile(root, home);
 if (profile.toolMode !== 'full' || profile.bashTranscript !== 'full' || profile.widgetDomain !== 'https://widgets.codexpro.test') {
   throw new Error(`settings profile did not persist tool/widget options: ${JSON.stringify(profile)}`);
+}
+
+runFail([
+  'settings',
+  'set',
+  '--root',
+  policyRoot,
+  '--tunnel',
+  'cloudflare-named',
+  '--hostname',
+  'codexpro.example.com',
+  '--cloudflare-token',
+  'raw-cloudflare-token'
+], env, /does not save raw --cloudflare-token/i);
+
+run([
+  'settings',
+  'set',
+  '--root',
+  policyRoot,
+  '--tunnel',
+  'ngrok',
+  '--hostname',
+  'policy.ngrok-free.app',
+  '--mode',
+  'handoff',
+  '--write',
+  'workspace',
+  '--ngrok-config',
+  'ngrok.yml'
+], env);
+const policyProfile = await readProfile(policyRoot, home);
+const realPolicyRoot = await fs.realpath(policyRoot);
+if (policyProfile.write !== 'handoff' || policyProfile.ngrokConfig !== path.join(realPolicyRoot, 'ngrok.yml')) {
+  throw new Error(`settings policy profile did not normalize write/path values: ${JSON.stringify(policyProfile)}`);
 }
 
 runFail([

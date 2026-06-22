@@ -3,13 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>CodexPro - ChatGPT web with local coding-agent powers</title>
+    <title>CodexPro - Use ChatGPT like your local coding agent</title>
     <meta
       name="description"
-      content="CodexPro gives ChatGPT Developer Mode local coding-agent powers through MCP, including Codex-style context, source edits, git inspection, and safe verification."
+      content="CodexPro connects ChatGPT Developer Mode to one local workspace through MCP so ChatGPT can inspect, edit, verify, and hand off code safely."
     />
     <meta property="og:title" content="CodexPro" />
-    <meta property="og:description" content="Let ChatGPT web see Codex-style repo context and act like a local coding agent." />
+    <meta property="og:description" content="Use ChatGPT like your local coding agent for one token-protected workspace." />
     <meta property="og:image" content="https://rebel0789.github.io/codexpro/og.svg" />
     <meta name="theme-color" content="#0b1220" />
     <link rel="alternate" hreflang="zh-CN" href="https://rebel0789.github.io/codexpro/zh.html" />
@@ -37,11 +37,11 @@
     <main id="top">
       <section class="hero">
         <div class="hero-copy">
-          <p class="launch-pill"><img src="./star.svg" alt="" aria-hidden="true" />Simple install</p>
+          <p class="launch-pill"><img src="./star.svg" alt="" aria-hidden="true" />Local MCP bridge</p>
           <p class="eyebrow">Install in your repo</p>
-          <h1>Connect ChatGPT to your local code.</h1>
+          <h1>Use ChatGPT like your local coding agent.</h1>
           <p class="hero-lede">
-            Install the CLI, run setup in your project, then paste the copied Server URL into ChatGPT Developer Mode. CodexPro handles the local server, token, tunnel, and workspace tools.
+            Install the CLI, run setup inside one project, then paste the copied Server URL into ChatGPT Developer Mode. ChatGPT gets bounded tools for that workspace: context, search, exact edits, git review, safe verification, and handoff files.
           </p>
           <div class="install-line" role="group" aria-label="Install command">
             <code>npm install -g codexpro
@@ -49,10 +49,10 @@ codexpro setup</code>
             <button class="copy-button" data-copy="npm install -g codexpro&#10;codexpro setup">Copy</button>
           </div>
           <div class="hero-proof" aria-label="Core capabilities">
-            <span>AGENTS.md context</span>
-            <span>.ai-bridge handoff</span>
-            <span>compact cards</span>
-            <span>opt-in Codex session metadata</span>
+            <span>one workspace</span>
+            <span>token-protected URL</span>
+            <span>safe bash default</span>
+            <span>repo-backed context</span>
           </div>
           <div class="hero-actions">
             <a class="button primary" href="#quickstart">Install CodexPro</a>
@@ -61,43 +61,37 @@ codexpro setup</code>
           </div>
         </div>
 
-        <div class="hero-visual" aria-label="CodexPro workspace preview">
-          <div class="workspace-demo">
+        <div class="hero-visual" aria-label="CodexPro connection model">
+          <div class="workspace-demo blueprint">
             <div class="demo-status">
               <span class="status-dot" aria-hidden="true"></span>
               <div class="status-label">
-                <strong>Workspace bridge</strong>
-                <small>/path/to/repo · token protected</small>
+                <strong>One local workspace</strong>
+                <small>your repo · your ChatGPT session · your machine</small>
               </div>
-              <span class="status-badge">setup</span>
+              <span class="status-badge">bounded</span>
             </div>
-            <div class="demo-grid">
-              <div class="chat-pane">
-                <small>Install</small>
-                <p><code>npm install -g codexpro</code><br /><code>codexpro setup</code></p>
-                <div class="message-chip">Server URL copied automatically</div>
+            <div class="connection-map" aria-label="Connection flow">
+              <div>
+                <span>01</span>
+                <strong>Local repo</strong>
+                <p>AGENTS.md, git state, selected files, and .ai-bridge plans.</p>
               </div>
-              <div class="tool-pane">
-                <small>Then ChatGPT can</small>
-                <div class="tool-card-mini active">
-                  <span>read/search</span>
-                  <strong>inspect files and find code</strong>
-                </div>
-                <div class="tool-card-mini">
-                  <span>edit/review</span>
-                  <strong>exact replacement inside workspace</strong>
-                </div>
-                <div class="tool-card-mini">
-                  <span>verify</span>
-                  <strong>compact npm test / lint / build result</strong>
-                </div>
+              <div>
+                <span>02</span>
+                <strong>CodexPro</strong>
+                <p>Token-protected MCP server with workspace, bash, write, and tool modes.</p>
+              </div>
+              <div>
+                <span>03</span>
+                <strong>ChatGPT app</strong>
+                <p>Read, search, edit, review, verify, or hand off through Developer Mode.</p>
               </div>
             </div>
-            <div class="repo-pane">
-              <div class="repo-row"><span>README.md</span><strong>selected context only</strong></div>
-              <div class="repo-row"><span>src/server.ts</span><strong>workspace-scoped edit</strong></div>
-              <div class="repo-row"><span>.ai-bridge/current-plan.md</span><strong>handoff ready</strong></div>
-              <div class="repo-row"><span>~/.codex/sessions</span><strong>metadata mode only</strong></div>
+            <div class="trust-row">
+              <div><span>Not a model proxy</span><strong>uses your own ChatGPT account</strong></div>
+              <div><span>Not a quota bypass</span><strong>product limits still apply</strong></div>
+              <div><span>Not an OS sandbox</span><strong>keep roots scoped to the repo</strong></div>
             </div>
           </div>
           <div class="floating-note">
@@ -129,7 +123,7 @@ codexpro setup</code>
       <section class="section value-section">
         <div>
           <p class="eyebrow">Use the account you already have</p>
-          <h2>Give ChatGPT a real local workspace.</h2>
+          <h2>Give ChatGPT a real local workspace, not another paste buffer.</h2>
           <p>
             CodexPro is for builders who already pay for ChatGPT and want that subscription to do more than answer questions. It gives ChatGPT a local workspace bridge: file reads, exact edits, source writes, search, git status, git diff, and allowlisted verification commands.
           </p>
@@ -189,6 +183,37 @@ codexpro setup</code>
             <pre><code>.ai-bridge/agent-status.md
 .ai-bridge/implementation-diff.patch
 .ai-bridge/execution-log.jsonl</code></pre>
+          </div>
+        </div>
+      </section>
+
+      <section class="section two-col">
+        <div>
+          <p class="eyebrow">Compared with DevSpace-style bridges</p>
+          <h2>CodexPro is the ChatGPT-first local coding loop.</h2>
+          <p>
+            The transport can look similar: local MCP server, workspace root, and a tunnel. CodexPro is more opinionated. It is built for one job: make ChatGPT Developer Mode useful against one local repo without widening the trust boundary.
+          </p>
+          <p>
+            That means setup first, explicit safety modes, repo-backed context files, reviewable diffs, compact cards, and no model proxying, account pooling, quota bypassing, third-party Pro scraping, or OS sandbox claims.
+          </p>
+        </div>
+        <div class="value-matrix">
+          <div>
+            <small>Product loop</small>
+            <strong>Install, setup in one repo, paste Server URL, then let ChatGPT inspect/edit/verify.</strong>
+          </div>
+          <div>
+            <small>Control surface</small>
+            <strong>Bash, write/edit, tool mode, Codex session reads, and handoff execution are separate switches.</strong>
+          </div>
+          <div>
+            <small>Context model</small>
+            <strong>AGENTS.md and .ai-bridge keep durable project memory in files you can review.</strong>
+          </div>
+          <div>
+            <small>Trust model</small>
+            <strong>Your ChatGPT account, your local repo, your explicit tunnel and token.</strong>
           </div>
         </div>
       </section>

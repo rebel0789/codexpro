@@ -61,7 +61,7 @@ Options:
   --codex-dir <dir>          Codex config/session directory. Default: ~/.codex.
   --write <off|handoff|workspace>
                              Write mode. Default: workspace in agent mode, handoff otherwise.
-                             handoff = ChatGPT can write .ai-bridge only; Codex edits source.
+                             handoff = no generic write/edit tools; handoff tools write bounded .ai-bridge files.
   --tool-mode <minimal|standard|full>
                              Tool surface exposed to ChatGPT. Default: standard.
                              minimal = open/read/write/edit/bash/show_changes only.
@@ -77,7 +77,7 @@ Options:
   --hostname <host>          Stable public hostname for cloudflare-named or ngrok.
   --url <url>                Alias for --hostname in ngrok/stable URL modes.
   --tunnel-name <name>       Existing Cloudflare named tunnel to run.
-  --cloudflare-token <token> Cloudflare Tunnel token for a remotely managed tunnel.
+  --cloudflare-token <token> Cloudflare Tunnel token for this launch only; not saved by settings set.
   --cloudflare-token-file <path>
                              File containing a Cloudflare Tunnel token.
   --cloudflare-config <path> cloudflared YAML config for a named tunnel.
@@ -321,6 +321,30 @@ function resolveCodexDir(root, input) {
   if (!input) return '';
   const expanded = expandHome(input);
   return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(root, expanded);
+}
+
+function resolveConfigPath(root, input) {
+  if (!input) return '';
+  const expanded = expandHome(String(input));
+  return path.isAbsolute(expanded) || path.win32.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(root, expanded);
+}
+
+function effectiveWriteMode(mode, requested) {
+  const value = requested || (mode === 'agent' ? 'workspace' : 'handoff');
+  if (!['off', 'handoff', 'workspace'].includes(value)) {
+    throw new Error('--write must be off, handoff, or workspace');
+  }
+  if (mode === 'agent') return value;
+  return value === 'off' ? 'off' : 'handoff';
+}
+
+function writeOption(args, profile, mode) {
+  return effectiveWriteMode(mode, optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], mode === 'agent' ? 'workspace' : 'handoff'));
+}
+
+function optionalWriteOption(args, profile, mode) {
+  const requested = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], '');
+  return requested ? effectiveWriteMode(mode, requested) : '';
 }
 
 function commandExists(command) {
@@ -726,9 +750,9 @@ function resolveNgrok(args) {
   throw new Error('ngrok was not found on PATH. Install it with Homebrew, winget, apt, or from https://ngrok.com/download, then run ngrok config add-authtoken <token>.');
 }
 
-function ngrokConfigPath(args) {
+function ngrokConfigPath(root, args) {
   const configPath = args.ngrokConfig ?? process.env.NGROK_CONFIG ?? process.env.CODEXPRO_NGROK_CONFIG ?? '';
-  return configPath ? path.resolve(expandHome(configPath)) : '';
+  return resolveConfigPath(root, configPath);
 }
 
 function runHelperScript(scriptName, args) {
@@ -1679,7 +1703,7 @@ async function runDoctor(argv) {
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
   const mode = optionValue(args, profile, 'mode', ['CODEXPRO_MODE'], 'agent');
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], 'safe');
-  const write = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], mode === 'agent' ? 'workspace' : 'handoff');
+  const write = writeOption(args, profile, mode);
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
   const stableHostname = args.hostname
     ?? args.url
@@ -1857,7 +1881,7 @@ function profileFromPreference(root, args, profile, preference) {
   const codexSessions = codexSessionsOption(args, profile);
   const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
-  const write = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], '');
+  const write = optionalWriteOption(args, profile, mode);
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
   const existingToken = optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], '');
@@ -2000,7 +2024,7 @@ async function runSetupWizard(argv) {
     const bashTranscript = bashTranscriptOption(defaults, profile);
     const codexSessions = codexSessionsOption(defaults, profile);
     const codexDir = optionValue(defaults, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
-    const write = optionValue(defaults, profile, 'write', ['CODEXPRO_WRITE_MODE'], '');
+    const write = optionalWriteOption(defaults, profile, mode);
     const toolMode = optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
     const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
     if (bash) args.push('--bash', bash);
@@ -2128,13 +2152,23 @@ function printProfile(root, profile) {
     labelValue('Profile', profile.profilePath),
     labelValue('Tunnel', safe.tunnel ?? 'cloudflare'),
     ...(safe.hostname ? [labelValue('Hostname', safe.hostname)] : []),
+    ...(safe.tunnelName ? [labelValue('Tunnel name', safe.tunnelName)] : []),
+    ...(safe.ngrokConfig ? [labelValue('Ngrok config', safe.ngrokConfig)] : []),
+    ...(safe.cloudflareConfig ? [labelValue('Cloudflare cfg', safe.cloudflareConfig)] : []),
+    ...(safe.cloudflareTokenFile ? [labelValue('CF token file', safe.cloudflareTokenFile)] : []),
     ...(safe.port ? [labelValue('Port', safe.port)] : []),
     ...(safe.mode ? [labelValue('Mode', safe.mode)] : []),
+    ...(safe.bash ? [labelValue('Bash', safe.bash)] : []),
+    ...(safe.write ? [labelValue('Write', safe.write)] : []),
+    ...(safe.toolMode ? [labelValue('Tool mode', safe.toolMode)] : []),
     labelValue('Bash transcript', safe.bashTranscript ?? 'compact'),
     labelValue('Codex sessions', safe.codexSessions ?? 'off'),
     ...(safe.codexDir ? [labelValue('Codex dir', safe.codexDir)] : []),
     ...(safe.bashSession ? [labelValue('Bash session', `${safe.bashSession}${safe.requireBashSession ? ' required' : ''}`)] : []),
-    ...(safe.token ? [labelValue('Token', safe.token)] : [])
+    ...(safe.widgetDomain ? [labelValue('Widget origin', safe.widgetDomain)] : []),
+    ...(safe.noInstallCloudflared ? [labelValue('cloudflared', 'manual install only')] : []),
+    ...(safe.token ? [labelValue('Token', safe.token)] : []),
+    ...(safe.cloudflareToken ? [labelValue('Cloudflare token', safe.cloudflareToken)] : [])
   ]);
 }
 
@@ -2150,6 +2184,9 @@ function printProfileList(profiles = listWorkspaceProfiles()) {
 }
 
 function saveSettingsFromArgs(root, args, profile) {
+  if (args.cloudflareToken !== undefined) {
+    throw new Error('codexpro settings set does not save raw --cloudflare-token. Save it to a local file and use --cloudflare-token-file <path>; start still accepts --cloudflare-token for a single launch.');
+  }
   const tunnel = optionValue(args, profile, 'tunnel', ['CODEXPRO_TUNNEL'], profile.tunnel ?? 'cloudflare');
   if (!['none', 'cloudflare', 'cloudflare-named', 'ngrok'].includes(tunnel)) {
     throw new Error('--tunnel must be none, cloudflare, cloudflare-named, or ngrok');
@@ -2159,6 +2196,9 @@ function saveSettingsFromArgs(root, args, profile) {
     throw new Error('--hostname is required for ngrok and cloudflare-named settings.');
   }
   const mode = optionValue(args, profile, 'mode', ['CODEXPRO_MODE'], profile.mode ?? 'agent');
+  if (!['agent', 'handoff', 'pro'].includes(mode)) {
+    throw new Error('--mode must be agent, handoff, or pro');
+  }
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], profile.toolMode ?? '');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], profile.widgetDomain ?? '');
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], profile.port ?? '8787'));
@@ -2166,6 +2206,11 @@ function saveSettingsFromArgs(root, args, profile) {
   const codexSessions = codexSessionsOption(args, profile);
   const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], profile.codexDir ?? '');
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
+  const write = writeOption(args, profile, mode);
+  const tunnelName = args.tunnelName ?? profile.tunnelName ?? '';
+  const ngrokConfig = resolveConfigPath(root, args.ngrokConfig ?? profile.ngrokConfig ?? '');
+  const cloudflareConfig = resolveConfigPath(root, args.cloudflareConfig ?? profile.cloudflareConfig ?? '');
+  const cloudflareTokenFile = resolveConfigPath(root, args.cloudflareTokenFile ?? profile.cloudflareTokenFile ?? '');
   const token = tunnel === 'none'
     ? optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], profile.token ?? '')
     : stableToken(optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], profile.token ?? ''));
@@ -2174,10 +2219,10 @@ function saveSettingsFromArgs(root, args, profile) {
     mode,
     tunnel,
     ...(hostname ? { hostname } : {}),
-    ...(args.tunnelName ?? profile.tunnelName ? { tunnelName: args.tunnelName ?? profile.tunnelName } : {}),
-    ...(args.ngrokConfig ?? profile.ngrokConfig ? { ngrokConfig: args.ngrokConfig ?? profile.ngrokConfig } : {}),
-    ...(args.cloudflareConfig ?? profile.cloudflareConfig ? { cloudflareConfig: args.cloudflareConfig ?? profile.cloudflareConfig } : {}),
-    ...(args.cloudflareTokenFile ?? profile.cloudflareTokenFile ? { cloudflareTokenFile: args.cloudflareTokenFile ?? profile.cloudflareTokenFile } : {}),
+    ...(tunnelName ? { tunnelName } : {}),
+    ...(ngrokConfig ? { ngrokConfig } : {}),
+    ...(cloudflareConfig ? { cloudflareConfig } : {}),
+    ...(cloudflareTokenFile ? { cloudflareTokenFile } : {}),
     ...(token ? { token } : {}),
     ...(args.bash ?? profile.bash ? { bash: args.bash ?? profile.bash } : {}),
     ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
@@ -2185,7 +2230,7 @@ function saveSettingsFromArgs(root, args, profile) {
     ...(codexDir ? { codexDir } : {}),
     ...(bashSession ? { bashSession } : {}),
     ...(requireBashSession ? { requireBashSession: true } : {}),
-    ...(args.write ?? profile.write ? { write: args.write ?? profile.write } : {}),
+    ...(mode !== 'agent' || args.write !== undefined || profile.write ? { write } : {}),
     ...(toolMode ? { toolMode } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
     ...(args.noInstallCloudflared ?? profile.noInstallCloudflared ? { noInstallCloudflared: true } : {})
@@ -2509,7 +2554,7 @@ async function main() {
   const codexSessions = codexSessionsOption(args, profile);
   const codexDir = resolveCodexDir(root, optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], ''));
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
-  const write = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], mode === 'agent' ? 'workspace' : 'handoff');
+  const write = writeOption(args, profile, mode);
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], 'https://rebel0789.github.io');
   if (!['off', 'safe', 'full'].includes(bash)) throw new Error('--bash must be off, safe, or full');
@@ -2624,7 +2669,7 @@ async function main() {
     const ngrokPath = resolveNgrok(effectiveArgs);
     const publicBase = publicBaseFromHostname(stableHostname);
     const ngrokArgs = ['http', localBase, '--url', publicBase];
-    const configPath = ngrokConfigPath(effectiveArgs);
+    const configPath = ngrokConfigPath(root, effectiveArgs);
     if (configPath) ngrokArgs.push('--config', configPath);
     statusLine('wait', `Opening ngrok endpoint for ${publicBase}`);
     cloudflared = spawnLogged('ngrok', ngrokPath, ngrokArgs, { cwd: root, env: process.env, verbose: verboseLogs });
@@ -2712,18 +2757,18 @@ async function main() {
 
   const publicBase = publicBaseFromHostname(stableHostname);
   const tunnelName = optionValue(args, profile, 'tunnelName', ['CLOUDFLARE_TUNNEL_NAME', 'CODEXPRO_TUNNEL_NAME'], '');
-  const cloudflareConfig = optionValue(args, profile, 'cloudflareConfig', ['CLOUDFLARE_TUNNEL_CONFIG', 'CODEXPRO_CLOUDFLARE_CONFIG'], '');
-  const cloudflareTokenFile = optionValue(args, profile, 'cloudflareTokenFile', ['CLOUDFLARE_TUNNEL_TOKEN_FILE', 'CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN_FILE'], '');
+  const cloudflareConfig = resolveConfigPath(root, optionValue(args, profile, 'cloudflareConfig', ['CLOUDFLARE_TUNNEL_CONFIG', 'CODEXPRO_CLOUDFLARE_CONFIG'], ''));
+  const cloudflareTokenFile = resolveConfigPath(root, optionValue(args, profile, 'cloudflareTokenFile', ['CLOUDFLARE_TUNNEL_TOKEN_FILE', 'CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN_FILE'], ''));
   const cloudflareToken = optionValue(args, profile, 'cloudflareToken', ['CLOUDFLARE_TUNNEL_TOKEN', 'CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN'], '');
 
   const cloudflaredArgs = ['tunnel'];
   if (cloudflareConfig) {
-    cloudflaredArgs.push('--config', path.resolve(expandHome(cloudflareConfig)), 'run');
+    cloudflaredArgs.push('--config', cloudflareConfig, 'run');
     if (tunnelName) cloudflaredArgs.push(tunnelName);
   } else {
     cloudflaredArgs.push('run', '--url', localBase);
     if (cloudflareTokenFile) {
-      cloudflaredArgs.push('--token-file', path.resolve(expandHome(cloudflareTokenFile)));
+      cloudflaredArgs.push('--token-file', cloudflareTokenFile);
     } else if (cloudflareToken) {
       // Passed to cloudflared through the child environment below.
     } else {

@@ -25,9 +25,24 @@ CodexPro can expose:
 - file metadata and selected file contents from allowed workspaces
 - git status and diffs
 - `.ai-bridge` planning files
-- optional shell command execution through the `bash` tool
-- optional write/edit capability depending on `CODEXPRO_WRITE_MODE`
+- optional shell command execution through the `bash` tool, hidden when bash mode is off
+- optional write/edit capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
 - optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
+
+## Failure Model
+
+Review changes against these failure modes before release:
+
+| Failure mode | Expected control |
+| --- | --- |
+| Public tunnel reachable without a secret | Public/non-loopback HTTP fails closed unless a CodexPro token is configured. |
+| Raw CodexPro or Cloudflare token appears in UI, logs, docs, or package output | Tokens are redacted in profile/status output and tunnel tokens use local files for persistence. |
+| ChatGPT can edit outside the intended repo | Allowed roots are explicit; path resolution rejects escapes, blocked globs, and symlink traversal. |
+| ChatGPT can run arbitrary shell by default | Bash defaults to safe mode, can be disabled, and full mode is a trusted-local-only choice. |
+| Handoff mode still exposes generic writes | Handoff/pro modes do not advertise generic `write`/`edit`; bounded handoff tools write `.ai-bridge` files only. |
+| Local Codex history is treated as ChatGPT memory | Codex session access is opt-in metadata/read mode and never attaches to a live Codex app session. |
+| Browser admin mutates live runtime unexpectedly | Admin profile changes apply on restart; active runtime policy stays stable for the current session. |
+| Remote MCP tool runs Codex/OpenCode/Pi directly | Agent execution remains a user-started CLI/watch process on the local machine. |
 
 The main risks are:
 
@@ -80,13 +95,14 @@ codexpro start \
 - Do not commit printed connector URLs that include `codexpro_token`.
 - Do not commit Cloudflare tunnel tokens.
 - Do not paste raw Cloudflare tunnel tokens into browser pages or screenshots. Use `--cloudflare-token-file` or the local page's Cloudflare token file field instead.
-- Use `--mode handoff` for planning workflows where ChatGPT should not edit source files.
+- Use `--mode handoff` for planning workflows where ChatGPT should not edit source files. Handoff mode does not advertise generic `write`/`edit` tools.
 - Preview local handoff execution with `codexpro execute-handoff --dry-run` before running an unfamiliar adapter or custom command.
 - Keep `execute-handoff` local. Do not wrap it in a remote MCP tool unless you add a stronger approval and sandbox story.
 - Use default agent mode only with trusted ChatGPT sessions and repo-specific roots.
 - Use `--no-bash` when ChatGPT should never trigger shell commands in the workspace.
 - Use `--bash-session <id> --require-bash-session` when bash should be enabled only for calls that explicitly target this local CodexPro terminal label.
 - Keep Codex session history access off unless needed. `--codex-sessions metadata` only lists local Codex JSONL metadata; `--codex-sessions read` allows bounded transcript reads.
+- Keep `CODEXPRO_CONTEXT_DIR` as a workspace-relative hidden directory such as `.ai-bridge`; CodexPro rejects source, build, dependency, credential, and absolute context directories.
 - Use `--bash full` only for trusted local repos.
 - Do not treat MCP session ids or bash session labels as Codex conversation ids. CodexPro does not execute inside a Codex app session.
 - Prefer a repo-specific `--root` instead of `--allow-home`.

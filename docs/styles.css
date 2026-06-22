@@ -1,5 +1,5 @@
-/* Hallmark preflight: P4 H4 E4 S4 R4 V4. Genre: modern minimal developer tool. */
-/* Hallmark critique: remove fake chrome, reduce decorative glow, preserve truthful local-workspace flows. */
+/* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
+/* Hallmark · macrostructure: Product Workbench · genre: modern-minimal · theme: Codex blue · tone: premium technical · designed-as-app */
 
 :root {
   color-scheme: dark;
@@ -13,12 +13,334 @@
   --faint: #82776d;
   --cyan: #70d6ff;
   --green: #34d399;
-  --amber: #f6c453;
-  --clay: #e86f43;
+  --amber: #2563eb;
+  --clay: #1d4ed8;
   --rose: #fb7185;
   --shadow: 0 28px 80px rgba(2, 6, 23, 0.38);
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+}
+
+/* CodexPro product-system tokens and component additions. */
+:root {
+  color-scheme: light;
+  --bg: #f7fbff;
+  --panel: #ffffff;
+  --panel-2: #eff6ff;
+  --line: #d8e5f4;
+  --line-soft: rgba(37, 99, 235, 0.14);
+  --text: #0f172a;
+  --muted: #506176;
+  --faint: #7a899c;
+  --cyan: #2563eb;
+  --green: #0f766e;
+  --amber: #2563eb;
+  --clay: #1d4ed8;
+  --rose: #3154d4;
+  --shadow: 0 18px 46px rgba(15, 23, 42, 0.08);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+}
+
+body {
+  background:
+    linear-gradient(180deg, rgba(37, 99, 235, 0.08), transparent 32rem),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.035), transparent 48rem),
+    var(--bg);
+  color: var(--text);
+}
+
+body::before {
+  background-image:
+    linear-gradient(rgba(37, 99, 235, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.055) 1px, transparent 1px);
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.55), transparent 70%);
+}
+
+.site-header {
+  background: linear-gradient(180deg, rgba(247, 251, 255, 0.95), rgba(247, 251, 255, 0.74));
+}
+
+.brand,
+h1,
+h2,
+h3,
+.strip strong,
+.step strong,
+.rules strong,
+.mode-row strong,
+.value-matrix strong,
+.faq-grid h3,
+dd {
+  color: var(--text);
+}
+
+nav a:hover {
+  background: rgba(37, 99, 235, 0.07);
+}
+
+.nav-star,
+.star-button,
+.star-link,
+.launch-pill,
+.hero-proof span,
+.message-chip,
+.tag,
+.link-row .star-link,
+.site-footer .star-link {
+  border-color: rgba(37, 99, 235, 0.22);
+  background: rgba(37, 99, 235, 0.075);
+  color: var(--cyan);
+}
+
+a:focus-visible,
+button:focus-visible {
+  outline-color: var(--cyan);
+}
+
+.primary {
+  border-color: var(--cyan);
+  background: var(--cyan);
+  color: #ffffff;
+}
+
+.secondary,
+.copy-button {
+  background: #ffffff;
+  color: var(--cyan);
+}
+
+.install-line,
+.workspace-demo,
+.floating-note,
+.strip,
+.compare-grid article,
+.steps,
+.command-stack > div,
+.reference-grid article,
+.tool-reference,
+.link-row,
+.rules > div,
+.safety,
+.mode-row > div,
+.faq-grid article,
+.value-matrix > div {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.88);
+  box-shadow: var(--shadow);
+}
+
+.hero-proof span {
+  border-color: rgba(37, 99, 235, 0.16);
+  background: rgba(37, 99, 235, 0.065);
+  color: var(--cyan);
+}
+
+.hero-visual {
+  min-height: auto;
+}
+
+.workspace-demo {
+  background:
+    linear-gradient(180deg, rgba(37, 99, 235, 0.055), transparent 54%),
+    #ffffff;
+}
+
+.demo-status {
+  border-bottom-color: var(--line);
+  background: #ffffff;
+}
+
+.demo-status small {
+  color: var(--muted);
+}
+
+.floating-note {
+  position: static;
+  width: auto;
+  margin-top: 14px;
+}
+
+.install-line code,
+.step pre,
+.command-stack pre,
+.compare-grid pre,
+.reference-grid pre,
+.control code,
+pre {
+  border-color: rgba(37, 99, 235, 0.15);
+  background: #eef6ff;
+  color: #14315f;
+}
+
+.workspace-demo {
+  background:
+    linear-gradient(180deg, rgba(37, 99, 235, 0.08), transparent 52%),
+    #ffffff;
+}
+
+.workspace-demo::before {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.demo-status {
+  border-bottom-color: var(--line);
+  background: rgba(239, 246, 255, 0.8);
+}
+
+.demo-status small,
+.repo-row strong,
+.floating-note small,
+.command-stack small,
+dt,
+.reference-grid p,
+.faq-grid p {
+  color: var(--muted);
+}
+
+.status-badge,
+.status-dot {
+  border-color: rgba(37, 99, 235, 0.2);
+  color: var(--cyan);
+}
+
+.status-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 8px rgba(15, 118, 110, 0.08);
+}
+
+.blueprint {
+  padding-bottom: 0;
+}
+
+.connection-map {
+  display: grid;
+  gap: 1px;
+  margin: 18px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.connection-map > div {
+  min-width: 0;
+  background: #ffffff;
+  padding: 22px;
+}
+
+.connection-map span,
+.trust-row span {
+  display: block;
+  margin-bottom: 10px;
+  color: var(--cyan);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.connection-map strong,
+.trust-row strong {
+  display: block;
+  color: var(--text);
+  line-height: 1.25;
+}
+
+.connection-map p {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1.6;
+}
+
+.trust-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0 18px 18px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--line);
+}
+
+.trust-row > div {
+  min-width: 0;
+  background: #f8fbff;
+  padding: 18px;
+}
+
+.floating-note {
+  background:
+    linear-gradient(180deg, rgba(37, 99, 235, 0.09), transparent 72%),
+    #ffffff;
+}
+
+.floating-note span,
+.floating-note strong,
+.tool-card-mini strong,
+.repo-row span,
+.chat-pane p {
+  color: var(--text);
+}
+
+.strip {
+  background: var(--line);
+}
+
+.strip div,
+.step,
+.rules > div {
+  background: #ffffff;
+}
+
+.value-matrix > div,
+.faq-grid article {
+  background:
+    linear-gradient(180deg, rgba(37, 99, 235, 0.055), transparent 62%),
+    #ffffff;
+}
+
+.reference-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.compare-grid {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.18fr) minmax(0, 0.98fr);
+}
+
+.reference-grid {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+}
+
+.faq-grid {
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+}
+
+.tool-list span,
+.link-row a,
+.site-footer a {
+  border-color: rgba(37, 99, 235, 0.18);
+  background: #ffffff;
+  color: var(--text);
+}
+
+.safety li {
+  color: var(--text);
+}
+
+.site-footer {
+  border-top-color: var(--line);
+}
+
+@media (max-width: 900px) {
+  .compare-grid,
+  .reference-grid,
+  .reference-grid.compact,
+  .faq-grid,
+  .trust-row {
+    grid-template-columns: 1fr;
+  }
 }
 
 * {
@@ -39,7 +361,7 @@ body {
   overflow-x: clip;
   background:
     linear-gradient(180deg, rgba(112, 214, 255, 0.08), transparent 34rem),
-    linear-gradient(180deg, rgba(246, 196, 83, 0.055), transparent 54rem),
+    linear-gradient(180deg, rgba(37, 99, 235, 0.04), transparent 54rem),
     var(--bg);
   color: var(--text);
   font-family: var(--sans);
@@ -125,7 +447,7 @@ main {
   height: 34px;
   flex: 0 0 auto;
   border-radius: 8px;
-  box-shadow: 0 0 0 1px rgba(246, 196, 83, 0.42);
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.24);
 }
 
 nav {
@@ -166,9 +488,9 @@ button:focus-visible {
 .nav-star {
   display: inline-flex;
   align-items: center;
-  border-color: rgba(251, 191, 36, 0.32);
-  background: rgba(251, 191, 36, 0.08);
-  color: #fef3c7;
+  border-color: rgba(37, 99, 235, 0.24);
+  background: rgba(37, 99, 235, 0.08);
+  color: #1d4ed8;
 }
 
 .nav-star img,
@@ -183,9 +505,9 @@ button:focus-visible {
 .hero-proof span {
   display: inline-flex;
   align-items: center;
-  border: 1px solid rgba(246, 196, 83, 0.28);
-  background: rgba(246, 196, 83, 0.08);
-  color: #fde68a;
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  background: rgba(37, 99, 235, 0.075);
+  color: #1d4ed8;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
@@ -309,7 +631,7 @@ p {
 }
 
 .primary {
-  border-color: rgba(246, 196, 83, 0.34);
+  border-color: rgba(37, 99, 235, 0.34);
   background: #fff7ed;
   color: #25140c;
 }
@@ -458,9 +780,9 @@ p {
 
 .message-chip {
   width: fit-content;
-  border: 1px solid rgba(246, 196, 83, 0.28);
+  border: 1px solid rgba(37, 99, 235, 0.22);
   border-radius: 999px;
-  color: #fde68a;
+  color: #1d4ed8;
   font-family: var(--mono);
   font-size: 12px;
   padding: 8px 10px;
@@ -537,7 +859,7 @@ p {
   width: min(330px, 86%);
   border-radius: 8px;
   background:
-    linear-gradient(180deg, rgba(246, 196, 83, 0.12), transparent 72%),
+    linear-gradient(180deg, rgba(37, 99, 235, 0.09), transparent 72%),
     rgba(13, 16, 24, 0.94);
   padding: 18px;
 }
@@ -951,9 +1273,9 @@ dd {
 
 .link-row .star-link,
 .site-footer .star-link {
-  border-color: rgba(251, 191, 36, 0.34);
-  background: rgba(251, 191, 36, 0.08);
-  color: #fef3c7;
+  border-color: rgba(37, 99, 235, 0.22);
+  background: rgba(37, 99, 235, 0.075);
+  color: #1d4ed8;
 }
 
 .safety {
@@ -1109,4 +1431,141 @@ dd {
     right: auto;
     width: calc(100% - 36px);
   }
+}
+
+/* Final cascade layer: keep CodexPro blue/white and non-chrome visual language. */
+body {
+  background:
+    linear-gradient(180deg, rgba(37, 99, 235, 0.08), transparent 32rem),
+    linear-gradient(90deg, rgba(37, 99, 235, 0.035), transparent 48rem),
+    var(--bg);
+  color: var(--text);
+}
+
+.site-header {
+  background: linear-gradient(180deg, rgba(247, 251, 255, 0.95), rgba(247, 251, 255, 0.74));
+}
+
+.install-line,
+.workspace-demo,
+.floating-note,
+.compare-grid article,
+.steps,
+.command-stack > div,
+.reference-grid article,
+.tool-reference,
+.link-row,
+.rules > div,
+.safety,
+.mode-row > div,
+.faq-grid article,
+.value-matrix > div {
+  border-color: var(--line);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: var(--shadow);
+}
+
+.strip {
+  border-color: var(--line);
+  background: var(--line);
+  box-shadow: var(--shadow);
+}
+
+.strip div,
+.step,
+.rules > div {
+  background: #ffffff;
+}
+
+.primary {
+  border-color: var(--cyan);
+  background: var(--cyan);
+  color: #ffffff;
+}
+
+.secondary,
+.copy-button,
+.tool-list span,
+.link-row a,
+.site-footer a {
+  background: #ffffff;
+  color: var(--cyan);
+}
+
+.install-line code,
+.step pre,
+.command-stack pre,
+.compare-grid pre,
+.reference-grid pre,
+pre {
+  border-color: rgba(37, 99, 235, 0.15);
+  background: #eef6ff;
+  color: #14315f;
+}
+
+.connection-map,
+.trust-row {
+  display: grid;
+}
+
+.reference-grid.compact {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.compare-grid {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.18fr) minmax(0, 0.98fr);
+}
+
+.reference-grid {
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+}
+
+.faq-grid {
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+}
+
+@media (max-width: 900px) {
+  .compare-grid,
+  .reference-grid,
+  .reference-grid.compact,
+  .faq-grid,
+  .trust-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* EOF guard: visual fixes that must win over every earlier docs rule. */
+.hero-proof span {
+  border-color: rgba(37, 99, 235, 0.16);
+  background: rgba(37, 99, 235, 0.065);
+  color: var(--cyan);
+}
+
+.hero-visual {
+  min-height: auto;
+  padding-bottom: 0;
+}
+
+.workspace-demo {
+  background:
+    linear-gradient(180deg, rgba(37, 99, 235, 0.055), transparent 54%),
+    #ffffff;
+}
+
+.demo-status {
+  border-bottom-color: var(--line);
+  background: #ffffff;
+}
+
+.demo-status small {
+  color: var(--muted);
+}
+
+.floating-note {
+  position: static;
+  right: auto;
+  bottom: auto;
+  left: auto;
+  width: auto;
+  margin-top: 14px;
 }

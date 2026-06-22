@@ -1,4 +1,5 @@
 export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v9.html";
+export const TOOL_CARD_LEGACY_URIS = ["ui://widget/codexpro-tool-card-v8.html"];
 export const TOOL_CARD_MIME_TYPE = "text/html;profile=mcp-app";
 
 export const toolCardWidgetHtml = String.raw`
@@ -933,10 +934,35 @@ export const toolCardWidgetHtml = String.raw`
     }
   }
 
-  render(window.openai?.toolOutput || window.openai?.toolResponseMetadata || {});
+  function extractStructuredContent(value) {
+    if (!value || typeof value !== "object") return {};
+    if (value.codexpro_tool || value.codexpro_title) return value;
+    const candidates = [
+      value.structuredContent,
+      value.toolOutput?.structuredContent,
+      value.toolOutput,
+      value.toolResponseMetadata?.structuredContent,
+      value.mcp_tool_result?.structuredContent,
+      value.call_tool_result?.structuredContent,
+      value.result?.structuredContent
+    ];
+    for (const candidate of candidates) {
+      if (candidate && typeof candidate === "object") return candidate;
+    }
+    return {};
+  }
+
+  render(extractStructuredContent(window.openai?.toolOutput || window.openai?.toolResponseMetadata || {}));
 
   window.addEventListener("openai:set_globals", (event) => {
-    render(event.detail?.globals?.toolOutput || window.openai?.toolOutput || {});
+    render(extractStructuredContent(
+      event.detail?.globals?.toolOutput ||
+      event.detail?.globals?.toolResponseMetadata ||
+      event.detail ||
+      window.openai?.toolOutput ||
+      window.openai?.toolResponseMetadata ||
+      {}
+    ));
   }, { passive: true });
 
   window.addEventListener("message", (event) => {
@@ -944,7 +970,7 @@ export const toolCardWidgetHtml = String.raw`
     const message = event.data;
     if (!message || message.jsonrpc !== "2.0") return;
     if (message.method === "ui/notifications/tool-result") {
-      render(message.params?.structuredContent || {});
+      render(extractStructuredContent(message.params || {}));
     }
   }, { passive: true });
 </script>

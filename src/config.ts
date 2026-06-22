@@ -194,6 +194,32 @@ function widgetDomainFrom(value: string | undefined): string {
   return parsed.origin;
 }
 
+function contextDirFrom(value: string | undefined): string {
+  const raw = (value?.trim() || ".ai-bridge").replaceAll("\\", "/");
+  if (path.isAbsolute(raw) || path.win32.isAbsolute(raw)) {
+    throw new Error("CODEXPRO_CONTEXT_DIR must be a workspace-relative hidden directory, for example .ai-bridge.");
+  }
+
+  const normalized = path.posix.normalize(raw);
+  if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
+    throw new Error("CODEXPRO_CONTEXT_DIR must stay inside the workspace.");
+  }
+
+  const parts = normalized.split("/");
+  if (parts.some((part) => !part || part === "." || part === "..")) {
+    throw new Error("CODEXPRO_CONTEXT_DIR must be a simple relative directory path.");
+  }
+  if (!parts[0].startsWith(".")) {
+    throw new Error("CODEXPRO_CONTEXT_DIR must start with a hidden directory such as .ai-bridge.");
+  }
+
+  const blocked = new Set([".git", ".ssh", ".gnupg", ".cache", "node_modules", "src", "dist", "build", ".next", "coverage"]);
+  if (parts.some((part) => blocked.has(part))) {
+    throw new Error("CODEXPRO_CONTEXT_DIR cannot point at source, dependency, build, cache, or credential directories.");
+  }
+  return normalized;
+}
+
 function boolFrom(value: string | undefined, fallback = false): boolean {
   if (value === undefined) return fallback;
   return ["1", "true", "yes", "y", "on"].includes(value.toLowerCase());
@@ -278,6 +304,6 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     maxHttpSessions: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS, 64, 1, 512),
     httpSessionTtlMs: numberFrom(process.env.CODEXPRO_HTTP_SESSION_TTL_MS, 30 * 60_000, 60_000, 24 * 60 * 60_000),
     blockedGlobs: [...DEFAULT_BLOCKED_GLOBS, ...extraBlockedGlobs],
-    contextDir: process.env.CODEXPRO_CONTEXT_DIR ?? ".ai-bridge"
+    contextDir: contextDirFrom(process.env.CODEXPRO_CONTEXT_DIR)
   };
 }

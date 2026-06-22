@@ -12,7 +12,7 @@ import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./works
 import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
 import { listCodexSessions, readCodexSession } from "./codexSessions.js";
-import { TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
+import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 
 function errorText(error: unknown): string {
@@ -95,42 +95,52 @@ function logToolCall(name: string, status: "ok" | "error", started: number): voi
 
 function registerToolCardResource(server: McpServer, config: CodexProConfig): void {
   const s = server as any;
-  if (typeof s.registerResource !== "function") return;
-  s.registerResource(
-    "codexpro-tool-card",
-    TOOL_CARD_URI,
-    {
-      title: "CodexPro Tool Card",
-      description: "Compact visual renderer for CodexPro workspace orientation, source changes, and handoffs.",
-      mimeType: TOOL_CARD_MIME_TYPE
-    },
-    async () => ({
-      contents: [
-        {
-          uri: TOOL_CARD_URI,
-          mimeType: TOOL_CARD_MIME_TYPE,
-          text: toolCardWidgetHtml,
-          _meta: {
-            ui: {
-              prefersBorder: true,
-              domain: config.widgetDomain,
-              csp: {
-                connectDomains: [],
-                resourceDomains: []
+  if (typeof s.registerResource !== "function") {
+    throw new Error("Unsupported MCP SDK: CodexPro widgets require registerResource.");
+  }
+
+  const registerUri = (uri: string, name: string): void => {
+    s.registerResource(
+      name,
+      uri,
+      {
+        title: "CodexPro Tool Card",
+        description: "Compact visual renderer for CodexPro workspace orientation, source changes, and handoffs.",
+        mimeType: TOOL_CARD_MIME_TYPE
+      },
+      async () => ({
+        contents: [
+          {
+            uri,
+            mimeType: TOOL_CARD_MIME_TYPE,
+            text: toolCardWidgetHtml,
+            _meta: {
+              ui: {
+                prefersBorder: true,
+                domain: config.widgetDomain,
+                csp: {
+                  connectDomains: [],
+                  resourceDomains: []
+                }
+              },
+              "openai/widgetDescription": "Renders CodexPro workspace orientation, diagnostics, file diffs, change reviews, terminal checks, Pro context exports, and handoff plans as compact developer cards with bounded previews.",
+              "openai/widgetPrefersBorder": true,
+              "openai/widgetDomain": config.widgetDomain,
+              "openai/widgetCSP": {
+                connect_domains: [],
+                resource_domains: []
               }
-            },
-            "openai/widgetDescription": "Renders CodexPro workspace orientation, diagnostics, file diffs, change reviews, terminal checks, Pro context exports, and handoff plans as compact developer cards with bounded previews.",
-            "openai/widgetPrefersBorder": true,
-            "openai/widgetDomain": config.widgetDomain,
-            "openai/widgetCSP": {
-              connect_domains: [],
-              resource_domains: []
             }
           }
-        }
-      ]
-    })
-  );
+        ]
+      })
+    );
+  };
+
+  registerUri(TOOL_CARD_URI, "codexpro-tool-card");
+  for (const legacyUri of TOOL_CARD_LEGACY_URIS) {
+    registerUri(legacyUri, `codexpro-tool-card-${legacyUri.match(/v\d+/)?.[0] ?? "legacy"}`);
+  }
 }
 
 
@@ -256,6 +266,16 @@ function toolNamesForMode(config: CodexProConfig): string[] {
       : config.toolMode === "minimal"
         ? [...MINIMAL_TOOL_NAMES]
         : [...STANDARD_TOOL_NAMES];
+  if (config.bashMode === "off") {
+    const bashIndex = names.indexOf("bash");
+    if (bashIndex !== -1) names.splice(bashIndex, 1);
+  }
+  if (config.writeMode !== "workspace") {
+    for (const writeTool of ["write", "edit"]) {
+      const toolIndex = names.indexOf(writeTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
+  }
   for (const name of codexSessionToolNames(config)) {
     if (!names.includes(name)) names.push(name);
   }
@@ -264,8 +284,22 @@ function toolNamesForMode(config: CodexProConfig): string[] {
 
 const MINIMAL_TOOLS = new Set<string>(MINIMAL_TOOL_NAMES);
 const STANDARD_TOOLS = new Set<string>(STANDARD_TOOL_NAMES);
+const registeredToolNamesByServer = new WeakMap<object, string[]>();
+
+function rememberRegisteredTool(server: McpServer, name: string): void {
+  const key = server as object;
+  const names = registeredToolNamesByServer.get(key) ?? [];
+  if (!registeredToolNamesByServer.has(key)) registeredToolNamesByServer.set(key, names);
+  if (!names.includes(name)) names.push(name);
+}
+
+function registeredToolNames(server: McpServer): string[] {
+  return [...(registeredToolNamesByServer.get(server as object) ?? [])];
+}
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
+  if (name === "bash" && config.bashMode === "off") return false;
+  if ((name === "write" || name === "edit") && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
   if (config.toolMode === "full") return true;
@@ -282,9 +316,21 @@ function registerCodexTool(
 ): void {
   if (!shouldRegisterTool(config, name)) return;
   registerToolCompat(server, name, options, handler);
+  rememberRegisteredTool(server, name);
 }
 
 function serverInstructions(config: CodexProConfig): string {
+  const editInstruction =
+    config.writeMode === "workspace"
+      ? "4. Edit source files with write/edit. After edits, call show_changes once for git status, diff stats, and review diff."
+      : config.writeMode === "handoff"
+        ? "4. Source writes are disabled and generic write/edit tools are unavailable. Use handoff_to_agent/handoff_to_codex for plans."
+        : "4. Write/edit tools are disabled. Do not attempt direct file writes; use handoff or context export workflows instead.";
+  const bashInstruction =
+    config.bashMode === "off"
+      ? "5. Bash is disabled and the bash tool is unavailable. Do not attempt shell commands."
+      : "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
+
   return [
     "CodexPro connects ChatGPT to one local development workspace.",
     "",
@@ -292,9 +338,9 @@ function serverInstructions(config: CodexProConfig): string {
     "1. Start with open_current_workspace. Use open_workspace only when the user gives a different root or asks to switch folders.",
     "2. Follow any AGENTS.md-style instructions returned by the workspace open call before editing files.",
     "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
-    "4. Edit with write/edit. After edits, call show_changes once for git status, diff stats, and review diff.",
-    "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.",
-    "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad bash/git calls.",
+    editInstruction,
+    bashInstruction,
+    "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
       ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
@@ -567,6 +613,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = getSharedWorkspaceManager(config);
   const guard = new PathGuard(config);
   const server = new McpServer({ name: "CodexPro", version: "0.28.5" }, { instructions: serverInstructions(config) });
+  registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
 
   registerCodexTool(
@@ -606,7 +653,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         maxWriteBytes: config.maxWriteBytes,
         maxOutputBytes: config.maxOutputBytes,
         maxSearchResults: config.maxSearchResults,
-        blockedGlobs: config.blockedGlobs
+        blockedGlobs: config.blockedGlobs,
+        registeredTools: registeredToolNames(server),
+        registeredToolCount: registeredToolNames(server).length
       };
       return textResult(`# CodexPro Server Config\n\n${JSON.stringify(safeConfig, null, 2)}`, safeConfig);
     }
@@ -655,7 +704,17 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         config.requireHttpToken && !config.authToken ? "fail" : "pass",
         config.requireHttpToken ? "token required for public/non-loopback access" : "loopback token not required"
       );
-      check("registered tool set", "pass", `${toolNamesForMode(config).length} tools for ${config.toolMode} mode`);
+      const expectedTools = toolNamesForMode(config).sort();
+      const actualTools = registeredToolNames(server).sort();
+      const missingTools = expectedTools.filter((name) => !actualTools.includes(name));
+      const extraTools = actualTools.filter((name) => !expectedTools.includes(name));
+      check(
+        "registered tool set",
+        missingTools.length || extraTools.length ? "fail" : "pass",
+        missingTools.length || extraTools.length
+          ? `missing: ${missingTools.join(", ") || "none"}; extra: ${extraTools.join(", ") || "none"}`
+          : `${actualTools.length} tools registered for ${config.toolMode} mode`
+      );
 
       try {
         const inventory = await codexproInventory(config, workspace, {
@@ -781,7 +840,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         `Status: ${status}`,
         `Workspace: ${workspace.root}`,
         `Mode: tools=${config.toolMode}, write=${config.writeMode}, bash=${config.bashMode}${config.bashSessionId ? `, bash_session=${config.bashSessionId}${config.requireBashSession ? " required" : ""}` : ""}`,
-        `Expected tools: ${toolNamesForMode(config).length}`,
+        `Expected tools: ${expectedTools.length}`,
+        `Registered tools: ${actualTools.length}`,
         `Duration: ${Date.now() - started} ms`,
         "",
         "## Checks",
@@ -801,8 +861,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         warned,
         failed,
         duration_ms: Date.now() - started,
-        expected_tools: toolNamesForMode(config),
-        expected_tool_count: toolNamesForMode(config).length,
+        expected_tools: expectedTools,
+        expected_tool_count: expectedTools.length,
+        registered_tools: actualTools,
+        registered_tool_count: actualTools.length,
         bash_mode: config.bashMode,
         bash_session_id: config.bashSessionId ?? null,
         require_bash_session: config.requireBashSession,

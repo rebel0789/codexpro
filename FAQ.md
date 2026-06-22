@@ -10,6 +10,26 @@ CodexPro does not unlock Developer Mode, unlock models, bypass account limits, o
 
 Account access and model tool support are separate. A Plus or Pro account can have Apps / Developer Mode, while a specific model surface may still be unable to call connectors or MCP tools directly. Use the Pro context fallback for those sessions.
 
+## How is CodexPro different from DevSpace?
+
+They can look similar at the transport layer because both use a local MCP-style bridge and a workspace root.
+
+CodexPro is more focused: it is built around one clear product loop for ChatGPT users:
+
+```text
+install -> setup in one repo -> paste Server URL into ChatGPT -> inspect/edit/verify/review that repo
+```
+
+The main differences are:
+
+- CodexPro is ChatGPT Developer Mode first, not a generic workspace bridge.
+- Bash, write/edit, tool mode, Codex session reads, and handoff execution are separate safety controls.
+- Durable context is repo-backed through `AGENTS.md` and `.ai-bridge/*`, so important project memory stays reviewable in files.
+- The normal workflow emphasizes compact cards, diffs, `show_changes`, smoke tests, and handoff status files.
+- CodexPro keeps a strict boundary: no model proxying, account pooling, third-party Pro site scraping, quota bypassing, or OS sandbox claims.
+
+Short version: DevSpace-style tools may share the bridge idea; CodexPro is the cleaner ChatGPT-to-local-repo coding agent workflow with stricter defaults and clearer review surfaces.
+
 ## What is the recommended install path?
 
 Install globally once:
@@ -110,7 +130,9 @@ Safety defaults block common sensitive paths:
 - symlink escapes
 - paths outside the workspace
 
-Use handoff mode if you want ChatGPT to write a plan only and let Codex execute locally.
+Use handoff mode if you want ChatGPT to write a plan only and let Codex execute locally. In handoff mode, generic `write` and `edit` tools are not advertised to ChatGPT.
+
+Use `CODEXPRO_WRITE_MODE=off` when you want direct `write` and `edit` tools removed from the advertised MCP tool list while still allowing bounded handoff/context files.
 
 ## Can CodexPro bind bash to a specific session id?
 
@@ -129,7 +151,7 @@ Then `bash` calls must include `session_id: "main"`. This helps avoid accidental
 CodexPro can list local Codex session ids and titles when you explicitly opt in:
 
 ```bash
-codexpro start --tool-mode full --codex-sessions metadata
+codexpro start --codex-sessions metadata
 ```
 
 This reads local Codex JSONL history under `~/.codex/sessions` and `~/.codex/archived_sessions` and returns metadata plus `codex resume <session-id>` commands. Use `--codex-sessions read` only if you also want bounded transcript reads. It does not attach to a live Codex app conversation.
@@ -139,6 +161,8 @@ If you do not want ChatGPT to trigger shell commands while you work in Codex, st
 ```bash
 codexpro start --no-bash
 ```
+
+This removes the `bash` MCP tool from the advertised tool list. ChatGPT can still use non-bash CodexPro tools such as workspace open, read, search, and show_changes. Direct `write`/`edit` are advertised only in workspace write mode.
 
 If you only want ChatGPT to plan and leave execution to Codex or another local agent:
 

@@ -1,12 +1,13 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
+import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import cors from "cors";
 import { z } from "zod";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { loadConfig, type CodexProConfig } from "./config.js";
+import { expandHome, loadConfig, type CodexProConfig } from "./config.js";
 import {
   profilePathForRoot,
   readRuntimeConnection,
@@ -135,6 +136,20 @@ function normalizeWidgetDomain(value: string | undefined): string {
   return url.origin;
 }
 
+function effectiveWriteMode(mode: ConnectorMode, write: ProfileFormValues["write"]): ProfileFormValues["write"] {
+  if (mode === "agent") return write;
+  return write === "off" ? "off" : "handoff";
+}
+
+function normalizeProfilePath(root: string, value: string | undefined): string {
+  const raw = value?.trim() ?? "";
+  if (!raw) return "";
+  const expanded = expandHome(raw);
+  return path.isAbsolute(expanded) || path.win32.isAbsolute(expanded)
+    ? path.resolve(expanded)
+    : path.resolve(root, expanded);
+}
+
 function profileValues(config: CodexProConfig, profile = readWorkspaceProfile(config.defaultRoot)): ProfileFormValues {
   const hostname =
     profile.hostname ??
@@ -142,9 +157,11 @@ function profileValues(config: CodexProConfig, profile = readWorkspaceProfile(co
     process.env.CODEXPRO_HOSTNAME ??
     process.env.NGROK_DOMAIN ??
     "";
+  const mode = oneOf(profile.mode ?? process.env.CODEXPRO_MODE, MODES, "agent");
+  const write = effectiveWriteMode(mode, oneOf(profile.write ?? config.writeMode, WRITE_MODES, config.writeMode));
   return {
     port: String(profile.port ?? config.port),
-    mode: oneOf(profile.mode ?? process.env.CODEXPRO_MODE, MODES, "agent"),
+    mode,
     tunnel: oneOf(profile.tunnel, TUNNELS, runtimeTunnelFallback()),
     hostname: String(hostname),
     tunnelName: String(profile.tunnelName ?? ""),
@@ -157,7 +174,7 @@ function profileValues(config: CodexProConfig, profile = readWorkspaceProfile(co
     codexDir: String(profile.codexDir ?? config.codexDir),
     bashSession: String(profile.bashSession ?? config.bashSessionId ?? ""),
     requireBashSession: Boolean(profile.requireBashSession ?? config.requireBashSession),
-    write: oneOf(profile.write ?? config.writeMode, WRITE_MODES, config.writeMode),
+    write,
     toolMode: oneOf(profile.toolMode ?? config.toolMode, TOOL_MODES, config.toolMode),
     widgetDomain: String(profile.widgetDomain ?? config.widgetDomain),
     noInstallCloudflared: Boolean(profile.noInstallCloudflared)
@@ -264,8 +281,13 @@ function profileForm(config: CodexProConfig): string {
             <label><span>Public hostname</span><input name="hostname" value="${escapeHtml(values.hostname)}" data-hostname-input data-autofilled="0"></label>
             <label><span>Port</span><input name="port" type="number" min="1" max="65535" value="${escapeHtml(values.port)}"></label>
             <label><span>Mode</span><select name="mode">${selectOptions(MODES, values.mode)}</select></label>
+            <label><span>Cloudflare tunnel name</span><input name="tunnelName" value="${escapeHtml(values.tunnelName)}"></label>
+            <label><span>ngrok config file</span><input name="ngrokConfig" value="${escapeHtml(values.ngrokConfig)}"></label>
+            <label><span>Cloudflare config file</span><input name="cloudflareConfig" value="${escapeHtml(values.cloudflareConfig)}"></label>
+            <label><span>Cloudflare token file</span><input name="cloudflareTokenFile" value="${escapeHtml(values.cloudflareTokenFile)}"></label>
           </div>
           <p class="field-help" data-hostname-help>${escapeHtml(currentTunnelMessage(values.tunnel, runtimeEndpoint))}</p>
+          <label class="check-row"><input name="noInstallCloudflared" type="checkbox" value="true"${values.noInstallCloudflared ? " checked" : ""}><span>Do not auto-install cloudflared</span></label>
         </fieldset>
         <fieldset class="profile-group">
           <legend>Runtime policy</legend>
@@ -316,15 +338,19 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
 
   const token = typeof existing.token === "string" && existing.token ? existing.token : config.authToken ?? "";
   const cloudflareToken = typeof existing.cloudflareToken === "string" && existing.cloudflareToken ? existing.cloudflareToken : "";
+  const write = effectiveWriteMode(next.mode, next.write);
+  const ngrokConfig = normalizeProfilePath(config.defaultRoot, next.ngrokConfig);
+  const cloudflareConfig = normalizeProfilePath(config.defaultRoot, next.cloudflareConfig);
+  const cloudflareTokenFile = normalizeProfilePath(config.defaultRoot, next.cloudflareTokenFile);
   return {
     port: next.port,
     mode: next.mode,
     tunnel: next.tunnel,
     ...(next.hostname ? { hostname: next.hostname } : {}),
     ...(next.tunnelName ? { tunnelName: next.tunnelName } : {}),
-    ...(next.ngrokConfig ? { ngrokConfig: next.ngrokConfig } : {}),
-    ...(next.cloudflareConfig ? { cloudflareConfig: next.cloudflareConfig } : {}),
-    ...(next.cloudflareTokenFile ? { cloudflareTokenFile: next.cloudflareTokenFile } : {}),
+    ...(ngrokConfig ? { ngrokConfig } : {}),
+    ...(cloudflareConfig ? { cloudflareConfig } : {}),
+    ...(cloudflareTokenFile ? { cloudflareTokenFile } : {}),
     ...(token ? { token } : {}),
     ...(cloudflareToken ? { cloudflareToken } : {}),
     bash: next.bash,
@@ -333,7 +359,7 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
     ...(next.codexDir ? { codexDir: next.codexDir } : {}),
     ...(next.bashSession ? { bashSession: next.bashSession } : {}),
     ...(next.requireBashSession ? { requireBashSession: true } : {}),
-    write: next.write,
+    write,
     toolMode: next.toolMode,
     ...(next.widgetDomain ? { widgetDomain: next.widgetDomain } : {}),
     ...(next.noInstallCloudflared ? { noInstallCloudflared: true } : {})
@@ -404,14 +430,14 @@ function onboardingPage(config: CodexProConfig): string {
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" href="/favicon.ico">
-  <title>CodexPro Admin</title>
+  <title>CodexPro Local Control - ChatGPT Workspace Agent</title>
   <style>
     /* Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V5 */
     /* Hallmark · macrostructure: Workbench · genre: modern-minimal · theme: CC Switch-inspired light manager · tone: technical admin · nav: section switcher · footer: Ft2 · contrast: pass (40-41) · mobile: pass (34, 49, 50-57) */
     :root {
       color-scheme: light;
-      --font-display: "Inter", "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      --font-body: "Inter", "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-display: "Geist", "Aptos", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --font-body: "Geist", "Aptos", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       --font-mono: "Fira Code", "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
       --color-paper: oklch(98.5% 0.004 250);
       --color-surface: oklch(100% 0 0);
@@ -714,6 +740,7 @@ function onboardingPage(config: CodexProConfig): string {
       font-size: 12px;
       font-weight: 800;
       line-height: 1;
+      white-space: nowrap;
     }
     .warn {
       border-color: var(--color-warn);
@@ -1115,6 +1142,10 @@ function onboardingPage(config: CodexProConfig): string {
       .panel {
         padding: var(--space-4);
       }
+      .section-head {
+        align-items: start;
+        flex-direction: column;
+      }
       h1 {
         font-size: 1.85rem;
       }
@@ -1159,12 +1190,12 @@ function onboardingPage(config: CodexProConfig): string {
       <div class="brand">
         <span class="logo" aria-hidden="true"><img src="/favicon.ico" alt=""></span>
         <span>
-          <span class="brand-kicker">Local admin</span>
+          <span class="brand-kicker">Workspace control</span>
           <span class="brand-title">CodexPro</span>
         </span>
       </div>
       <nav class="quick-links" aria-label="CodexPro resources">
-        <a class="action-link primary-link" href="${chatgptUrl}" target="_blank" rel="noreferrer">Open ChatGPT</a>
+        <a class="action-link primary-link" href="${chatgptUrl}" target="_blank" rel="noreferrer">Open ChatGPT settings</a>
         <a class="resource-link" href="${githubUrl}" target="_blank" rel="noreferrer">Open GitHub</a>
         <a class="resource-link" href="${npmUrl}" target="_blank" rel="noreferrer">NPM</a>
         <a class="resource-link" href="${docsUrl}" target="_blank" rel="noreferrer">Docs</a>
@@ -1184,18 +1215,18 @@ function onboardingPage(config: CodexProConfig): string {
           <div class="section-head">
             <div>
               <h2>Quick path</h2>
-              <p>For a new local admin session, do these in order.</p>
+              <p>Use ChatGPT like a coding agent for this workspace without widening the local trust boundary.</p>
             </div>
           </div>
           <div class="guide-list">
-            <div class="guide-item"><span class="num">1</span><span><strong>Check the profile</strong><p>Save the tunnel, port, mode, bash, write, tool, Codex sessions, and working directory defaults for the next launch.</p></span></div>
+            <div class="guide-item"><span class="num">1</span><span><strong>Review the profile</strong><p>Choose the tunnel, port, mode, bash, write, tool, Codex session, and workspace defaults for the next launch.</p></span></div>
             <div class="guide-item"><span class="num">2</span><span><strong>Copy the Server URL</strong><p>Use the current public URL shown in the profile when available, or the one printed by the terminal after launch.</p></span></div>
-            <div class="guide-item"><span class="num">3</span><span><strong>Open ChatGPT settings</strong><p>Create an app connection, choose Server URL, paste the public URL, and use no extra authentication.</p></span></div>
-            <div class="guide-item"><span class="num">4</span><span><strong>Restart for policy changes</strong><p>Saved profile changes apply when CodexPro starts again. This keeps the live server predictable.</p></span></div>
+            <div class="guide-item"><span class="num">3</span><span><strong>Create the ChatGPT app</strong><p>Choose Server URL, paste the copied URL, and use no extra authentication. The private token is already in the URL.</p></span></div>
+            <div class="guide-item"><span class="num">4</span><span><strong>Restart for policy changes</strong><p>Saved profile changes apply when CodexPro starts again. The live server does not mutate under an active ChatGPT session.</p></span></div>
           </div>
         </section>
         <article class="run-card" id="status" aria-label="Current runtime">
-          <h2>Current session</h2>
+          <h2>Runtime guardrails</h2>
           <div class="status">
             <div class="row"><span class="label">Workspace</span><span class="mono">${escapeHtml(config.defaultRoot)}</span></div>
             <div class="row"><span class="label">Local MCP</span><span class="mono">${escapeHtml(localMcp)}</span></div>
@@ -1215,7 +1246,7 @@ function onboardingPage(config: CodexProConfig): string {
       <section class="panel" id="connect">
         <div class="section-head">
           <div>
-            <h2>Connect ChatGPT</h2>
+          <h2>Connect ChatGPT</h2>
             <p>Create an app connection that points at the public Server URL copied by the terminal.</p>
           </div>
         </div>
@@ -1253,7 +1284,7 @@ function onboardingPage(config: CodexProConfig): string {
       <ul class="roots">${allowedRoots}</ul>
       <p class="note">CodexPro rejects workspace access outside these roots.</p>
     </details>
-    <footer class="foot">Local admin surface for status, saved profile settings, CLI restart commands, and MCP access. Public sharing still happens through your chosen tunnel.</footer>
+    <footer class="foot">Token-protected local control surface for this workspace. Public sharing still happens only through your chosen tunnel.</footer>
   </main>
   <script>
     document.querySelectorAll("[data-copy], [data-copy-kind]").forEach((button) => {
@@ -1332,6 +1363,10 @@ function onboardingPage(config: CodexProConfig): string {
         const payload = {
           tunnel: data.tunnel,
           hostname: data.hostname,
+          tunnelName: data.tunnelName,
+          ngrokConfig: data.ngrokConfig,
+          cloudflareConfig: data.cloudflareConfig,
+          cloudflareTokenFile: data.cloudflareTokenFile,
           port: Number(data.port),
           mode: data.mode,
           bash: data.bash,
@@ -1340,7 +1375,8 @@ function onboardingPage(config: CodexProConfig): string {
           codexSessions: data.codexSessions,
           codexDir: data.codexDir,
           bashSession: data.bashSession,
-          requireBashSession: Boolean(form.elements.requireBashSession?.checked)
+          requireBashSession: Boolean(form.elements.requireBashSession?.checked),
+          noInstallCloudflared: Boolean(form.elements.noInstallCloudflared?.checked)
         };
         if (status) status.textContent = "Saving...";
         try {
@@ -1584,11 +1620,11 @@ async function main(): Promise<void> {
 
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
-      console.error(error);
+      console.error(error instanceof Error ? error.stack ?? error.message : String(error));
       if (!res.headersSent) {
         res.status(500).json({
           jsonrpc: "2.0",
-          error: { code: -32603, message: error instanceof Error ? error.message : String(error) },
+          error: { code: -32603, message: "Internal CodexPro MCP error. Check the local terminal for details." },
           id: null
         });
       }

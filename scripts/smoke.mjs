@@ -152,7 +152,7 @@ const toolCardUri = 'ui://widget/codexpro-tool-card-v9.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
-  return meta.ui?.resourceUri === toolCardUri || meta['openai/outputTemplate'] === toolCardUri;
+  return meta.ui?.resourceUri === toolCardUri && meta['openai/outputTemplate'] === toolCardUri;
 }
 async function expectToolError(name, args, pattern, targetClient = client) {
   const result = await targetClient.request('tools/call', { name, arguments: args });
@@ -171,6 +171,9 @@ const resources = await client.request('resources/list', {});
 const toolCard = resources.resources.find((resource) => resource.uri === toolCardUri);
 if (!toolCard) throw new Error(`missing tool-card resource: ${toolCardUri}`);
 if (toolCard.mimeType !== 'text/html;profile=mcp-app') throw new Error(`unexpected tool-card mime type: ${toolCard.mimeType}`);
+const legacyToolCardUri = 'ui://widget/codexpro-tool-card-v8.html';
+const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
+if (!legacyToolCard) throw new Error(`missing legacy tool-card resource: ${legacyToolCardUri}`);
 const widget = await client.request('resources/read', { uri: toolCardUri });
 const widgetText = widget.contents?.[0]?.text ?? '';
 const widgetMeta = widget.contents?.[0]?._meta ?? {};
@@ -182,6 +185,13 @@ if (!widgetMeta.ui?.csp || !widgetMeta['openai/widgetCSP']) {
 }
 if (widgetMeta.ui?.domain !== 'https://widgets.codexpro.test' || widgetMeta['openai/widgetDomain'] !== 'https://widgets.codexpro.test') {
   throw new Error('tool-card widget resource did not expose standard and ChatGPT widget domain metadata');
+}
+const legacyWidget = await client.request('resources/read', { uri: legacyToolCardUri });
+if (legacyWidget.contents?.[0]?.uri !== legacyToolCardUri) {
+  throw new Error('legacy tool-card widget resource did not preserve requested URI');
+}
+if (!(legacyWidget.contents?.[0]?.text ?? '').includes('Waiting for tool result')) {
+  throw new Error('legacy tool-card widget resource did not serve widget HTML');
 }
 const current = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
 const realTmp = await fs.realpath(tmp);
@@ -200,6 +210,9 @@ const selfTest = await client.request('tools/call', {
 });
 if (selfTest.structuredContent.status === 'fail' || !selfTest.structuredContent.expected_tools?.includes?.('codexpro_self_test')) {
   throw new Error(`codexpro_self_test failed: ${JSON.stringify(selfTest.structuredContent)}`);
+}
+if (JSON.stringify([...(selfTest.structuredContent.expected_tools ?? [])].sort()) !== JSON.stringify([...(selfTest.structuredContent.registered_tools ?? [])].sort())) {
+  throw new Error(`codexpro_self_test expected/registered tools mismatch: ${JSON.stringify(selfTest.structuredContent)}`);
 }
 if (!selfTest.structuredContent.files_touched?.includes?.('.ai-bridge/codexpro-self-test.md')) {
   throw new Error('codexpro_self_test did not run the .ai-bridge write/edit probe');
@@ -405,6 +418,73 @@ async function assertToolMode(mode, expected, hidden) {
 await assertToolMode('', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
 await assertToolMode('minimal', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
 
+const handoffWriteClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--write', 'handoff'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_TOOL_MODE: '' }
+});
+await handoffWriteClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-write-handoff-smoke', version: '0.1.0' }
+});
+handoffWriteClient.notify('notifications/initialized');
+const handoffWriteTools = await handoffWriteClient.request('tools/list', {});
+const handoffWriteToolNames = handoffWriteTools.tools.map((tool) => tool.name);
+for (const hiddenWriteTool of ['write', 'edit']) {
+  if (handoffWriteToolNames.includes(hiddenWriteTool)) {
+    throw new Error(`--write handoff should not advertise ${hiddenWriteTool} tool; got ${handoffWriteToolNames.join(', ')}`);
+  }
+}
+const handoffWriteConfig = await handoffWriteClient.request('tools/call', { name: 'server_config', arguments: {} });
+if (handoffWriteConfig.structuredContent.writeMode !== 'handoff' || handoffWriteConfig.structuredContent.registeredTools?.includes?.('write') || handoffWriteConfig.structuredContent.registeredTools?.includes?.('edit')) {
+  throw new Error(`server_config did not report write handoff with hidden edit tools: ${JSON.stringify(handoffWriteConfig.structuredContent)}`);
+}
+handoffWriteClient.close();
+
+const noBashClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'off'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_TOOL_MODE: '' }
+});
+await noBashClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-no-bash-smoke', version: '0.1.0' }
+});
+noBashClient.notify('notifications/initialized');
+const noBashTools = await noBashClient.request('tools/list', {});
+const noBashToolNames = noBashTools.tools.map((tool) => tool.name);
+if (noBashToolNames.includes('bash')) {
+  throw new Error(`--bash off should not advertise bash tool; got ${noBashToolNames.join(', ')}`);
+}
+const noBashConfig = await noBashClient.request('tools/call', { name: 'server_config', arguments: {} });
+if (noBashConfig.structuredContent.bashMode !== 'off') {
+  throw new Error(`server_config did not report bash off: ${JSON.stringify(noBashConfig.structuredContent)}`);
+}
+noBashClient.close();
+
+const disabledWriteClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--write', 'off'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_TOOL_MODE: '' }
+});
+await disabledWriteClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-write-off-smoke', version: '0.1.0' }
+});
+disabledWriteClient.notify('notifications/initialized');
+const disabledWriteTools = await disabledWriteClient.request('tools/list', {});
+const disabledWriteToolNames = disabledWriteTools.tools.map((tool) => tool.name);
+for (const hiddenWriteTool of ['write', 'edit']) {
+  if (disabledWriteToolNames.includes(hiddenWriteTool)) {
+    throw new Error(`--write off should not advertise ${hiddenWriteTool} tool; got ${disabledWriteToolNames.join(', ')}`);
+  }
+}
+const disabledWriteConfig = await disabledWriteClient.request('tools/call', { name: 'server_config', arguments: {} });
+if (disabledWriteConfig.structuredContent.writeMode !== 'off') {
+  throw new Error(`server_config did not report write off: ${JSON.stringify(disabledWriteConfig.structuredContent)}`);
+}
+disabledWriteClient.close();
+
 const standardCodexSessionsClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp], {
   cwd: path.resolve('.'),
   env: {
@@ -469,6 +549,16 @@ if (emptyCodexDirConfig.structuredContent.codexDir !== expectedDefaultCodexDir) 
   throw new Error(`empty CODEXPRO_CODEX_DIR resolved to ${emptyCodexDirConfig.structuredContent.codexDir}, expected ${expectedDefaultCodexDir}`);
 }
 emptyCodexDirClient.close();
+
+const invalidContextDir = spawnSync('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_CONTEXT_DIR: 'src' },
+  encoding: 'utf8',
+  timeout: 5000
+});
+if (invalidContextDir.status === 0 || !String(invalidContextDir.stderr || invalidContextDir.stdout).includes('CODEXPRO_CONTEXT_DIR')) {
+  throw new Error(`invalid CODEXPRO_CONTEXT_DIR=src was not rejected: status=${invalidContextDir.status} stdout=${invalidContextDir.stdout} stderr=${invalidContextDir.stderr}`);
+}
 
 const codexSessionsClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--tool-mode', 'full'], {
   cwd: path.resolve('.'),

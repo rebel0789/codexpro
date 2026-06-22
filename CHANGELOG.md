@@ -2,6 +2,13 @@
 
 ## 0.28.5
 
+- Added a compatibility alias for stale ChatGPT descriptors that still request `ui://widget/codexpro-tool-card-v8.html`, while keeping `ui://widget/codexpro-tool-card-v9.html` as the current advertised widget.
+- Stopped advertising the `bash` MCP tool when `CODEXPRO_BASH_MODE=off` / `codexpro start --no-bash` is active, so ChatGPT has less opportunity to attempt a shell tool call in no-bash sessions.
+- Stopped advertising direct `write` and `edit` tools unless `CODEXPRO_WRITE_MODE=workspace`; handoff/off modes keep handoff planning tools available for bounded `.ai-bridge` plan files without exposing generic source edit actions.
+- Added smoke coverage that compares `codexpro_self_test` expected tools against the actually registered MCP tool set, so disabled tools cannot silently remain visible in ChatGPT's tool list.
+- Tightened `CODEXPRO_CONTEXT_DIR` to workspace-relative hidden directories such as `.ai-bridge`, rejecting source/build/dependency/credential directories and absolute paths.
+- Made saved profile handling stricter: non-agent modes cannot inherit `write=workspace`, relative tunnel config/token paths resolve from the workspace, and `settings set` refuses to persist raw Cloudflare tunnel tokens.
+- Completed the local admin profile form for named Cloudflare/ngrok settings, including tunnel name, config paths, token-file path, and cloudflared auto-install preference.
 - Fixed path-scoped `show_changes` so unrelated workspace status is not reported for a clean requested path.
 - Kept duplicate `load_skill` matches ambiguous until the caller supplies the exact displayed skill path.
 - Added `codexpro_self_test`, a local-only diagnostic that checks modes, expected tools, safe bash policy, selected-only Pro context, and an optional `.ai-bridge/codexpro-self-test.md` write/edit probe without touching source files.
