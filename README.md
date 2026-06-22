@@ -98,7 +98,7 @@ If one workflow is unavailable and another product surface you already have acce
 
 If your ChatGPT account exposes a stronger model in the web app, and that model/surface can call Developer Mode apps, CodexPro lets it work against your local repo through MCP. Some ChatGPT model surfaces may not be able to call connectors or MCP tools directly. CodexPro does not provide, proxy, resell, or unlock models; it gives compatible ChatGPT sessions local coding tools and repo context.
 
-## CodexPro vs DevSpace-style bridges
+## CodexPro vs generic workspace bridges
 
 The high-level shape can look similar because both use a local MCP bridge, a tunnel, and a workspace root. CodexPro is narrower and more opinionated: it is built to make ChatGPT Developer Mode work like a practical local coding agent for one repo.
 
@@ -110,7 +110,7 @@ The high-level shape can look similar because both use a local MCP bridge, a tun
 | Reviewable outputs | Tool cards, diffs, `show_changes`, smoke tests, and handoff status files are designed so users can see what changed before trusting it. |
 | TOS-safe product boundary | CodexPro does not proxy models, pool accounts, scrape third-party Pro sites, bypass quotas, or pretend to be an OS sandbox. |
 
-So the short answer is: DevSpace-style bridges may share the transport idea, but CodexPro is positioned as the cleaner ChatGPT-to-local-repo coding product with stricter defaults, clearer admin controls, and a repo-first agent workflow.
+So the short answer is: generic workspace bridges may share the transport idea, but CodexPro is positioned as the cleaner ChatGPT-to-local-repo coding product with stricter defaults, clearer admin controls, and a repo-first agent workflow.
 
 ## Preview
 

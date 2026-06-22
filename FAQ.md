@@ -10,7 +10,7 @@ CodexPro does not unlock Developer Mode, unlock models, bypass account limits, o
 
 Account access and model tool support are separate. A Plus or Pro account can have Apps / Developer Mode, while a specific model surface may still be unable to call connectors or MCP tools directly. Use the Pro context fallback for those sessions.
 
-## How is CodexPro different from DevSpace?
+## How is CodexPro different from generic workspace bridges?
 
 They can look similar at the transport layer because both use a local MCP-style bridge and a workspace root.
 
@@ -28,7 +28,7 @@ The main differences are:
 - The normal workflow emphasizes compact cards, diffs, `show_changes`, smoke tests, and handoff status files.
 - CodexPro keeps a strict boundary: no model proxying, account pooling, third-party Pro site scraping, quota bypassing, or OS sandbox claims.
 
-Short version: DevSpace-style tools may share the bridge idea; CodexPro is the cleaner ChatGPT-to-local-repo coding agent workflow with stricter defaults and clearer review surfaces.
+Short version: other tools may share the bridge idea; CodexPro is the cleaner ChatGPT-to-local-repo coding agent workflow with stricter defaults and clearer review surfaces.
 
 ## What is the recommended install path?
 
