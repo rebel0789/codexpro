@@ -188,7 +188,45 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   };
 }
 
+function firstExistingFile(candidates: Array<string | undefined>): string | undefined {
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+function pathBashCandidates(): string[] {
+  return (process.env.PATH ?? "")
+    .split(path.delimiter)
+    .filter(Boolean)
+    .map((entry) => path.join(entry, process.platform === "win32" ? "bash.exe" : "bash"));
+}
+
+function isWindowsSystemBash(candidate: string): boolean {
+  const normalized = path.normalize(candidate).toLowerCase();
+  return normalized.endsWith("\\windows\\system32\\bash.exe");
+}
+
+function windowsBashExecutable(): string {
+  const programFiles = process.env.ProgramFiles;
+  const programFilesX86 = process.env["ProgramFiles(x86)"];
+  const localAppData = process.env.LOCALAPPDATA;
+  const candidates = [
+    process.env.CODEXPRO_BASH,
+    process.env.GIT_BASH,
+    ...pathBashCandidates().filter((candidate) => !isWindowsSystemBash(candidate)),
+    programFiles ? path.join(programFiles, "Git", "bin", "bash.exe") : undefined,
+    programFiles ? path.join(programFiles, "Git", "usr", "bin", "bash.exe") : undefined,
+    programFilesX86 ? path.join(programFilesX86, "Git", "bin", "bash.exe") : undefined,
+    programFilesX86 ? path.join(programFilesX86, "Git", "usr", "bin", "bash.exe") : undefined,
+    localAppData ? path.join(localAppData, "Programs", "Git", "bin", "bash.exe") : undefined,
+    localAppData ? path.join(localAppData, "Programs", "Git", "usr", "bin", "bash.exe") : undefined
+  ];
+  return firstExistingFile(candidates) ?? "bash";
+}
+
 function bashExecutable(): string {
+  if (process.platform === "win32") return windowsBashExecutable();
   return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
 }
 
