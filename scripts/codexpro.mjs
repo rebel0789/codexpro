@@ -10,6 +10,8 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
+const UNTRACKED_SYMLINK_TARGET_BYTES = 512;
 
 function usage() {
   console.log(`CodexPro easy launcher
@@ -23,6 +25,7 @@ Usage:
   codexpro doctor
   codexpro execute-handoff --agent opencode --model provider/model
   codexpro watch-handoff --agent opencode --model provider/model
+  codexpro loop-handoff --agent opencode --model provider/model --review-command "node ./reviewer.js --status {{status_file}} --diff {{diff_file}} --plan-file {{plan_file}}"
   codexpro --root /path/to/repo
   codexpro ngrok --hostname your-domain.ngrok-free.dev
   codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
@@ -123,6 +126,26 @@ Watch handoff options:
   --state-file <path>       Watch state file. Default: .ai-bridge/watch-handoff-state.json.
   --yes                     Start automatic local execution without startup confirmation.
 
+Loop handoff options:
+  codexpro loop-handoff --agent opencode --model provider/model --review-command "reviewer --status {{status_file}} --diff {{diff_file}} --plan-file {{plan_file}}"
+  --review-command <template>
+                             Local reviewer/orchestrator command. It should print CODEXPRO_REVIEW=PASS or CODEXPRO_REVIEW=FAIL.
+                             On FAIL it must update .ai-bridge/current-plan.md before the next iteration.
+  --max-iters <n>           Maximum execute/review iterations. Default: 3.
+  --run-tests <template>    Optional local verification command before review.
+  --allow-implicit-review-verdict
+                             Infer PASS/FAIL from reviewer exit code and plan changes when no CODEXPRO_REVIEW line is printed.
+  --allow-review-pass-on-failure
+                             Let explicit reviewer PASS override a failed executor or failed test command.
+  --require-clean-git-start Refuse to start unless git status is clean.
+  --stop-if-no-files-changed
+                             Stop if an executor iteration produces no git diff.
+  --stop-if-same-diff       Stop if an executor iteration repeats the previous diff.
+  --require-human-confirmation
+                             Ask before running a reviewer-generated follow-up plan.
+  --dry-run                 Print executor/reviewer/test commands without executing them.
+  --yes                     Start the local loop without startup confirmation.
+
 Default agent mode:
   codexpro start --root /path/to/repo
 
@@ -154,6 +177,9 @@ Execute a local handoff after ChatGPT writes .ai-bridge/current-plan.md:
 Watch for new handoff plans and execute them locally:
   codexpro watch-handoff --agent opencode --model provider/model --yes
   codexpro watch-handoff --agent custom --command "node ./agent.js --task-file {{plan_file}}" --yes
+
+Run a bounded local execute/review loop:
+  codexpro loop-handoff --agent opencode --model provider/model --review-command "node ./reviewer.js --status {{status_file}} --diff {{diff_file}} --plan-file {{plan_file}}" --max-iters 3 --yes
 
 Stable URL mode after one-time Cloudflare tunnel setup:
   codexpro stable --root /path/to/repo --hostname codexpro.example.com --tunnel-name codexpro
@@ -271,6 +297,12 @@ function parseArgs(argv) {
     else if (key === 'once') out.once = true;
     else if (key === 'confirm') out.confirm = true;
     else if (key === 'no-confirm') out.noConfirm = true;
+    else if (key === 'require-clean-git-start') out.requireCleanGitStart = true;
+    else if (key === 'stop-if-no-files-changed') out.stopIfNoFilesChanged = true;
+    else if (key === 'stop-if-same-diff') out.stopIfSameDiff = true;
+    else if (key === 'require-human-confirmation') out.requireHumanConfirmation = true;
+    else if (key === 'allow-implicit-review-verdict') out.allowImplicitReviewVerdict = true;
+    else if (key === 'allow-review-pass-on-failure') out.allowReviewPassOnFailure = true;
     else if (key === 'open-chatgpt') out.openChatgpt = true;
     else if (key === 'no-profile') out.noProfile = true;
     else if (key === 'save-config') out.saveConfig = true;
@@ -1001,6 +1033,10 @@ function numberOption(value, fallback, min, max) {
   return Math.max(min, Math.min(max, Math.floor(parsed)));
 }
 
+function handoffMaxReadBytes() {
+  return numberOption(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000);
+}
+
 function shellCommandPreview(parts) {
   return parts.map((part) => {
     const text = String(part);
@@ -1069,7 +1105,7 @@ function splitCommandTemplate(input) {
 }
 
 function applyCommandTemplate(value, replacements) {
-  return String(value).replace(/\{\{\s*(model|plan_file|plan_text|root)\s*\}\}/g, (_, key) => replacements[key] ?? '');
+  return String(value).replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (_, key) => replacements[key] ?? '');
 }
 
 function buildExecutorCommand(args, root, planPath, planText) {
@@ -1285,7 +1321,7 @@ function loadHandoffExecution(args) {
   const contextDir = contextDirFromArgs(args);
   const bridgeDir = resolveWorkspaceFile(root, contextDir);
   const planPath = path.join(bridgeDir, 'current-plan.md');
-  const maxReadBytes = numberOption(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000);
+  const maxReadBytes = handoffMaxReadBytes();
   const maxOutputBytes = numberOption(args.maxOutputBytes ?? process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000);
   const timeoutMs = numberOption(args.timeoutMs ?? args.timeout, 600_000, 1_000, 24 * 60 * 60_000);
   if (!fs.existsSync(planPath)) {
@@ -1540,6 +1576,632 @@ async function runWatchHandoff(argv) {
 
     await sleep(pollIntervalMs);
   }
+}
+
+function loopArtifactPaths(root, contextDir) {
+  const bridgeDir = resolveWorkspaceFile(root, contextDir);
+  return {
+    bridgeDir,
+    planPath: path.join(bridgeDir, 'current-plan.md'),
+    statusPath: path.join(bridgeDir, 'agent-status.md'),
+    diffPath: path.join(bridgeDir, 'implementation-diff.patch'),
+    logPath: path.join(bridgeDir, 'execution-log.jsonl'),
+    testsPath: path.join(bridgeDir, 'loop-tests.txt'),
+    reviewPath: path.join(bridgeDir, 'loop-review.md'),
+    statePath: path.join(bridgeDir, 'loop-handoff-state.json')
+  };
+}
+
+function buildTemplateCommand(template, replacements, displayReplacements, label) {
+  const parts = splitCommandTemplate(template).map((part) => applyCommandTemplate(part, replacements));
+  const displayParts = splitCommandTemplate(template).map((part) => applyCommandTemplate(part, displayReplacements ?? replacements));
+  if (!parts.length) throw new Error(`${label} command is empty.`);
+  return {
+    command: parts[0],
+    args: parts.slice(1),
+    displayArgs: displayParts.slice(1),
+    displayCommand: shellCommandPreview([displayParts[0], ...displayParts.slice(1)])
+  };
+}
+
+function loopTemplateReplacements(root, contextDir, iteration, paths) {
+  return {
+    root,
+    context_dir: resolveWorkspaceFile(root, contextDir),
+    iteration: String(iteration),
+    plan_file: paths.planPath,
+    status_file: paths.statusPath,
+    diff_file: paths.diffPath,
+    log_file: paths.logPath,
+    tests_file: paths.testsPath,
+    review_file: paths.reviewPath,
+    state_file: paths.statePath
+  };
+}
+
+function buildReviewerCommand(args, root, contextDir, iteration, paths) {
+  const template = String(args.reviewCommand ?? '').trim();
+  if (!template) throw new Error('loop-handoff requires --review-command <template>.');
+  const replacements = loopTemplateReplacements(root, contextDir, iteration, paths);
+  return buildTemplateCommand(template, replacements, replacements, 'Review');
+}
+
+function buildTestCommand(args, root, contextDir, iteration, paths) {
+  const template = String(args.runTests ?? '').trim();
+  if (!template) return null;
+  const replacements = loopTemplateReplacements(root, contextDir, iteration, paths);
+  return buildTemplateCommand(template, replacements, replacements, 'Test');
+}
+
+function commandDisplay(commandInfo) {
+  return shellCommandPreview([commandInfo.command, ...(commandInfo.displayArgs ?? commandInfo.args)]);
+}
+
+function gitStatusPorcelain(root) {
+  const result = spawnSync('git', ['status', '--porcelain=v1'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 1_000_000,
+    shell: false
+  });
+  if (result.status !== 0) {
+    const reason = result.stderr || result.stdout || `git status exited ${result.status}`;
+    throw new Error(`git status failed: ${redactForLog(reason).trim()}`);
+  }
+  return result.stdout || '';
+}
+
+function normalizedContextDir(contextDir) {
+  return String(contextDir || '.ai-bridge').replace(/\\/g, '/').replace(/^\.?\//, '').replace(/\/+$/, '');
+}
+
+function normalizeStatusPath(value) {
+  return String(value || '').replace(/^"|"$/g, '').replace(/\\"/g, '"');
+}
+
+function statusLinePaths(line) {
+  const value = String(line || '').slice(3).trim();
+  const renameIndex = value.indexOf(' -> ');
+  if (renameIndex < 0) return [normalizeStatusPath(value)];
+  return [
+    normalizeStatusPath(value.slice(0, renameIndex)),
+    normalizeStatusPath(value.slice(renameIndex + 4))
+  ];
+}
+
+function isContextStatusLine(line, contextDir) {
+  const context = normalizedContextDir(contextDir);
+  const paths = statusLinePaths(line);
+  return paths.length > 0 && paths.every((filePath) => filePath === context || filePath.startsWith(`${context}/`));
+}
+
+function assertCleanGitStart(root, contextDir) {
+  const status = gitStatusPorcelain(root);
+  const nonContextStatus = status.split(/\r?\n/).filter((line) => line.trim() && !isContextStatusLine(line, contextDir)).join('\n');
+  if (nonContextStatus.trim()) {
+    throw new Error(`--require-clean-git-start refused to start because the workspace has non-handoff changes:\n${nonContextStatus}`);
+  }
+}
+
+function runGitText(root, args, maxBytes) {
+  const result = spawnSync('git', args, {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: Math.max(maxBytes * 2, 1_000_000),
+    shell: false
+  });
+  if (result.status !== 0) {
+    const reason = result.stderr || result.stdout || `git ${args.join(' ')} exited ${result.status}`;
+    throw new Error(redactForLog(reason).trim());
+  }
+  return result.stdout || '';
+}
+
+function singleLineSummary(value) {
+  return String(value).replace(/\r/g, '\\r').replace(/\n/g, '\\n');
+}
+
+function fileSha256(filePath) {
+  const hash = createHash('sha256');
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(64 * 1024);
+  try {
+    for (;;) {
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, null);
+      if (!bytesRead) break;
+      hash.update(buffer.subarray(0, bytesRead));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  return hash.digest('hex');
+}
+
+function boundedFileFingerprint(filePath, stat) {
+  const hash = createHash('sha256');
+  const fd = fs.openSync(filePath, 'r');
+  const buffer = Buffer.alloc(64 * 1024);
+  let remaining = Math.min(stat.size, UNTRACKED_FILE_HASH_BYTES);
+  try {
+    while (remaining > 0) {
+      const bytesRead = fs.readSync(fd, buffer, 0, Math.min(buffer.length, remaining), null);
+      if (!bytesRead) break;
+      hash.update(buffer.subarray(0, bytesRead));
+      remaining -= bytesRead;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  const hashLabel = stat.size > UNTRACKED_FILE_HASH_BYTES ? `sha256_first_${UNTRACKED_FILE_HASH_BYTES}` : 'sha256';
+  const truncated = stat.size > UNTRACKED_FILE_HASH_BYTES ? ', fingerprint_truncated=true' : '';
+  return `${stat.size} bytes, ${hashLabel}=${hash.digest('hex')}${truncated}`;
+}
+
+function untrackedEntrySummary(root, relPath) {
+  const absPath = path.resolve(root, relPath);
+  try {
+    const stat = fs.lstatSync(absPath);
+    if (stat.isSymbolicLink()) {
+      const target = singleLineSummary(trimBytes(fs.readlinkSync(absPath), UNTRACKED_SYMLINK_TARGET_BYTES).text);
+      return `- ${relPath} (symlink, target=${target})`;
+    }
+    if (!stat.isFile()) return `- ${relPath} (${stat.isDirectory() ? 'directory' : 'non-file'})`;
+    return `- ${relPath} (${boundedFileFingerprint(absPath, stat)})`;
+  } catch (error) {
+    return `- ${relPath} (unavailable: ${singleLineSummary(redactForLog(error instanceof Error ? error.message : String(error)))})`;
+  }
+}
+
+function untrackedFilesSummary(root, contextDir, maxBytes) {
+  const context = normalizedContextDir(contextDir);
+  const output = runGitText(root, ['ls-files', '--others', '--exclude-standard', '-z'], 1_000_000);
+  const entries = output.split('\0').filter(Boolean).filter((relPath) => relPath !== context && !relPath.startsWith(`${context}/`));
+  if (!entries.length) return '';
+  const lines = [];
+  let usedBytes = 0;
+  let omitted = 0;
+  const budget = Math.max(1_024, maxBytes);
+  for (const relPath of entries.sort()) {
+    const line = untrackedEntrySummary(root, relPath);
+    const lineBytes = Buffer.byteLength(`${line}\n`, 'utf8');
+    if (usedBytes + lineBytes > budget) {
+      omitted += 1;
+      continue;
+    }
+    lines.push(line);
+    usedBytes += lineBytes;
+  }
+  if (omitted) lines.push(`- ... ${omitted} untracked entries omitted after ${budget} bytes`);
+  return `${lines.join('\n')}\n`;
+}
+
+function contextPathPredicate(contextDir) {
+  const context = normalizedContextDir(contextDir);
+  return (filePath) => filePath === context || filePath.startsWith(`${context}/`);
+}
+
+function pathStateForFingerprint(root, relPath, options = {}) {
+  const absPath = path.resolve(root, relPath);
+  try {
+    const stat = fs.lstatSync(absPath);
+    const type = stat.isSymbolicLink()
+      ? 'symlink'
+      : stat.isFile()
+        ? 'file'
+        : stat.isDirectory()
+          ? 'directory'
+          : 'non-file';
+    const parts = [
+      `type=${type}`,
+      `mode=${stat.mode}`,
+      `size=${stat.size}`
+    ];
+    if (stat.isSymbolicLink()) parts.push(`target=${singleLineSummary(fs.readlinkSync(absPath))}`);
+    if (stat.isFile()) {
+      parts.push(options.fullFileHash ? `sha256=${fileSha256(absPath)}` : boundedFileFingerprint(absPath, stat));
+    }
+    return parts.join(';');
+  } catch (error) {
+    return `unavailable:${singleLineSummary(redactForLog(error instanceof Error ? error.message : String(error)))}`;
+  }
+}
+
+function changeFingerprintExcludingContext(root, contextDir) {
+  const context = normalizedContextDir(contextDir);
+  const isContextPath = contextPathPredicate(contextDir);
+  const status = runGitText(root, ['status', '--porcelain=v1', '--untracked-files=all'], 25_000_000);
+  const stagedRaw = runGitText(root, ['diff', '--cached', '--raw', '-z', '--no-ext-diff', '--', '.', `:(exclude)${context}`], 25_000_000);
+  const hash = createHash('sha256');
+  hash.update(`staged-raw\0${stagedRaw}\0`);
+  for (const line of status.split(/\r?\n/).filter(Boolean).sort()) {
+    const paths = statusLinePaths(line);
+    if (paths.length && paths.every(isContextPath)) continue;
+    hash.update(`status\0${line}\0`);
+    const fullFileHash = !line.startsWith('?? ');
+    for (const filePath of paths) {
+      hash.update(`path\0${filePath}\0${pathStateForFingerprint(root, filePath, { fullFileHash })}\0`);
+    }
+  }
+  return hash.digest('hex');
+}
+
+function readGitDiffExcludingContext(root, contextDir, maxBytes) {
+  const context = normalizedContextDir(contextDir);
+  try {
+    const staged = runGitText(root, ['diff', '--cached', '--no-ext-diff', '--', '.', `:(exclude)${context}`], maxBytes);
+    const unstaged = runGitText(root, ['diff', '--no-ext-diff', '--', '.', `:(exclude)${context}`], maxBytes);
+    const untracked = untrackedFilesSummary(root, contextDir, maxBytes);
+    const sections = [];
+    if (staged.trim()) sections.push(`# Staged diff\n\n${staged}`);
+    if (unstaged.trim()) sections.push(`# Unstaged diff\n\n${unstaged}`);
+    if (untracked.trim()) sections.push(`# Untracked files\n\n${untracked}`);
+    if (!sections.length) return '';
+    return trimBytes(sections.join('\n\n'), maxBytes).text;
+  } catch (error) {
+    return `# git changes unavailable\n\n${error instanceof Error ? error.message : String(error)}\n`;
+  }
+}
+
+function writeLoopTestOutput(paths, result, commandText) {
+  fs.mkdirSync(paths.bridgeDir, { recursive: true, mode: 0o700 });
+  const content = [
+    '# Loop Test Output',
+    '',
+    `Updated: ${new Date().toISOString()}`,
+    `Command: ${commandText}`,
+    `Exit code: ${result.exitCode ?? 'null'}`,
+    result.signal ? `Signal: ${result.signal}` : '',
+    `Timed out: ${result.timedOut ? 'yes' : 'no'}`,
+    `Duration: ${result.durationMs} ms`,
+    '',
+    codeBlock('Stdout excerpt', result.stdout),
+    codeBlock('Stderr excerpt', result.stderr)
+  ].filter(Boolean).join('\n');
+  fs.writeFileSync(paths.testsPath, content, { mode: 0o600 });
+}
+
+function explicitReviewVerdict(text) {
+  for (const rawLine of String(text || '').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    const assignment = line.match(/^CODEXPRO_REVIEW\s*=\s*(PASS|FAIL)\b/i);
+    if (assignment) return assignment[1].toUpperCase();
+  }
+  return '';
+}
+
+function writeLoopReviewOutput(paths, result, commandText, verdict, nextPlanChanged) {
+  fs.mkdirSync(paths.bridgeDir, { recursive: true, mode: 0o700 });
+  const content = [
+    '# Loop Review',
+    '',
+    `Updated: ${new Date().toISOString()}`,
+    `Command: ${commandText}`,
+    `Verdict: ${verdict || 'unknown'}`,
+    `Next plan changed: ${nextPlanChanged ? 'yes' : 'no'}`,
+    `Exit code: ${result.exitCode ?? 'null'}`,
+    result.signal ? `Signal: ${result.signal}` : '',
+    `Timed out: ${result.timedOut ? 'yes' : 'no'}`,
+    `Duration: ${result.durationMs} ms`,
+    '',
+    codeBlock('Stdout excerpt', result.stdout),
+    codeBlock('Stderr excerpt', result.stderr)
+  ].filter(Boolean).join('\n');
+  fs.writeFileSync(paths.reviewPath, content, { mode: 0o600 });
+}
+
+async function runLoopCommand(commandInfo, root, timeoutMs, maxOutputBytes, label) {
+  if (!commandAvailableFromRoot(commandInfo.command, root)) {
+    throw new Error(`${label} command was not found: ${commandInfo.command}`);
+  }
+  statusLine('wait', `Running ${label.toLowerCase()}: ${commandDisplay(commandInfo)}`);
+  return runProcessCaptured(commandInfo.command, commandInfo.args, {
+    cwd: root,
+    timeoutMs,
+    maxOutputBytes
+  });
+}
+
+function assertLoopCommandAvailable(commandInfo, root, label) {
+  if (!commandAvailableFromRoot(commandInfo.command, root)) {
+    throw new Error(`${label} command was not found before starting loop-handoff: ${commandInfo.command}`);
+  }
+}
+
+function preflightLoopCommands(request, reviewCommand, testCommand) {
+  assertLoopCommandAvailable(request.commandInfo, request.root, 'Executor');
+  assertLoopCommandAvailable(reviewCommand, request.root, 'Review');
+  if (testCommand) assertLoopCommandAvailable(testCommand, request.root, 'Test');
+}
+
+async function confirmLoopHandoff(args, root) {
+  if (args.yes || args.noConfirm || args.dryRun) return true;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('Use --yes to start loop-handoff in non-interactive shells, or use --dry-run to preview.');
+  }
+  printBox('Confirm handoff loop', [
+    labelValue('Workspace', root),
+    labelValue('Agent', args.agent ?? 'opencode'),
+    ...(args.model ? [labelValue('Model', args.model)] : []),
+    labelValue('Max iters', args.maxIters ?? '3'),
+    labelValue('Reviewer', args.reviewCommand ?? ''),
+    'This runs local executor and reviewer commands in a bounded loop. It does not automate ChatGPT or any browser session.'
+  ]);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await ask(rl, 'Start local execute/review loop?', 'no');
+    return ['y', 'yes'].includes(answer.trim().toLowerCase());
+  } finally {
+    rl.close();
+  }
+}
+
+async function confirmLoopContinuation(args, root, iteration, planPath) {
+  if (!args.requireHumanConfirmation) return true;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('--require-human-confirmation needs an interactive terminal before running follow-up plans.');
+  }
+  printBox('Confirm follow-up plan', [
+    labelValue('Workspace', root),
+    labelValue('Iteration', String(iteration)),
+    labelValue('Plan', path.relative(root, planPath)),
+    'The reviewer wrote or kept a follow-up plan. Review it before continuing.'
+  ]);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await ask(rl, 'Run the next local executor iteration?', 'no');
+    return ['y', 'yes'].includes(answer.trim().toLowerCase());
+  } finally {
+    rl.close();
+  }
+}
+
+function printLoopDryRun(request, reviewCommand, testCommand, maxIters) {
+  printBox('CodexPro loop-handoff dry run', [
+    labelValue('Workspace', request.root),
+    labelValue('Plan', path.relative(request.root, request.planPath)),
+    labelValue('Agent', request.commandInfo.agent),
+    ...(request.commandInfo.model ? [labelValue('Model', request.commandInfo.model)] : []),
+    labelValue('Max iters', String(maxIters)),
+    labelValue('Executor', request.commandText),
+    ...(testCommand ? [labelValue('Tests', commandDisplay(testCommand))] : []),
+    labelValue('Reviewer', commandDisplay(reviewCommand)),
+    'No command was executed and no .ai-bridge result files were changed.'
+  ]);
+}
+
+function writeLoopState(paths, state) {
+  fs.mkdirSync(paths.bridgeDir, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(paths.statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function runLoopHandoff(argv) {
+  const args = parseArgs(argv);
+  if (args.help) {
+    usage();
+    return;
+  }
+
+  const root = realDir(args.root ?? process.env.CODEXPRO_ROOT ?? process.cwd());
+  const contextDir = contextDirFromArgs(args);
+  const paths = loopArtifactPaths(root, contextDir);
+  const maxIters = numberOption(args.maxIters ?? args.maxIterations, 3, 1, 25);
+  const maxReadBytes = handoffMaxReadBytes();
+  const maxOutputBytes = numberOption(args.maxOutputBytes ?? process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000);
+  const reviewTimeoutMs = numberOption(args.reviewTimeoutMs, 600_000, 1_000, 24 * 60 * 60_000);
+  const testTimeoutMs = numberOption(args.testTimeoutMs, 600_000, 1_000, 24 * 60 * 60_000);
+
+  if (args.requireCleanGitStart) assertCleanGitStart(root, contextDir);
+
+  let request = loadHandoffExecution({ ...args, root, contextDir });
+  const reviewCommand = buildReviewerCommand(args, root, contextDir, 1, paths);
+  const testCommand = buildTestCommand(args, root, contextDir, 1, paths);
+
+  if (args.dryRun) {
+    printLoopDryRun(request, reviewCommand, testCommand, maxIters);
+    return;
+  }
+
+  preflightLoopCommands(request, reviewCommand, testCommand);
+
+  const approved = await confirmLoopHandoff(args, root);
+  if (!approved) {
+    statusLine('warn', 'Loop cancelled.');
+    return;
+  }
+
+  printBox('CodexPro loop-handoff', [
+    labelValue('Workspace', root),
+    labelValue('Plan', path.relative(root, paths.planPath)),
+    labelValue('Agent', request.commandInfo.agent),
+    ...(request.commandInfo.model ? [labelValue('Model', request.commandInfo.model)] : []),
+    labelValue('Max iters', String(maxIters)),
+    labelValue('Reviewer', commandDisplay(reviewCommand)),
+    ...(testCommand ? [labelValue('Tests', commandDisplay(testCommand))] : []),
+    'Mode: local execute/review loop. No ChatGPT or browser session is automated.'
+  ]);
+
+  let previousChangeFingerprint = '';
+  let finalVerdict = 'FAIL';
+  let stopReason = 'max_iters';
+
+  for (let iteration = 1; iteration <= maxIters; iteration += 1) {
+    if (iteration > 1) {
+      const continueLoop = await confirmLoopContinuation(args, root, iteration, paths.planPath);
+      if (!continueLoop) {
+        stopReason = 'human_cancelled';
+        break;
+      }
+    }
+
+    request = loadHandoffExecution({ ...args, root, contextDir });
+    const currentPlanHash = planHash(request.planText);
+    if (isScaffoldedHandoffPlan(request.planText)) {
+      stopReason = 'scaffolded_plan';
+      statusLine('warn', 'Stopping because current-plan.md is still the empty scaffold.');
+      break;
+    }
+
+    appendBridgeLog(root, contextDir, {
+      event: 'loop_handoff_iteration_started',
+      iteration,
+      plan_hash: currentPlanHash,
+      agent: request.commandInfo.agent,
+      model: request.commandInfo.model || undefined
+    });
+
+    const beforeExecutionFingerprint = changeFingerprintExcludingContext(root, contextDir);
+    const execution = await executeHandoffRequest(request, { ...args, yes: true }, { skipConfirmation: true });
+    const diffText = readGitDiffExcludingContext(root, contextDir, maxOutputBytes);
+    fs.writeFileSync(paths.diffPath, diffText || '', { mode: 0o600 });
+    const currentChangeFingerprint = changeFingerprintExcludingContext(root, contextDir);
+    const changedThisIteration = currentChangeFingerprint !== beforeExecutionFingerprint;
+
+    if (args.stopIfNoFilesChanged && !changedThisIteration) {
+      finalVerdict = 'FAIL';
+      stopReason = 'no_files_changed';
+      statusLine('warn', 'Stopping because the executor produced no new git changes.');
+      break;
+    }
+    if (args.stopIfSameDiff && previousChangeFingerprint && currentChangeFingerprint === previousChangeFingerprint) {
+      finalVerdict = 'FAIL';
+      stopReason = 'same_diff';
+      statusLine('warn', 'Stopping because the executor repeated the previous diff.');
+      break;
+    }
+    previousChangeFingerprint = currentChangeFingerprint;
+
+    const iterationTestCommand = buildTestCommand(args, root, contextDir, iteration, paths);
+    let testResult = null;
+    if (iterationTestCommand) {
+      testResult = await runLoopCommand(iterationTestCommand, root, testTimeoutMs, maxOutputBytes, 'Test');
+      writeLoopTestOutput(paths, testResult, commandDisplay(iterationTestCommand));
+      statusLine(testResult.exitCode === 0 ? 'ok' : 'warn', `Tests exited with code ${testResult.exitCode ?? 'null'}${testResult.signal ? ` signal=${testResult.signal}` : ''}`);
+    }
+
+    const iterationReviewCommand = buildReviewerCommand(args, root, contextDir, iteration, paths);
+    const beforeReviewPlanExists = fs.existsSync(paths.planPath);
+    const beforeReviewPlan = beforeReviewPlanExists ? readTextFileBounded(paths.planPath, maxReadBytes) : '';
+    const reviewResult = await runLoopCommand(iterationReviewCommand, root, reviewTimeoutMs, maxOutputBytes, 'Review');
+    const afterReviewPlanExists = fs.existsSync(paths.planPath);
+    const afterReviewPlan = afterReviewPlanExists ? readTextFileBounded(paths.planPath, maxReadBytes) : '';
+    const planDeletedByReview = beforeReviewPlanExists && !afterReviewPlanExists;
+    const nextPlanChanged = planDeletedByReview || (afterReviewPlanExists && planHash(afterReviewPlan) !== planHash(beforeReviewPlan));
+    const hasUsableFollowupPlan = afterReviewPlanExists && afterReviewPlan.trim() && !isScaffoldedHandoffPlan(afterReviewPlan);
+    let verdict = explicitReviewVerdict(`${reviewResult.stdout}\n${reviewResult.stderr}`);
+    if (!verdict && args.allowImplicitReviewVerdict && nextPlanChanged && reviewResult.exitCode === 0) verdict = 'FAIL';
+    if (!verdict && args.allowImplicitReviewVerdict && afterReviewPlanExists && reviewResult.exitCode === 0 && execution.result?.exitCode === 0 && (!testResult || testResult.exitCode === 0)) verdict = 'PASS';
+    writeLoopReviewOutput(paths, reviewResult, commandDisplay(iterationReviewCommand), verdict, nextPlanChanged);
+    let acceptedVerdict = verdict;
+    let rejectedPassReason = '';
+    if (verdict === 'PASS' && reviewResult.exitCode !== 0) {
+      acceptedVerdict = 'FAIL';
+      rejectedPassReason = 'reviewer_failed';
+    } else if (verdict === 'PASS' && !args.allowReviewPassOnFailure && execution.result?.exitCode !== 0) {
+      acceptedVerdict = 'FAIL';
+      rejectedPassReason = 'executor_failed';
+    } else if (verdict === 'PASS' && !args.allowReviewPassOnFailure && testResult && testResult.exitCode !== 0) {
+      acceptedVerdict = 'FAIL';
+      rejectedPassReason = 'tests_failed';
+    }
+
+    appendBridgeLog(root, contextDir, {
+      event: 'loop_handoff_iteration_finished',
+      iteration,
+      plan_hash: currentPlanHash,
+      agent: request.commandInfo.agent,
+      model: request.commandInfo.model || undefined,
+      executor_exit_code: execution.result?.exitCode ?? null,
+      test_exit_code: testResult?.exitCode ?? null,
+      reviewer_exit_code: reviewResult.exitCode,
+      reviewer_verdict: verdict,
+      verdict: acceptedVerdict,
+      rejected_pass_reason: rejectedPassReason || undefined,
+      next_plan_changed: nextPlanChanged,
+      followup_plan_exists: afterReviewPlanExists,
+      has_usable_followup_plan: Boolean(hasUsableFollowupPlan),
+      changed_this_iteration: changedThisIteration,
+      status_path: path.posix.join(contextDir, 'agent-status.md'),
+      diff_path: path.posix.join(contextDir, 'implementation-diff.patch'),
+      tests_path: iterationTestCommand ? path.posix.join(contextDir, 'loop-tests.txt') : undefined,
+      review_path: path.posix.join(contextDir, 'loop-review.md')
+    });
+    writeLoopState(paths, {
+      updatedAt: new Date().toISOString(),
+      iteration,
+      maxIters,
+      reviewerVerdict: verdict,
+      verdict: acceptedVerdict,
+      rejectedPassReason: rejectedPassReason || undefined,
+      planHash: currentPlanHash,
+      nextPlanChanged,
+      followupPlanExists: afterReviewPlanExists,
+      hasUsableFollowupPlan: Boolean(hasUsableFollowupPlan),
+      changedThisIteration,
+      executorExitCode: execution.result?.exitCode ?? null,
+      reviewerExitCode: reviewResult.exitCode
+    });
+
+    if (acceptedVerdict === 'PASS') {
+      finalVerdict = 'PASS';
+      stopReason = 'pass';
+      statusLine('ok', `Reviewer passed on iteration ${iteration}.`);
+      break;
+    }
+
+    if (rejectedPassReason) {
+      if (rejectedPassReason === 'reviewer_failed') {
+        finalVerdict = 'FAIL';
+        stopReason = 'reviewer_error';
+        statusLine('warn', `Reviewer returned PASS, but reviewer process exited with code ${reviewResult.exitCode ?? 'null'}.`);
+        break;
+      }
+      if (rejectedPassReason === 'executor_failed') {
+        finalVerdict = 'FAIL';
+        stopReason = 'executor_failed';
+        statusLine('warn', `Reviewer returned PASS, but executor exited with code ${execution.result?.exitCode ?? 'null'}.`);
+        break;
+      }
+      finalVerdict = 'FAIL';
+      stopReason = 'tests_failed';
+      statusLine('warn', `Reviewer returned PASS, but tests exited with code ${testResult?.exitCode ?? 'null'}.`);
+      break;
+    }
+
+    if (acceptedVerdict !== 'FAIL') {
+      finalVerdict = 'FAIL';
+      stopReason = reviewResult.exitCode === 0 ? 'unknown_verdict' : 'reviewer_error';
+      statusLine('warn', `Stopping because reviewer did not return a usable verdict. Exit code: ${reviewResult.exitCode ?? 'null'}`);
+      break;
+    }
+
+    if (reviewResult.exitCode !== 0) {
+      finalVerdict = 'FAIL';
+      stopReason = 'reviewer_error';
+      statusLine('warn', `Stopping because reviewer exited with code ${reviewResult.exitCode ?? 'null'}.`);
+      break;
+    }
+
+    if (!nextPlanChanged || !hasUsableFollowupPlan) {
+      finalVerdict = 'FAIL';
+      stopReason = 'no_followup_plan';
+      statusLine('warn', 'Reviewer returned FAIL but did not update current-plan.md.');
+      break;
+    }
+
+    statusLine('wait', `Reviewer requested another iteration (${iteration}/${maxIters}).`);
+  }
+
+  appendBridgeLog(root, contextDir, {
+    event: 'loop_handoff_finished',
+    verdict: finalVerdict,
+    stop_reason: stopReason
+  });
+  statusLine(finalVerdict === 'PASS' ? 'ok' : 'warn', `Loop finished: ${finalVerdict} (${stopReason}).`);
+  console.log(`Status: ${path.relative(root, paths.statusPath)}`);
+  console.log(`Diff:   ${path.relative(root, paths.diffPath)}`);
+  console.log(`Review: ${path.relative(root, paths.reviewPath)}`);
+  console.log(`Log:    ${path.relative(root, paths.logPath)}`);
+  if (finalVerdict !== 'PASS') process.exitCode = 1;
 }
 
 function createConnectorDetails(endpoint, token, localBase = '') {
@@ -2472,6 +3134,10 @@ async function main() {
   }
   if (subcommand === 'watch-handoff' || subcommand === 'watch') {
     await runWatchHandoff(argv.slice(1));
+    return;
+  }
+  if (subcommand === 'loop-handoff' || subcommand === 'loop') {
+    await runLoopHandoff(argv.slice(1));
     return;
   }
   if (subcommand === 'pro-bundle' || subcommand === 'bundle') {

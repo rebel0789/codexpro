@@ -214,6 +214,7 @@ Local-only companion command:
 
 - `codexpro execute-handoff` — run a previously written `.ai-bridge/current-plan.md` through a local agent, then collect status, logs, and git diff. This is intentionally a CLI command, not a remote MCP tool.
 - `codexpro watch-handoff` — watch `.ai-bridge/current-plan.md` locally and run a new plan through a configured agent when its content hash changes. This is also CLI-only and is not exposed as a remote MCP tool.
+- `codexpro loop-handoff` — run a bounded local execute/review loop where a user-provided reviewer command can pass or rewrite `.ai-bridge/current-plan.md` for another local executor iteration.
 
 The watcher is the safer way to automate handoff execution from ChatGPT Web. ChatGPT writes the plan through `handoff_to_agent`; the user-started local watcher notices the new plan and runs Pi, OpenCode, Codex, or a restricted custom command from the terminal:
 
@@ -248,6 +249,47 @@ The watcher writes the same review files as `execute-handoff`:
 .ai-bridge/implementation-diff.patch
 .ai-bridge/execution-log.jsonl
 ```
+
+For autonomous local handoff loops, use `loop-handoff` with an explicit reviewer command:
+
+```bash
+codexpro loop-handoff \
+  --agent opencode \
+  --model provider/model \
+  --review-command "node ./reviewer.js --status {{status_file}} --diff {{diff_file}} --log {{log_file}} --plan-file {{plan_file}}" \
+  --max-iters 3 \
+  --stop-if-no-files-changed \
+  --stop-if-same-diff \
+  --yes
+```
+
+The reviewer command runs locally after each executor iteration. It must inspect the generated files, then either print `CODEXPRO_REVIEW=PASS` or print `CODEXPRO_REVIEW=FAIL` and update `.ai-bridge/current-plan.md` with the next fix plan. CodexPro stops on pass, max iterations, missing verdict, no usable follow-up plan, repeated diff, no new executor changes, reviewer error, executor/test failure, or human cancellation. Loop change detection compares each iteration against a pre-execution baseline and counts unstaged diffs, staged diffs, and bounded untracked file fingerprints outside `.ai-bridge`.
+
+Useful loop placeholders:
+
+```text
+{{plan_file}}    .ai-bridge/current-plan.md
+{{status_file}}  .ai-bridge/agent-status.md
+{{diff_file}}    .ai-bridge/implementation-diff.patch
+{{log_file}}     .ai-bridge/execution-log.jsonl
+{{tests_file}}   .ai-bridge/loop-tests.txt
+{{review_file}}  .ai-bridge/loop-review.md
+{{root}}         workspace root
+{{iteration}}    current loop iteration
+```
+
+Optional safety flags:
+
+```text
+--dry-run                         preview executor, test, and reviewer commands
+--run-tests "npm test"            run a local verification command before review
+--require-clean-git-start         require no non-.ai-bridge git changes before starting
+--require-human-confirmation      ask before running each reviewer-generated follow-up plan
+--allow-implicit-review-verdict   infer verdicts from reviewer exit code and plan changes
+--allow-review-pass-on-failure    let reviewer PASS override failed executor/tests
+```
+
+`loop-handoff` does not resume ChatGPT Web, drive a browser, approve terminal prompts, proxy models, or bypass product limits. It is a local terminal-owned loop over explicit repo files and local commands.
 
 ## Visual ChatGPT cards
 
@@ -616,6 +658,19 @@ By default, `execute-handoff` asks for local confirmation before running. Use `-
 ```
 
 Then let ChatGPT review those files through `read_handoff` or `codex_context`.
+
+To keep the review cycle local after the first handoff, provide a reviewer command to `loop-handoff`:
+
+```bash
+codexpro loop-handoff \
+  --agent opencode \
+  --model provider/cheap-model \
+  --review-command "node ./reviewer.js --status {{status_file}} --diff {{diff_file}} --plan-file {{plan_file}}" \
+  --max-iters 3 \
+  --yes
+```
+
+The reviewer command is responsible for deciding the next step. Print `CODEXPRO_REVIEW=PASS` to stop successfully, or print `CODEXPRO_REVIEW=FAIL` and update `.ai-bridge/current-plan.md` with the next local fix plan. Add `--run-tests "npm test"` to capture test output in `.ai-bridge/loop-tests.txt` before the reviewer runs. By default, CodexPro requires an explicit verdict and rejects a reviewer `PASS` if the executor or test command failed.
 
 Manual fallback:
 
