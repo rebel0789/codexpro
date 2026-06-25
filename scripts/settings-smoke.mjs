@@ -127,6 +127,8 @@ const saved = run([
   'full',
   '--widget-domain',
   'https://widgets.codexpro.test',
+  '--tool-cards',
+  'on',
   '--token',
   'codexpro-settings-token'
 ], env);
@@ -135,7 +137,7 @@ if (!saved.includes('Saved workspace settings')) {
 }
 
 const shown = run(['settings', 'show', '--root', root], env);
-for (const expected of ['Tunnel', 'ngrok', 'codexpro-test.ngrok-free.app', '19087', 'Bash transcript', 'full', '<saved>']) {
+for (const expected of ['Tunnel', 'ngrok', 'codexpro-test.ngrok-free.app', '19087', 'Tool cards', 'on', 'Bash transcript', 'full', '<saved>']) {
   if (!shown.includes(expected)) {
     throw new Error(`settings show missing ${expected}\n${shown}`);
   }
@@ -144,7 +146,7 @@ if (shown.includes('codexpro-settings-token')) {
   throw new Error(`settings show leaked token\n${shown}`);
 }
 const profile = await readProfile(root, home);
-if (profile.toolMode !== 'full' || profile.bashTranscript !== 'full' || profile.widgetDomain !== 'https://widgets.codexpro.test') {
+if (profile.toolMode !== 'full' || profile.toolCards !== true || profile.bashTranscript !== 'full' || profile.widgetDomain !== 'https://widgets.codexpro.test') {
   throw new Error(`settings profile did not persist tool/widget options: ${JSON.stringify(profile)}`);
 }
 
@@ -218,15 +220,21 @@ if (guardedProfile.bashSession !== 'guarded-main' || guardedProfile.requireBashS
 
 const runtimePort = await getFreePort();
 const runtimePath = await runtimeStatusPath(runtimeRoot, home);
-await withStartedCodexPro([
+run([
+  'settings',
+  'set',
   '--root',
   runtimeRoot,
-  '--port',
-  String(runtimePort),
   '--tunnel',
   'none',
+  '--port',
+  String(runtimePort),
   '--tool-cards',
   'on'
+], env);
+await withStartedCodexPro([
+  '--root',
+  runtimeRoot
 ], env, async () => {
   const runtime = await waitForJson(runtimePath, (data) => data.toolCards === true, 'tool-cards runtime status');
   if (runtime.toolCards !== true) {

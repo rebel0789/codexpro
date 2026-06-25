@@ -575,6 +575,11 @@ function optionBool(args, profile, field, envNames = [], fallback = false) {
   return fallback;
 }
 
+function toolCardsProfileEntry(args, profile = {}) {
+  const hasInput = args.toolCards !== undefined || profile.toolCards !== undefined || process.env.CODEXPRO_TOOL_CARDS !== undefined;
+  return hasInput ? { toolCards: optionBool(args, profile, 'toolCards', ['CODEXPRO_TOOL_CARDS'], false) } : {};
+}
+
 function validateBashSession(value) {
   if (!value) return '';
   const trimmed = String(value).trim();
@@ -2595,6 +2600,7 @@ function profileFromPreference(root, args, profile, preference) {
     ...(write ? { write } : {}),
     ...(toolMode ? { toolMode } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
+    ...toolCardsProfileEntry(args, profile),
     ...(args.noInstallCloudflared ? { noInstallCloudflared: true } : {}),
     root
   };
@@ -2717,6 +2723,7 @@ async function runSetupWizard(argv) {
     const write = optionalWriteOption(defaults, profile, mode);
     const toolMode = optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
     const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
+    const toolCardsEntry = toolCardsProfileEntry(defaults, profile);
     if (bash) args.push('--bash', bash);
     if (bashTranscript !== 'compact') args.push('--bash-transcript', bashTranscript);
     if (codexSessions !== 'off') args.push('--codex-sessions', codexSessions);
@@ -2727,6 +2734,7 @@ async function runSetupWizard(argv) {
     if (write) args.push('--write', write);
     if (toolMode) args.push('--tool-mode', toolMode);
     if (widgetDomain) args.push('--widget-domain', widgetDomain);
+    if (toolCardsEntry.toolCards) args.push('--tool-cards', 'on');
     if (defaults.noInstallCloudflared) args.push('--no-install-cloudflared');
     if (defaults.openChatgpt) args.push('--open-chatgpt');
     if (defaults.noCopyUrl) args.push('--no-copy-url');
@@ -2806,6 +2814,7 @@ async function runSetupWizard(argv) {
         ...(write ? { write } : {}),
         ...(toolMode ? { toolMode } : {}),
         ...(widgetDomain ? { widgetDomain } : {}),
+        ...toolCardsEntry,
         ...(defaults.noInstallCloudflared ? { noInstallCloudflared: true } : {})
       });
       statusLine('ok', `Saved workspace profile: ${savedPath}`);
@@ -2851,6 +2860,7 @@ function printProfile(root, profile) {
     ...(safe.bash ? [labelValue('Bash', safe.bash)] : []),
     ...(safe.write ? [labelValue('Write', safe.write)] : []),
     ...(safe.toolMode ? [labelValue('Tool mode', safe.toolMode)] : []),
+    ...(safe.toolCards !== undefined ? [labelValue('Tool cards', safe.toolCards ? 'on' : 'off')] : []),
     labelValue('Bash transcript', safe.bashTranscript ?? 'compact'),
     labelValue('Codex sessions', safe.codexSessions ?? 'off'),
     ...(safe.codexDir ? [labelValue('Codex dir', safe.codexDir)] : []),
@@ -2923,6 +2933,7 @@ function saveSettingsFromArgs(root, args, profile) {
     ...(mode !== 'agent' || args.write !== undefined || profile.write ? { write } : {}),
     ...(toolMode ? { toolMode } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
+    ...toolCardsProfileEntry(args, profile),
     ...(args.noInstallCloudflared ?? profile.noInstallCloudflared ? { noInstallCloudflared: true } : {})
   });
   statusLine('ok', `Saved workspace settings: ${savedPath}`);
