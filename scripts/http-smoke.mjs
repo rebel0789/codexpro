@@ -369,10 +369,35 @@ try {
     if (result.structuredContent.tool_mode !== 'full') {
       throw new Error(`open_current_workspace did not expose tool_mode: ${result.structuredContent.tool_mode}`);
     }
-    if (!result.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'http-smoke-skill')) {
-      throw new Error('HTTP open_current_workspace did not discover workspace skill inventory');
+    if (result.structuredContent.skill_inventory?.length) {
+      throw new Error('HTTP open_current_workspace discovered skills by default');
+    }
+    const withSkills = await callTool(client, 'open_current_workspace', {
+      include_tree: false,
+      include_skills: true
+    });
+    if (!withSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'http-smoke-skill')) {
+      throw new Error('HTTP open_current_workspace did not discover workspace skill inventory when requested');
     }
     return result.structuredContent.workspace_id;
+  });
+
+  await withClient(mcpUrl, async (client) => {
+    const result = await callTool(client, 'open_workspace', {
+      root,
+      include_tree: false
+    });
+    if (result.structuredContent.skill_inventory?.length) {
+      throw new Error('HTTP open_workspace discovered skills by default');
+    }
+    const withSkills = await callTool(client, 'open_workspace', {
+      root,
+      include_tree: false,
+      include_skills: true
+    });
+    if (!withSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'http-smoke-skill')) {
+      throw new Error('HTTP open_workspace did not discover workspace skill inventory when requested');
+    }
   });
 
   await withClient(mcpUrl, async (client) => {

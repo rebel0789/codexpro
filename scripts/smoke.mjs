@@ -218,8 +218,12 @@ const realTmp = await fs.realpath(tmp);
 if (current.structuredContent.root !== realTmp) throw new Error(`open_current_workspace opened ${current.structuredContent.root}, expected ${realTmp}`);
 if (current.structuredContent.codexpro_tool !== 'open_current_workspace') throw new Error('tool result was not tagged for widget rendering');
 if (current.structuredContent.tool_mode !== 'full') throw new Error(`open_current_workspace did not expose tool_mode: ${current.structuredContent.tool_mode}`);
-if (!current.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'smoke-skill')) {
-  throw new Error('open_current_workspace did not discover workspace skill inventory');
+if (current.structuredContent.skill_inventory?.length) {
+  throw new Error('open_current_workspace discovered skills by default');
+}
+const currentWithSkills = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false, include_skills: true } });
+if (!currentWithSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'smoke-skill')) {
+  throw new Error('open_current_workspace did not discover workspace skill inventory when requested');
 }
 const selfTest = await client.request('tools/call', {
   name: 'codexpro_self_test',

@@ -8,7 +8,7 @@ Current testing shows free and Go accounts do not expose the app flow needed for
 
 CodexPro does not unlock Developer Mode, unlock models, bypass account limits, or provide account access. It connects to the ChatGPT app surface your account already has.
 
-Account access and model tool support are separate. A Plus or Pro account can have Apps / Developer Mode, while a specific model surface may still be unable to call connectors or MCP tools directly. Use the Pro context fallback for those sessions.
+Account access and model tool support are separate. A Plus or Pro account can have Apps / Developer Mode, while a specific model surface may still be unable to call connectors or MCP tools directly. OpenAI currently documents GPT-5.5 Pro as not supporting Apps, so use another tool-capable ChatGPT surface or the Pro context fallback for those sessions.
 
 ## How is CodexPro different from generic workspace bridges?
 
@@ -95,7 +95,7 @@ The useful part is that Codex and ChatGPT are different product surfaces. If one
 
 Only if your ChatGPT account already exposes that exact model, or a similar stronger model, in the ChatGPT web product surface you are using, and that model surface can call Developer Mode apps.
 
-Some stronger planning-model surfaces may not be able to call the CodexPro connector directly. CodexPro does not provide, proxy, resell, or unlock models. It gives compatible ChatGPT sessions local repo tools.
+OpenAI's current GPT-5.5 help page says Apps are not available with GPT-5.5 Pro. If that is the selected surface, CodexPro cannot make it call MCP tools. CodexPro does not provide, proxy, resell, or unlock models. It gives compatible ChatGPT sessions local repo tools.
 
 For models that cannot call tools, generate a repo context bundle instead:
 

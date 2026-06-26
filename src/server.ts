@@ -1022,8 +1022,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {
         include_tree: z.boolean().optional().describe("Include a compact file tree. Default: false for speed."),
         max_depth: z.number().int().min(1).max(8).optional().describe("Tree depth when include_tree=true. Default: 2."),
-        include_skills: z.boolean().optional().describe("Discover workspace, user, and plugin skills by name/description. Default: true."),
-        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills when include_skills=true. Default: true.")
+        include_skills: z.boolean().optional().describe("Discover skills by name/description. Default: false for speed."),
+        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills when include_skills=true. Default: false.")
       },
       annotations: SESSION_READ_ANNOTATIONS,
       _meta: {
@@ -1037,8 +1037,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: parseBool(args.include_tree, false),
         maxDepth: limitInt(args.max_depth, 2, 1, 8),
-        includeSkills: parseBool(args.include_skills, true),
-        includeGlobalSkills: parseBool(args.include_global_skills, true),
+        includeSkills: parseBool(args.include_skills, false),
+        includeGlobalSkills: parseBool(args.include_global_skills, false),
         bootstrapContext: false
       });
       return textResult(summary.text, {
@@ -1065,15 +1065,15 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     {
       title: "Open Workspace",
       description:
-        "Open a local project directory as a CodexPro workspace. Returns a workspace_id plus git status, AGENTS.md, skills, and a compact file tree.",
+        "Open a local project directory as a CodexPro workspace. Returns a workspace_id plus git status, AGENTS.md, and a compact file tree.",
       inputSchema: {
         root: z.string().optional().describe("Project directory to open. Omit to use CODEXPRO_ROOT/current working directory. Supports ~/ paths."),
         path: z.string().optional().describe("Alias for root. Useful for clients that naturally send path instead of root."),
         include_tree: z.boolean().optional().describe("Include a compact file tree. Default: true."),
         max_depth: z.number().int().min(1).max(8).optional().describe("Tree depth. Default: 3."),
         max_files: z.number().int().min(1).max(3000).optional().describe("Alias for maximum tree entries. Default: 500."),
-        include_skills: z.boolean().optional().describe("Discover workspace, user, and plugin skills by name/description. Default: true."),
-        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills when include_skills=true. Default: true."),
+        include_skills: z.boolean().optional().describe("Discover skills by name/description. Default: false for speed."),
+        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills when include_skills=true. Default: false."),
         bootstrap_context: z.boolean().optional().describe("Deprecated and ignored. Use handoff_to_agent to create .ai-bridge files.")
       },
       annotations: SESSION_READ_ANNOTATIONS,
@@ -1092,8 +1092,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         includeTree: args.include_tree !== false,
         maxDepth: limitInt(args.max_depth, 3, 1, 8),
         maxEntries: limitInt(args.max_files, 500, 1, 3000),
-        includeSkills: parseBool(args.include_skills, true),
-        includeGlobalSkills: parseBool(args.include_global_skills, true),
+        includeSkills: parseBool(args.include_skills, false),
+        includeGlobalSkills: parseBool(args.include_global_skills, false),
         bootstrapContext: false
       });
       return textResult(summary.text, {
