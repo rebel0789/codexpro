@@ -43,7 +43,9 @@ async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: W
   if (!options.includeHidden) args.push("--hidden", "-g", "!.*", "-g", "!**/.*");
   for (const glob of config.blockedGlobs) args.push("-g", `!${glob}`);
   if (options.glob) args.push("-g", options.glob);
-  args.push(options.query, target.absPath);
+  // Pass the query via -e so patterns beginning with "-" (e.g. "->", "--flag")
+  // are treated as the search term instead of ripgrep options.
+  args.push("-e", options.query, "--", target.absPath);
 
   return new Promise((resolve, reject) => {
     const child = spawn("rg", args, { cwd: workspace.root, env: { ...process.env, NO_COLOR: "1" } });
