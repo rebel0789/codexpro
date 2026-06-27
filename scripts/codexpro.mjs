@@ -899,6 +899,14 @@ function spawnLogged(name, command, args, options = {}) {
 function waitForCloudflareUrl(child, timeoutMs = 45000) {
   const re = /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/g;
   let buffer = '';
+  const isQuickTunnelUrl = (value) => {
+    try {
+      const url = new URL(value);
+      return url.hostname !== 'api.trycloudflare.com';
+    } catch {
+      return false;
+    }
+  };
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Timed out waiting for cloudflared public URL.')), timeoutMs);
     timer.unref();
@@ -906,9 +914,10 @@ function waitForCloudflareUrl(child, timeoutMs = 45000) {
       const text = String(chunk);
       buffer += text;
       const match = buffer.match(re);
-      if (match?.[0]) {
+      const publicUrl = match?.find(isQuickTunnelUrl);
+      if (publicUrl) {
         clearTimeout(timer);
-        resolve(match[0]);
+        resolve(publicUrl);
       }
     };
     child.stdout.on('data', onData);
@@ -918,6 +927,55 @@ function waitForCloudflareUrl(child, timeoutMs = 45000) {
       reject(new Error(`cloudflared exited before a URL was found, code=${code}`));
     });
   });
+}
+
+function outboundProxyFromEnv(env = process.env) {
+  return env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy || env.HTTP_PROXY || env.http_proxy || '';
+}
+
+function requestQuickTunnelViaCurl(proxyUrl) {
+  const args = ['--silent', '--show-error', '--fail', '--max-time', '30'];
+  if (proxyUrl) args.push('--proxy', proxyUrl);
+  args.push('-X', 'POST', 'https://api.trycloudflare.com/tunnel');
+  const result = spawnSync('curl', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: false
+  });
+  if (result.status !== 0) {
+    throw new Error(`Failed to request Cloudflare quick tunnel via curl: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+  }
+
+  let body;
+  try {
+    body = JSON.parse(result.stdout);
+  } catch {
+    throw new Error('Cloudflare quick tunnel API returned invalid JSON.');
+  }
+
+  const tunnel = body?.result;
+  if (!body?.success || !tunnel?.id || !tunnel?.hostname || !tunnel?.account_tag || !tunnel?.secret) {
+    const errors = Array.isArray(body?.errors) && body.errors.length ? ` ${JSON.stringify(body.errors)}` : '';
+    throw new Error(`Cloudflare quick tunnel API did not return usable tunnel credentials.${errors}`);
+  }
+
+  return {
+    id: String(tunnel.id),
+    hostname: String(tunnel.hostname),
+    accountTag: String(tunnel.account_tag),
+    secret: String(tunnel.secret)
+  };
+}
+
+function writeQuickTunnelCredentials(tunnel) {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codexpro-cloudflare-quick-'));
+  const credentialsPath = path.join(tmpRoot, 'credentials.json');
+  fs.writeFileSync(credentialsPath, JSON.stringify({
+    AccountTag: tunnel.accountTag,
+    TunnelSecret: tunnel.secret,
+    TunnelID: tunnel.id
+  }, null, 2), { mode: 0o600 });
+  return { tmpRoot, credentialsPath };
 }
 
 function killProcess(child) {
@@ -2295,6 +2353,7 @@ function printConnectorBlock(endpoint, token, options = {}) {
   console.log(`  Connector  ${publicHttps ? 'public HTTPS' : 'local HTTP'}`);
   if (copied.ok) {
     console.log(`  URL        copied with ${copied.command}`);
+    console.log(`  Server URL ${serverUrl}`);
   } else if (shouldCopy) {
     console.log('  URL        copy failed; copy manually:');
     console.log(serverUrl);
@@ -3451,8 +3510,18 @@ async function main() {
 
   if (tunnel === 'cloudflare') {
     statusLine('wait', 'Opening Cloudflare quick tunnel');
-    cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase], { cwd: root, env: process.env, verbose: verboseLogs });
-    const publicBase = await waitForCloudflareUrl(cloudflared);
+    const proxyUrl = outboundProxyFromEnv(process.env);
+    let publicBase = '';
+    if (proxyUrl) {
+      const quickTunnel = requestQuickTunnelViaCurl(proxyUrl);
+      const { tmpRoot, credentialsPath } = writeQuickTunnelCredentials(quickTunnel);
+      cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase, '--credentials-file', credentialsPath, 'run', quickTunnel.id], { cwd: root, env: process.env, verbose: verboseLogs });
+      cloudflared.on('exit', () => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+      publicBase = `https://${quickTunnel.hostname}`;
+    } else {
+      cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase], { cwd: root, env: process.env, verbose: verboseLogs });
+      publicBase = await waitForCloudflareUrl(cloudflared);
+    }
     const details = printConnectorBlock(`${publicBase}/mcp`, token, {
       localBase,
       copyUrl: args.noCopyUrl ? false : true,
