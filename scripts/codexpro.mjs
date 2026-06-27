@@ -388,6 +388,49 @@ function commandExists(command) {
   return result.status === 0;
 }
 
+function commandPaths(command) {
+  if (process.platform === 'win32') {
+    const result = spawnSync('where', [command], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
+    if (result.status !== 0) return [];
+    return String(result.stdout)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+  const result = spawnSync('command', ['-v', command], { encoding: 'utf8', shell: true, stdio: ['ignore', 'pipe', 'ignore'] });
+  if (result.status !== 0) return [];
+  return String(result.stdout)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function isWindowsBatchFile(command) {
+  return process.platform === 'win32' && /\.(cmd|bat)$/i.test(command);
+}
+
+function isWindowsExecutableFile(command) {
+  return process.platform === 'win32' && /\.exe$/i.test(command);
+}
+
+function isWindowsCommandCandidate(command) {
+  return isWindowsExecutableFile(command) || isWindowsBatchFile(command);
+}
+
+function resolveCodexCommand() {
+  const explicit = String(process.env.CODEXPRO_CODEX_BIN ?? '').trim();
+  if (explicit) {
+    if (isPathLike(explicit)) return resolveExecutablePath(explicit);
+    const candidates = commandPaths(explicit);
+    if (process.platform !== 'win32') return candidates[0] || explicit;
+    return candidates.find(isWindowsCommandCandidate) || explicit;
+  }
+  if (process.platform !== 'win32') return 'codex';
+
+  const candidates = commandPaths('codex');
+  return candidates.find(isWindowsCommandCandidate) || 'codex';
+}
+
 function isPathLike(command) {
   return command.includes('/') || command.includes('\\') || command.startsWith('.');
 }
@@ -899,6 +942,14 @@ function spawnLogged(name, command, args, options = {}) {
 function waitForCloudflareUrl(child, timeoutMs = 45000) {
   const re = /https:\/\/[a-zA-Z0-9-]+\.trycloudflare\.com/g;
   let buffer = '';
+  const isQuickTunnelUrl = (value) => {
+    try {
+      const url = new URL(value);
+      return url.hostname !== 'api.trycloudflare.com';
+    } catch {
+      return false;
+    }
+  };
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Timed out waiting for cloudflared public URL.')), timeoutMs);
     timer.unref();
@@ -906,9 +957,10 @@ function waitForCloudflareUrl(child, timeoutMs = 45000) {
       const text = String(chunk);
       buffer += text;
       const match = buffer.match(re);
-      if (match?.[0]) {
+      const publicUrl = match?.find(isQuickTunnelUrl);
+      if (publicUrl) {
         clearTimeout(timer);
-        resolve(match[0]);
+        resolve(publicUrl);
       }
     };
     child.stdout.on('data', onData);
@@ -918,6 +970,55 @@ function waitForCloudflareUrl(child, timeoutMs = 45000) {
       reject(new Error(`cloudflared exited before a URL was found, code=${code}`));
     });
   });
+}
+
+function outboundProxyFromEnv(env = process.env) {
+  return env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy || env.HTTP_PROXY || env.http_proxy || '';
+}
+
+function requestQuickTunnelViaCurl(proxyUrl) {
+  const args = ['--silent', '--show-error', '--fail', '--max-time', '30'];
+  if (proxyUrl) args.push('--proxy', proxyUrl);
+  args.push('-X', 'POST', 'https://api.trycloudflare.com/tunnel');
+  const result = spawnSync('curl', args, {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: false
+  });
+  if (result.status !== 0) {
+    throw new Error(`Failed to request Cloudflare quick tunnel via curl: ${result.stderr || result.stdout || `exit ${result.status}`}`);
+  }
+
+  let body;
+  try {
+    body = JSON.parse(result.stdout);
+  } catch {
+    throw new Error('Cloudflare quick tunnel API returned invalid JSON.');
+  }
+
+  const tunnel = body?.result;
+  if (!body?.success || !tunnel?.id || !tunnel?.hostname || !tunnel?.account_tag || !tunnel?.secret) {
+    const errors = Array.isArray(body?.errors) && body.errors.length ? ` ${JSON.stringify(body.errors)}` : '';
+    throw new Error(`Cloudflare quick tunnel API did not return usable tunnel credentials.${errors}`);
+  }
+
+  return {
+    id: String(tunnel.id),
+    hostname: String(tunnel.hostname),
+    accountTag: String(tunnel.account_tag),
+    secret: String(tunnel.secret)
+  };
+}
+
+function writeQuickTunnelCredentials(tunnel) {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'codexpro-cloudflare-quick-'));
+  const credentialsPath = path.join(tmpRoot, 'credentials.json');
+  fs.writeFileSync(credentialsPath, JSON.stringify({
+    AccountTag: tunnel.accountTag,
+    TunnelSecret: tunnel.secret,
+    TunnelID: tunnel.id
+  }, null, 2), { mode: 0o600 });
+  return { tmpRoot, credentialsPath };
 }
 
 function killProcess(child) {
@@ -1166,12 +1267,42 @@ function buildExecutorCommand(args, root, planPath, planText) {
     };
   }
   if (agent === 'codex') {
+    const codexLastMessagePath = path.join(path.dirname(planPath), 'codex-last-message.md');
+    const relativePlanPath = path.relative(root, planPath) || planPath;
+    const codexPrompt = [
+      `Read the handoff plan at ${relativePlanPath} and execute it in this workspace.`,
+      'Keep changes scoped to that plan.',
+      'Do not modify .ai-bridge/current-plan.md.',
+      'When finished, summarize changed files and verification.'
+    ].join(' ');
     return {
       agent,
       model,
-      command: 'codex',
-      args: ['exec', ...(model ? ['--model', model] : []), planText],
-      displayArgs: ['exec', ...(model ? ['--model', model] : []), '<plan_text>'],
+      command: resolveCodexCommand(),
+      args: [
+        'exec',
+        '--ephemeral',
+        '--sandbox',
+        'workspace-write',
+        '-c',
+        'approval_policy="never"',
+        '--output-last-message',
+        codexLastMessagePath,
+        ...(model ? ['--model', model] : []),
+        codexPrompt
+      ],
+      displayArgs: [
+        'exec',
+        '--ephemeral',
+        '--sandbox',
+        'workspace-write',
+        '-c',
+        'approval_policy="never"',
+        '--output-last-message',
+        path.relative(root, codexLastMessagePath),
+        ...(model ? ['--model', model] : []),
+        `<read ${relativePlanPath}>`
+      ],
       custom: false
     };
   }
@@ -1185,16 +1316,34 @@ function executorCommandPreview(commandInfo) {
   return shellCommandPreview([commandInfo.command, ...(commandInfo.displayArgs ?? commandInfo.args)]);
 }
 
+function quoteWindowsCmdArg(value) {
+  const text = String(value).replace(/\r?\n/g, ' ');
+  if (!text) return '""';
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function processInvocation(command, args) {
+  if (!isWindowsBatchFile(command)) return { command, args };
+  const commandLine = ['call', quoteWindowsCmdArg(command), ...args.map(quoteWindowsCmdArg)].join(' ');
+  return {
+    command: process.env.ComSpec || 'cmd.exe',
+    args: ['/d', '/s', '/c', commandLine],
+    windowsVerbatimArguments: true
+  };
+}
+
 function runProcessCaptured(command, args, options) {
   const timeoutMs = options.timeoutMs;
   const maxOutputBytes = options.maxOutputBytes;
   const started = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(command, args, {
+    const invocation = processInvocation(command, args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
       env: { ...process.env, NO_COLOR: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
-      shell: false
+      shell: false,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments
     });
     let stdout = '';
     let stderr = '';
@@ -1262,11 +1411,27 @@ function readGitDiff(root, maxBytes) {
   return trimBytes(diff, maxBytes).text;
 }
 
+function readGitStatus(root, maxBytes) {
+  const result = spawnSync('git', ['status', '--short'], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: Math.max(maxBytes * 2, 1_000_000),
+    shell: false
+  });
+  if (result.status !== 0) {
+    const reason = result.stderr || result.stdout || `git status exited ${result.status}`;
+    return `# git status unavailable\n\n${redactForLog(reason).trim()}\n`;
+  }
+  const status = result.stdout || '';
+  if (!status.trim()) return '';
+  return trimBytes(status, maxBytes).text;
+}
+
 function codeBlock(label, value) {
   return `## ${label}\n\n\`\`\`text\n${String(value || '').replace(/```/g, '`\\`\\`') || '(empty)'}\n\`\`\`\n`;
 }
 
-function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText) {
+function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, gitStatusText) {
   const bridgeDir = resolveWorkspaceFile(root, contextDir);
   fs.mkdirSync(bridgeDir, { recursive: true, mode: 0o700 });
   const statusPath = path.join(bridgeDir, 'agent-status.md');
@@ -1287,6 +1452,8 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText) 
     `Diff path: ${path.posix.join(contextDir, 'implementation-diff.patch')}`,
     `Execution log: ${path.posix.join(contextDir, 'execution-log.jsonl')}`,
     '',
+    codeBlock('Git status excerpt', gitStatusText),
+    '',
     codeBlock('Stdout excerpt', result.stdout),
     codeBlock('Stderr excerpt', result.stderr)
   ].filter(Boolean).join('\n');
@@ -1304,6 +1471,7 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText) 
     duration_ms: result.durationMs,
     stdout_excerpt: result.stdout,
     stderr_excerpt: result.stderr,
+    git_status_excerpt: gitStatusText || undefined,
     diff_path: path.posix.join(contextDir, 'implementation-diff.patch'),
     status_path: path.posix.join(contextDir, 'agent-status.md')
   };
@@ -1388,7 +1556,8 @@ async function executeHandoffRequest(request, args, options = {}) {
     maxOutputBytes: request.maxOutputBytes
   });
   const diffText = readGitDiff(request.root, request.maxOutputBytes);
-  const outputs = writeExecutionOutputs(request.root, request.contextDir, request.commandInfo, result, diffText);
+  const gitStatusText = readGitStatus(request.root, request.maxOutputBytes);
+  const outputs = writeExecutionOutputs(request.root, request.contextDir, request.commandInfo, result, diffText, gitStatusText);
   statusLine(result.exitCode === 0 ? 'ok' : 'warn', `Agent exited with code ${result.exitCode ?? 'null'}${result.signal ? ` signal=${result.signal}` : ''}`);
   console.log(`Status: ${path.relative(request.root, outputs.statusPath)}`);
   console.log(`Diff:   ${path.relative(request.root, outputs.diffPath)}`);
@@ -2295,6 +2464,7 @@ function printConnectorBlock(endpoint, token, options = {}) {
   console.log(`  Connector  ${publicHttps ? 'public HTTPS' : 'local HTTP'}`);
   if (copied.ok) {
     console.log(`  URL        copied with ${copied.command}`);
+    console.log(`  Server URL ${serverUrl}`);
   } else if (shouldCopy) {
     console.log('  URL        copy failed; copy manually:');
     console.log(serverUrl);
@@ -3451,8 +3621,18 @@ async function main() {
 
   if (tunnel === 'cloudflare') {
     statusLine('wait', 'Opening Cloudflare quick tunnel');
-    cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase], { cwd: root, env: process.env, verbose: verboseLogs });
-    const publicBase = await waitForCloudflareUrl(cloudflared);
+    const proxyUrl = outboundProxyFromEnv(process.env);
+    let publicBase = '';
+    if (proxyUrl) {
+      const quickTunnel = requestQuickTunnelViaCurl(proxyUrl);
+      const { tmpRoot, credentialsPath } = writeQuickTunnelCredentials(quickTunnel);
+      cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase, '--credentials-file', credentialsPath, 'run', quickTunnel.id], { cwd: root, env: process.env, verbose: verboseLogs });
+      cloudflared.on('exit', () => fs.rmSync(tmpRoot, { recursive: true, force: true }));
+      publicBase = `https://${quickTunnel.hostname}`;
+    } else {
+      cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase], { cwd: root, env: process.env, verbose: verboseLogs });
+      publicBase = await waitForCloudflareUrl(cloudflared);
+    }
     const details = printConnectorBlock(`${publicBase}/mcp`, token, {
       localBase,
       copyUrl: args.noCopyUrl ? false : true,

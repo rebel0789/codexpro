@@ -96,7 +96,7 @@ CodexPro is not a rate-limit bypass, model proxy, hosted SaaS, or OS sandbox. It
 
 If one workflow is unavailable and another product surface you already have access to is still available, CodexPro lets you keep working against the same local repo without modifying or evading either product's limits.
 
-If your ChatGPT account exposes a stronger model in the web app, and that model/surface can call Developer Mode apps, CodexPro lets it work against your local repo through MCP. Some ChatGPT model surfaces may not be able to call connectors or MCP tools directly. CodexPro does not provide, proxy, resell, or unlock models; it gives compatible ChatGPT sessions local coding tools and repo context.
+If your ChatGPT account exposes a stronger model in the web app, and that model/surface can call Developer Mode apps, CodexPro lets it work against your local repo through MCP. Some ChatGPT model surfaces may not be able to call connectors or MCP tools directly. OpenAI's current GPT-5.5 help page says Apps are not available with GPT-5.5 Pro, so that model surface cannot use CodexPro tools. CodexPro does not provide, proxy, resell, or unlock models; it gives compatible ChatGPT sessions local coding tools and repo context.
 
 ## CodexPro vs generic workspace bridges
 
@@ -143,7 +143,7 @@ One public tunnel option: Cloudflare quick tunnel, ngrok free dev domain, or Clo
 
 Current testing shows free / Go ChatGPT accounts do not expose the app flow needed for CodexPro. Use Plus or Pro for the best experience.
 
-Account tier and model tool support are separate things. Plus/Pro can expose Apps / Developer Mode, but a specific model surface may still be unable to call the connector. Use Pro context fallback for those sessions.
+Account tier and model tool support are separate things. Plus/Pro can expose Apps / Developer Mode, but a specific model surface may still be unable to call the connector. OpenAI currently documents GPT-5.5 Pro as not supporting Apps, so use another tool-capable ChatGPT surface or the Pro context fallback for those sessions.
 
 ## Status
 
@@ -169,7 +169,7 @@ Relevant OpenAI references: [ChatGPT Developer Mode](https://developers.openai.c
 
 CodexPro defaults to `CODEXPRO_TOOL_MODE=standard`, which keeps ChatGPT's tool picker focused on the normal coding loop plus handoff/export workflows. Use `--tool-mode minimal` for the tightest demo surface, or `--tool-mode full` when you want every compatibility and debugging tool exposed.
 
-The smaller default tool list is deliberate. ChatGPT behaves better when routine work goes through a few high-signal tools instead of a large action catalog. Installed user/plugin skills are still discovered during workspace open; they are surfaced as context in the workspace card and can be loaded on demand with `load_skill`, not exposed as dozens of separate ChatGPT actions.
+The smaller default tool list is deliberate. ChatGPT behaves better when routine work goes through a few high-signal tools instead of a large action catalog. Workspace open calls stay lean by default; use explicit skill discovery or `codexpro_inventory` when ChatGPT needs installed user/plugin skills, then load only the required skill with `load_skill`.
 
 Standard mode exposes:
 
@@ -710,13 +710,13 @@ For faster ChatGPT runs, keep the first call narrow:
 ```text
 Call open_current_workspace with include_tree=false unless you need the tree immediately.
 Use tree with max_depth=2 and max_entries=100 when you need file structure.
-Use load_skill only for the specific discovered skill needed for the task.
+Use open_current_workspace with include_skills=true only when skills are needed, then load_skill only for the specific discovered skill needed for the task.
 Use --tool-mode full and call codexpro_inventory only when you want ChatGPT to see full global skill and MCP server inventory.
 Do not call open_workspace after open_current_workspace unless you are switching to a different root.
 Use tree/search/read for inspection, one targeted search plus show_changes for review, and bash only for focused build/test/lint verification.
 ```
 
-`open_current_workspace` and `open_workspace` discover workspace, user, and plugin skills by default. Use `include_global_skills=false` when you only want repo-local instructions, or `include_skills=false` when you want the fastest possible open call. `load_skill` only accepts a discovered skill name plus optional source and exact displayed path, then reads that skill's `SKILL.md` with a bounded byte limit; it does not accept arbitrary file paths. If multiple discovered skills still match, CodexPro returns an ambiguity error instead of guessing. `workspace_snapshot` stays narrower by default for speed. In `--tool-mode full`, use `codexpro_inventory` for global/user/plugin skills and MCP server names. `codexpro_inventory` reports names/descriptions and sanitized paths only; it does not expose MCP command arguments or environment values.
+`open_current_workspace` and `open_workspace` skip skill discovery by default for speed and ChatGPT web-client stability. Pass `include_skills=true` for repo-local skill discovery, and add `include_global_skills=true` only when user/plugin skill inventory is needed. `load_skill` only accepts a discovered skill name plus optional source and exact displayed path, then reads that skill's `SKILL.md` with a bounded byte limit; it does not accept arbitrary file paths. If multiple discovered skills still match, CodexPro returns an ambiguity error instead of guessing. `workspace_snapshot` stays narrower by default for speed. In `--tool-mode full`, use `codexpro_inventory` for global/user/plugin skills and MCP server names. `codexpro_inventory` reports names/descriptions and sanitized paths only; it does not expose MCP command arguments or environment values.
 
 ## Codex-style context
 

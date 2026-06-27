@@ -8,7 +8,7 @@ Current testing shows free and Go accounts do not expose the app flow needed for
 
 CodexPro does not unlock Developer Mode, unlock models, bypass account limits, or provide account access. It connects to the ChatGPT app surface your account already has.
 
-Account access and model tool support are separate. A Plus or Pro account can have Apps / Developer Mode, while a specific model surface may still be unable to call connectors or MCP tools directly. Use the Pro context fallback for those sessions.
+Account access and model tool support are separate. A Plus or Pro account can have Apps / Developer Mode, while a specific model surface may still be unable to call connectors or MCP tools directly. OpenAI currently documents GPT-5.5 Pro as not supporting Apps, so use another tool-capable ChatGPT surface or the Pro context fallback for those sessions.
 
 ## How is CodexPro different from generic workspace bridges?
 
@@ -95,7 +95,7 @@ The useful part is that Codex and ChatGPT are different product surfaces. If one
 
 Only if your ChatGPT account already exposes that exact model, or a similar stronger model, in the ChatGPT web product surface you are using, and that model surface can call Developer Mode apps.
 
-Some stronger planning-model surfaces may not be able to call the CodexPro connector directly. CodexPro does not provide, proxy, resell, or unlock models. It gives compatible ChatGPT sessions local repo tools.
+OpenAI's current GPT-5.5 help page says Apps are not available with GPT-5.5 Pro. If that is the selected surface, CodexPro cannot make it call MCP tools. CodexPro does not provide, proxy, resell, or unlock models. It gives compatible ChatGPT sessions local repo tools.
 
 For models that cannot call tools, generate a repo context bundle instead:
 
@@ -187,11 +187,74 @@ For most users, the better path is a free ngrok dev domain. Create a free ngrok 
 
 If you own a domain, use Cloudflare named tunnels and route DNS to a hostname like `codexpro.example.com`.
 
+## Why does ChatGPT show “Something went wrong” when I create a connector?
+
+ChatGPT can show this generic banner when its public MCP check fails:
+
+![ChatGPT connector creation error](docs/images/chatgpt-connector-creation-error.png)
+
+One cause is a Cloudflare quick tunnel that printed a `trycloudflare.com` URL and then exited. Creating the URL is not proof that the tunnel is connected. When the tunnel is gone, ChatGPT cannot reach the MCP endpoint and Cloudflare can return `530` / `Error 1033`.
+
+Start with tunnel logs enabled:
+
+```bash
+codexpro start --log-requests
+```
+
+Wait for this line before using the Server URL:
+
+```text
+Registered tunnel connection
+```
+
+If the logs instead contain an error like the following, the active system DNS resolver is returning an invalid SRV response for Cloudflare's tunnel discovery:
+
+```text
+Could not lookup srv records on _v2-origintunneld._tcp.argotunnel.com
+... cannot unmarshal DNS message
+```
+
+### Fix DNS on macOS
+
+1. Open **System Settings** > **Network**.
+2. Select the connection currently carrying your Internet traffic (usually Wi-Fi or Ethernet), then click **Details…**.
+3. Open **DNS**. Remove the problematic router or proxy DNS server if it is listed, then add these servers with the **+** button:
+
+   ```text
+   1.1.1.1
+   1.0.0.1
+   ```
+
+4. Click **OK**, then **Apply**. Disconnect and reconnect the network connection.
+5. Optionally flush the macOS DNS cache:
+
+   ```bash
+   sudo dscacheutil -flushcache
+   sudo killall -HUP mDNSResponder
+   ```
+
+6. Confirm that the active macOS resolver no longer lists the old DNS server:
+
+   ```bash
+   scutil --dns | grep 'nameserver\[[0-9]*\]'
+   ```
+
+7. Restart CodexPro and check its tunnel logs again:
+
+   ```bash
+   codexpro start --log-requests
+   ```
+
+If a proxy client manages DNS, changing only its internal `nameserver` list may not affect `cloudflared`: `cloudflared` uses the macOS system resolver. Enable the proxy client's system DNS integration or TUN DNS hijacking, then repeat the `scutil --dns` check above. On managed or corporate networks, use an approved DNS resolver instead of changing system DNS yourself.
+
+After the tunnel registers, use the newly printed Server URL and keep the `codexpro start` process running. A quick-tunnel URL includes a bearer token, so do not share it in issues, screenshots, or chat messages.
+
 Official references:
 
 - ngrok dev domains: https://ngrok.com/docs/universal-gateway/domains
 - Cloudflare Tunnel routing: https://developers.cloudflare.com/tunnel/routing/
 - Cloudflare Tunnel DNS records: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/
+- Cloudflare 1.1.1.1 setup: https://developers.cloudflare.com/1.1.1.1/setting-up-1.1.1.1/
 
 ## Can I use the same ChatGPT app URL every day?
 
