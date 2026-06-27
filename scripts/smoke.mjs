@@ -145,7 +145,7 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
 const toolCardUri = 'ui://widget/codexpro-tool-card-v9.html';
@@ -401,6 +401,40 @@ for (const expectedFile of ['.ai-bridge/agent-status.md', '.ai-bridge/implementa
     throw new Error(`read_handoff did not include ${expectedFile}`);
   }
 }
+const runStatePayload = {
+  version: 1,
+  state: 'completed',
+  iteration: 1,
+  plan_hash: 'smoke-plan-hash',
+  executor: 'opencode',
+  model: 'provider/cheap-model',
+  exit_code: 0,
+  timed_out: false,
+  started_at: new Date(Date.now() - 1000).toISOString(),
+  finished_at: new Date().toISOString(),
+  status_file: '.ai-bridge/agent-status.md',
+  diff_file: '.ai-bridge/implementation-diff.patch',
+  log_file: '.ai-bridge/execution-log.jsonl'
+};
+await fs.writeFile(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify(runStatePayload, null, 2)}\n`, 'utf8');
+const waitCompleted = await client.request('tools/call', {
+  name: 'wait_for_handoff',
+  arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'smoke-plan-hash' }
+});
+if (waitCompleted.structuredContent.awaited_completed !== true || waitCompleted.structuredContent.state !== 'completed') {
+  throw new Error(`wait_for_handoff did not report completion: ${JSON.stringify(waitCompleted.structuredContent)}`);
+}
+if (waitCompleted.structuredContent.exit_code !== 0 || waitCompleted.structuredContent.status_file !== '.ai-bridge/agent-status.md') {
+  throw new Error(`wait_for_handoff missing completion fields: ${JSON.stringify(waitCompleted.structuredContent)}`);
+}
+const waitMismatch = await client.request('tools/call', {
+  name: 'wait_for_handoff',
+  arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'a-different-hash' }
+});
+if (waitMismatch.structuredContent.awaited_completed !== false || waitMismatch.structuredContent.state !== 'running' || waitMismatch.structuredContent.plan_hash_mismatch !== true) {
+  throw new Error(`wait_for_handoff did not keep waiting on plan-hash mismatch: ${JSON.stringify(waitMismatch.structuredContent)}`);
+}
+await fs.rm(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), { force: true });
 await client.request('tools/call', { name: 'handoff_to_codex', arguments: { workspace_id: ws, title: 'Smoke Codex plan', plan: '- Verify demo.txt contains write.', append: true } });
 await fs.writeFile(path.join(tmp, '.ai-bridge', 'current-plan.md'), 'x'.repeat(190000), 'utf8');
 await expectToolError('handoff_to_agent', {
@@ -435,8 +469,8 @@ async function assertToolMode(mode, expected, hidden) {
   modeClient.close();
 }
 
-await assertToolMode('', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
-await assertToolMode('minimal', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
+await assertToolMode('', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
+await assertToolMode('minimal', ['server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
 
 const handoffWriteClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--write', 'handoff'], {
   cwd: path.resolve('.'),

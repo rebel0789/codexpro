@@ -103,6 +103,18 @@ if (!app.includes('implemented with local/test-model: yes')) {
   throw new Error(`fake agent did not edit app.txt\n${app}`);
 }
 
+const runStateRaw = await fs.readFile(path.join(root, '.ai-bridge', 'handoff-run-state.json'), 'utf8');
+const runState = JSON.parse(runStateRaw);
+if (runState.state !== 'completed') {
+  throw new Error(`handoff-run-state did not record completion\n${runStateRaw}`);
+}
+if (runState.exit_code !== 0 || runState.timed_out !== false || runState.executor !== 'custom') {
+  throw new Error(`handoff-run-state missing expected run fields\n${runStateRaw}`);
+}
+if (!runState.plan_hash || !runState.started_at || !runState.finished_at || runState.status_file !== '.ai-bridge/agent-status.md') {
+  throw new Error(`handoff-run-state missing lifecycle fields\n${runStateRaw}`);
+}
+
 const watchRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-watch-handoff-'));
 await fs.mkdir(path.join(watchRoot, '.ai-bridge'), { recursive: true });
 await fs.writeFile(path.join(watchRoot, '.ai-bridge', 'current-plan.md'), '# Current Plan\n\nNo plan written yet.\n', 'utf8');

@@ -237,6 +237,7 @@ const STANDARD_TOOL_NAMES = [
   "search",
   "load_skill",
   "read_handoff",
+  "wait_for_handoff",
   "export_pro_context",
   "handoff_to_agent"
 ] as const;
@@ -260,6 +261,7 @@ const FULL_TOOL_NAMES = [
   "git_diff",
   "show_changes",
   "read_handoff",
+  "wait_for_handoff",
   "codex_context",
   "export_pro_context",
   "handoff_to_agent",
@@ -1229,7 +1231,18 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         includeHidden: parseBool(args.include_hidden, false),
         maxResults: limitInt(args.max_results, config.maxSearchResults, 1, config.maxSearchResults)
       });
-      return textResult(result.text, { workspace_id: workspace.id, root: workspace.root, ...result });
+      const structured: Record<string, unknown> = {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        matches: result.matches,
+        truncated: result.truncated,
+        used: result.used
+      };
+      // The tool card widget renders search hits from structuredContent.text.
+      // When cards are disabled (the default), including it would only duplicate
+      // the human-readable content payload, so omit the large blob in that case.
+      if (config.toolCards) structured.text = result.text;
+      return textResult(result.text, structured);
     }
   );
 
@@ -1566,6 +1579,166 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         file_count: context.files.length,
         preview: previewText(context.text)
       });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "wait_for_handoff",
+    {
+      title: "Wait For Handoff",
+      description:
+        "Read-only long-poll of the local handoff run state so ChatGPT can stay the planner/reviewer while a local executor runs. Reads .ai-bridge/handoff-run-state.json and returns the run status plus status/diff/log/test excerpts. It never starts processes or runs shell commands; it only observes local handoff state written by execute-handoff/watch-handoff/loop-handoff.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
+        plan_hash: z.string().optional().describe("Expected current-plan.md hash. If set, only a terminal run with this plan_hash counts as completed."),
+        since_iteration: z.number().int().min(0).optional().describe("Only treat a run with iteration greater than this as the awaited completion."),
+        max_wait_seconds: z.number().int().min(1).max(60).optional().describe("Maximum seconds to long-poll before returning the current state. Default: 20."),
+        poll_ms: z.number().int().min(250).max(5000).optional().describe("Poll interval in milliseconds. Default: 1000."),
+        include_diff: z.boolean().optional().describe("Include the implementation diff excerpt when completed. Default: true."),
+        include_log_excerpt: z.boolean().optional().describe("Include the tail of execution-log.jsonl when completed. Default: true."),
+        include_tests: z.boolean().optional().describe("Include the loop-tests.txt excerpt when completed. Default: true.")
+      },
+      annotations: { ...READ_ONLY_ANNOTATIONS, idempotentHint: false },
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Waiting for local handoff result...",
+        "openai/toolInvocation/invoked": "Local handoff state ready"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const maxWaitSeconds = limitInt(args.max_wait_seconds, 20, 1, 60);
+      const pollMs = limitInt(args.poll_ms, 1000, 250, 5000);
+      const includeDiff = parseBool(args.include_diff, true);
+      const includeLog = parseBool(args.include_log_excerpt, true);
+      const includeTests = parseBool(args.include_tests, true);
+      const expectedPlanHash =
+        typeof args.plan_hash === "string" && args.plan_hash.trim() ? args.plan_hash.trim() : undefined;
+      const sinceIteration =
+        Number.isFinite(Number(args.since_iteration)) && args.since_iteration !== undefined
+          ? Math.floor(Number(args.since_iteration))
+          : undefined;
+
+      const stateRel = `${config.contextDir}/handoff-run-state.json`;
+      const terminalStates = new Set(["completed", "failed", "timed_out"]);
+
+      const readState = async (): Promise<Record<string, any> | undefined> => {
+        try {
+          const raw = await readRawTextFileBounded(config, guard, workspace, stateRel);
+          const parsed = JSON.parse(raw);
+          return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : undefined;
+        } catch {
+          return undefined;
+        }
+      };
+
+      const isAwaited = (state: Record<string, any> | undefined): boolean =>
+        Boolean(
+          state &&
+            terminalStates.has(state.state) &&
+            (!expectedPlanHash || state.plan_hash === expectedPlanHash) &&
+            (sinceIteration === undefined || (typeof state.iteration === "number" && state.iteration > sinceIteration))
+        );
+
+      const deadline = Date.now() + maxWaitSeconds * 1000;
+      let state = await readState();
+      while (Date.now() < deadline && !isAwaited(state)) {
+        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        state = await readState();
+      }
+
+      const completed = isAwaited(state);
+      const planHashMismatch = Boolean(expectedPlanHash && state && state.plan_hash !== expectedPlanHash);
+      const reportedState = completed
+        ? String(state?.state)
+        : state
+          ? state.state === "running" || planHashMismatch || sinceIteration !== undefined
+            ? "running"
+            : String(state.state)
+          : "unknown";
+
+      const excerpt = async (rel: string, maxChars: number, tailLines?: number): Promise<string | undefined> => {
+        try {
+          const raw = await readRawTextFileBounded(config, guard, workspace, rel);
+          const body = tailLines
+            ? raw.split(/\r?\n/).filter(Boolean).slice(-tailLines).join("\n")
+            : raw;
+          const trimmed = body.length > maxChars ? `${body.slice(0, maxChars)}\n...[excerpt truncated]` : body;
+          return redactSensitiveText(trimmed);
+        } catch {
+          return undefined;
+        }
+      };
+
+      const structured: Record<string, unknown> = {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        state: reportedState,
+        awaited_completed: completed,
+        state_file: stateRel,
+        ...(state ? { run_state: state.state } : {}),
+        ...(typeof state?.iteration === "number" ? { iteration: state.iteration } : {}),
+        ...(state?.plan_hash ? { plan_hash: state.plan_hash } : {}),
+        ...(expectedPlanHash ? { expected_plan_hash: expectedPlanHash, plan_hash_mismatch: planHashMismatch } : {}),
+        ...(state && "exit_code" in state ? { exit_code: state.exit_code } : {}),
+        ...(state && "timed_out" in state ? { timed_out: state.timed_out } : {}),
+        ...(state?.started_at ? { started_at: state.started_at } : {}),
+        ...(state?.finished_at ? { finished_at: state.finished_at } : {}),
+        ...(state?.executor ? { executor: state.executor } : {}),
+        ...(state?.model ? { model: state.model } : {}),
+        ...(completed ? {} : { next_poll_after_seconds: Math.max(1, Math.ceil(pollMs / 1000)) })
+      };
+
+      if (completed) {
+        const statusFile = String(state?.status_file ?? `${config.contextDir}/agent-status.md`);
+        const diffFile = String(state?.diff_file ?? `${config.contextDir}/implementation-diff.patch`);
+        const logFile = String(state?.log_file ?? `${config.contextDir}/execution-log.jsonl`);
+        const testsFile = state?.tests_file ? String(state.tests_file) : `${config.contextDir}/loop-tests.txt`;
+        structured.status_file = statusFile;
+        structured.diff_file = diffFile;
+        structured.log_file = logFile;
+        const status = await excerpt(statusFile, 6_000);
+        if (status) structured.status_excerpt = status;
+        if (includeDiff) {
+          const diff = await excerpt(diffFile, 12_000);
+          if (diff) structured.diff_excerpt = diff;
+        }
+        if (includeLog) {
+          const log = await excerpt(logFile, 6_000, 20);
+          if (log) structured.log_excerpt = log;
+        }
+        if (includeTests) {
+          const tests = await excerpt(testsFile, 4_000);
+          if (tests) {
+            structured.tests_file = testsFile;
+            structured.tests_excerpt = tests;
+          }
+        }
+      }
+
+      const summary = !state
+        ? `No handoff run state found at ${stateRel}. Start a run with handoff_to_agent + local execute-handoff/watch-handoff, then call wait_for_handoff again.`
+        : completed
+          ? `Handoff run ${state.state} (iteration ${state.iteration ?? 1}, exit ${state.exit_code ?? "null"}).`
+          : planHashMismatch
+            ? `Executor has not completed the expected plan yet (last known run plan_hash=${state.plan_hash ?? "unknown"}). Still waiting.`
+            : `Handoff run is ${state.state}. Re-poll after ~${Math.max(1, Math.ceil(pollMs / 1000))}s.`;
+
+      const lines = [
+        "# Wait For Handoff",
+        "",
+        summary,
+        "",
+        `State file: ${stateRel}`,
+        ...(state?.plan_hash ? [`Plan hash: ${state.plan_hash}`] : []),
+        ...(completed && structured.status_excerpt ? ["", "## Status", "", `\`\`\`text\n${structured.status_excerpt}\n\`\`\``] : []),
+        ...(completed && structured.diff_excerpt ? ["", "## Diff", "", `\`\`\`diff\n${structured.diff_excerpt}\n\`\`\``] : []),
+        ...(completed && structured.tests_excerpt ? ["", "## Tests", "", `\`\`\`text\n${structured.tests_excerpt}\n\`\`\``] : []),
+        ...(completed && structured.log_excerpt ? ["", "## Log tail", "", `\`\`\`text\n${structured.log_excerpt}\n\`\`\``] : [])
+      ];
+      return textResult(lines.join("\n"), structured);
     }
   );
 

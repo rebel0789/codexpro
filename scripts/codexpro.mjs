@@ -1381,6 +1381,20 @@ async function executeHandoffRequest(request, args, options = {}) {
     throw new Error(`${request.commandInfo.command} was not found. Install it, add it to PATH, pass an absolute path, or use --command.`);
   }
 
+  const iteration = Number.isFinite(options.iteration) ? options.iteration : 1;
+  const runPlanHash = planHash(request.planText);
+  const startedAt = new Date().toISOString();
+  writeHandoffRunState(request.root, request.contextDir, {
+    state: 'running',
+    iteration,
+    started_at: startedAt,
+    finished_at: null,
+    plan_hash: runPlanHash,
+    executor: request.commandInfo.agent,
+    model: request.commandInfo.model || undefined,
+    pid: process.pid
+  });
+
   statusLine('wait', `Running ${request.commandInfo.agent}: ${request.commandText}`);
   const result = await runProcessCaptured(request.commandInfo.command, request.commandInfo.args, {
     cwd: request.root,
@@ -1389,6 +1403,25 @@ async function executeHandoffRequest(request, args, options = {}) {
   });
   const diffText = readGitDiff(request.root, request.maxOutputBytes);
   const outputs = writeExecutionOutputs(request.root, request.contextDir, request.commandInfo, result, diffText);
+
+  const runState = result.timedOut ? 'timed_out' : (result.exitCode === 0 ? 'completed' : 'failed');
+  const testsAbsPath = path.join(request.bridgeDir, 'loop-tests.txt');
+  writeHandoffRunState(request.root, request.contextDir, {
+    state: runState,
+    iteration,
+    started_at: startedAt,
+    finished_at: new Date().toISOString(),
+    plan_hash: runPlanHash,
+    executor: request.commandInfo.agent,
+    model: request.commandInfo.model || undefined,
+    exit_code: result.exitCode ?? null,
+    timed_out: Boolean(result.timedOut),
+    duration_ms: result.durationMs,
+    status_file: path.posix.join(request.contextDir, 'agent-status.md'),
+    diff_file: path.posix.join(request.contextDir, 'implementation-diff.patch'),
+    log_file: path.posix.join(request.contextDir, 'execution-log.jsonl'),
+    ...(fs.existsSync(testsAbsPath) ? { tests_file: path.posix.join(request.contextDir, 'loop-tests.txt') } : {})
+  });
   statusLine(result.exitCode === 0 ? 'ok' : 'warn', `Agent exited with code ${result.exitCode ?? 'null'}${result.signal ? ` signal=${result.signal}` : ''}`);
   console.log(`Status: ${path.relative(request.root, outputs.statusPath)}`);
   console.log(`Diff:   ${path.relative(request.root, outputs.diffPath)}`);
@@ -1433,6 +1466,20 @@ function readWatchState(statePath) {
 function writeWatchState(statePath, state) {
   fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
   fs.writeFileSync(statePath, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
+function handoffRunStatePath(root, contextDir) {
+  return resolveWorkspaceFile(root, path.posix.join(contextDir, 'handoff-run-state.json'));
+}
+
+// Machine-readable lifecycle state for an in-flight or completed handoff run.
+// ChatGPT-side tooling (the read-only wait_for_handoff MCP tool) polls this file
+// instead of inferring run state from markdown/log artifacts.
+function writeHandoffRunState(root, contextDir, state) {
+  const statePath = handoffRunStatePath(root, contextDir);
+  fs.mkdirSync(path.dirname(statePath), { recursive: true, mode: 0o700 });
+  const payload = { version: 1, updated_at: new Date().toISOString(), ...state };
+  fs.writeFileSync(statePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
 }
 
 function appendBridgeLog(root, contextDir, event) {
@@ -2092,7 +2139,7 @@ async function runLoopHandoff(argv) {
     });
 
     const beforeExecutionFingerprint = changeFingerprintExcludingContext(root, contextDir);
-    const execution = await executeHandoffRequest(request, { ...args, yes: true }, { skipConfirmation: true });
+    const execution = await executeHandoffRequest(request, { ...args, yes: true }, { skipConfirmation: true, iteration });
     const diffText = readGitDiffExcludingContext(root, contextDir, maxOutputBytes);
     fs.writeFileSync(paths.diffPath, diffText || '', { mode: 0o600 });
     const currentChangeFingerprint = changeFingerprintExcludingContext(root, contextDir);
