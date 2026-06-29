@@ -130,16 +130,29 @@ export class PathGuard {
   resolve(workspace: Workspace, inputPath = ".", options: { forWrite?: boolean } = {}): { absPath: string; relPath: string } {
     const expanded = expandHome(inputPath || ".");
     const candidate = path.isAbsolute(expanded) ? expanded : path.join(workspace.root, expanded);
-    const absPath = path.resolve(candidate);
-    const relPath = displayPath(absPath, workspace.root);
+    let absPath = path.resolve(candidate);
+    const realTarget = maybeRealpath(absPath);
+    let relPath = displayPath(absPath, workspace.root);
 
     if (!isSubpath(absPath, workspace.root)) {
-      throw new CodexProError(`Path escapes workspace root: ${inputPath}`);
+      if (realTarget && isSubpath(realTarget, workspace.root)) {
+        absPath = realTarget;
+        relPath = displayPath(realTarget, workspace.root);
+      } else if (options.forWrite) {
+        const parent = closestExistingParent(path.dirname(absPath));
+        const realParent = maybeRealpath(parent);
+        if (!realParent || !isSubpath(realParent, workspace.root)) {
+          throw new CodexProError(`Path escapes workspace root: ${inputPath}`);
+        }
+        absPath = path.resolve(realParent, path.relative(parent, absPath));
+        relPath = displayPath(absPath, workspace.root);
+      } else {
+        throw new CodexProError(`Path escapes workspace root: ${inputPath}`);
+      }
     }
 
     this.assertNotBlocked(relPath);
 
-    const realTarget = maybeRealpath(absPath);
     if (realTarget) {
       if (!isSubpath(realTarget, workspace.root)) {
         throw new CodexProError(`Path resolves outside workspace root through a symlink: ${inputPath}`);
@@ -178,9 +191,10 @@ export class PathGuard {
     if (stat.size > maxBytes) {
       throw new CodexProError(`File is too large (${stat.size} bytes). Limit: ${maxBytes} bytes.`);
     }
+    if (stat.size === 0) return;
     const handle = await fsp.open(absPath, "r");
     try {
-      const sample = Buffer.alloc(Math.min(4096, stat.size));
+      const sample = Buffer.alloc(stat.size);
       const { bytesRead } = await handle.read(sample, 0, sample.length, 0);
       if (sample.subarray(0, bytesRead).includes(0)) {
         throw new CodexProError("Refusing to read binary file.");

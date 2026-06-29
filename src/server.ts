@@ -62,6 +62,24 @@ function errorResult(error: unknown): any {
   };
 }
 
+function validateToolArgs(name: string, options: Record<string, unknown>, args: unknown): any {
+  const inputSchema = options.inputSchema;
+  if (!inputSchema || typeof inputSchema !== "object" || Array.isArray(inputSchema)) return args ?? {};
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, value] of Object.entries(inputSchema)) {
+    if (value && typeof (value as { safeParse?: unknown }).safeParse === "function") {
+      shape[key] = value as z.ZodTypeAny;
+    }
+  }
+  if (!Object.keys(shape).length) return {};
+  const parsed = z.object(shape).safeParse(args ?? {});
+  if (parsed.success) return parsed.data;
+  const details = parsed.error.issues
+    .map((issue) => `${issue.path.length ? issue.path.join(".") : "arguments"}: ${issue.message}`)
+    .join("; ");
+  throw new CodexProError(`Invalid arguments for ${name}: ${details}`);
+}
+
 function tagToolResult(result: any, name: string, options: Record<string, unknown>): any {
   if (!result || typeof result !== "object") return result;
   const structured = result.structuredContent;
@@ -371,9 +389,10 @@ function registerCodexTool(
   handler: CodexToolHandler
 ): void {
   if (!shouldRegisterTool(config, name)) return;
-  registerToolCompat(server, name, descriptorOptionsForConfig(config, options), handler);
+  const validatedHandler: CodexToolHandler = (args) => handler(validateToolArgs(name, options, args));
+  registerToolCompat(server, name, descriptorOptionsForConfig(config, options), validatedHandler);
   rememberRegisteredTool(server, name);
-  rememberRegisteredToolHandler(server, name, handler);
+  rememberRegisteredToolHandler(server, name, validatedHandler);
 }
 
 function serverInstructions(config: CodexProConfig): string {

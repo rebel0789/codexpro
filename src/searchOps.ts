@@ -68,6 +68,7 @@ async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: W
       }
       const matches: Array<{ path: string; line: number; text: string }> = [];
       const lines = stdout.split("\n").filter(Boolean);
+      let visibleMatches = 0;
       for (const line of lines) {
         const value = JSON.parse(line);
         if (value.type !== "match") continue;
@@ -75,12 +76,13 @@ async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: W
         const rel = path.relative(workspace.root, absPath).split(path.sep).join("/");
         if (rel.startsWith("..")) continue;
         if (guard.isBlockedRelativePath(rel)) continue;
+        visibleMatches += 1;
+        if (matches.length >= options.maxResults) continue;
         const lineText = String(value.data?.lines?.text ?? "").replace(/\r?\n$/, "");
         matches.push({ path: rel || ".", line: Number(value.data?.line_number ?? 0), text: redactSensitiveText(truncateLine(lineText)) });
-        if (matches.length >= options.maxResults) break;
       }
       const text = matches.map((m) => `${m.path}:${m.line}: ${m.text}`).join("\n") || "No matches.";
-      resolve({ text, matches, truncated: lines.length > matches.length || stdout.length > config.maxOutputBytes, used: "ripgrep" });
+      resolve({ text, matches, truncated: visibleMatches > matches.length || stdout.length > config.maxOutputBytes, used: "ripgrep" });
     });
   });
 }

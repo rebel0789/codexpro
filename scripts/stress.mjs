@@ -94,6 +94,14 @@ async function initClient(root, env) {
   return client;
 }
 
+async function expectToolError(client, name, args, pattern) {
+  const result = await client.request('tools/call', { name, arguments: args });
+  assert(result.isError === true, `${name} unexpectedly succeeded`);
+  const text = JSON.stringify(result);
+  if (pattern) assert(pattern.test(text), `${name} error did not match ${pattern}: ${text}`);
+  return result;
+}
+
 async function makeFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-'));
   await fs.writeFile(path.join(root, 'AGENTS.md'), '# Stress Agents\n\nKeep checks local.\n', 'utf8');
@@ -239,6 +247,27 @@ async function runFullModeStress(root) {
     });
     assert(blockedSuperNewline.isError === true && blockedSuperNewline.structuredContent.codexpro_tool === 'bash', 'supertool safe bash newline error was not tagged as bash');
     assert(!(await pathExists(newlineSuperTarget)), 'supertool safe bash newline command created a file');
+
+    const blockedOutputFlag = await client.request('tools/call', {
+      name: 'bash',
+      arguments: { workspace_id: ws, command: 'git diff "--output=safe-bash-owned.patch"' }
+    });
+    assert(blockedOutputFlag.isError === true && String(blockedOutputFlag.structuredContent.error).includes('blocked'), 'safe bash allowed quoted git output path');
+    assert(!(await pathExists(path.join(root, 'safe-bash-owned.patch'))), 'safe bash git output path created a file');
+
+    const blockedDollarExpansion = await client.request('tools/call', {
+      name: 'codexpro',
+      arguments: { action: 'bash', args: { workspace_id: ws, command: "git diff $'--output=supertool-owned.patch'" } }
+    });
+    assert(blockedDollarExpansion.isError === true && blockedDollarExpansion.structuredContent.codexpro_tool === 'bash', 'supertool safe bash allowed dollar-quoted expansion');
+    assert(!(await pathExists(path.join(root, 'supertool-owned.patch'))), 'supertool dollar-quoted git output path created a file');
+
+    const blockedFindFprint0 = await client.request('tools/call', {
+      name: 'bash',
+      arguments: { workspace_id: ws, command: 'find . "-fprint0" find-owned.txt' }
+    });
+    assert(blockedFindFprint0.isError === true && String(blockedFindFprint0.structuredContent.error).includes('blocked'), 'safe bash allowed quoted find -fprint0 path write');
+    assert(!(await pathExists(path.join(root, 'find-owned.txt'))), 'safe bash find -fprint0 created a file');
 
     const blockedEnvWrite = await client.request('tools/call', {
       name: 'write',
@@ -422,6 +451,14 @@ async function runSupertoolModeStress(root) {
     });
     assert(missingRead.isError === true && missingRead.structuredContent.codexpro_tool === 'read' && missingRead.structuredContent.wrapped_tool === 'read', 'supertool failed read was not tagged as read');
 
+    const malformedRead = await client.request('tools/call', {
+      name: 'codexpro',
+      arguments: { action: 'read', args: { workspace_id: opened.structuredContent.workspace_id, path: ['demo.txt'] } }
+    });
+    const malformedReadError = String(malformedRead.structuredContent.error ?? '');
+    assert(malformedRead.isError === true && malformedRead.structuredContent.codexpro_tool === 'read' && malformedRead.structuredContent.wrapped_tool === 'read', 'supertool malformed read was not tagged as read');
+    assert(malformedReadError.includes('Invalid arguments for read') && !malformedReadError.includes('TypeError'), `supertool malformed read leaked raw handler error: ${malformedReadError}`);
+
     const blockedBash = await client.request('tools/call', {
       name: 'codexpro',
       arguments: { action: 'bash', args: { workspace_id: opened.structuredContent.workspace_id, command: 'pwd' } }
@@ -443,6 +480,69 @@ async function runMaxReadSearchStress() {
       arguments: { workspace_id: opened.structuredContent.workspace_id, query: 'needle in large file', max_results: 10 }
     });
     assert(search.structuredContent.matches.length === 0, `search ignored maxReadBytes: ${JSON.stringify(search.structuredContent.matches)}`);
+  } finally {
+    client.close();
+  }
+}
+
+async function runGuardEdgeStress() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-guard-'));
+  const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-outside-'));
+  await fs.writeFile(path.join(root, 'visible.txt'), 'needle visible\n', 'utf8');
+  await fs.writeFile(path.join(root, 'late-null.txt'), Buffer.concat([
+    Buffer.from('needle before\n'),
+    Buffer.alloc(5000, 65),
+    Buffer.from([0]),
+    Buffer.from('\nneedle after\n')
+  ]));
+  await fs.mkdir(path.join(root, '.env'), { recursive: true });
+  await fs.writeFile(path.join(root, '.env', 'secret.txt'), 'needle blocked env\n', 'utf8');
+  await fs.mkdir(path.join(outside, 'outside-dir'), { recursive: true });
+  await fs.writeFile(path.join(outside, 'outside-dir', 'secret.txt'), 'needle outside\n', 'utf8');
+
+  let outsideDirLink;
+  let aliasRoot;
+  try {
+    outsideDirLink = path.join(root, 'outside-dir-link');
+    await fs.symlink(path.join(outside, 'outside-dir'), outsideDirLink, 'dir');
+    aliasRoot = path.join(outside, 'workspace-alias');
+    await fs.symlink(root, aliasRoot, 'dir');
+  } catch (error) {
+    if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error;
+    outsideDirLink = undefined;
+    aliasRoot = undefined;
+  }
+
+  const client = await initClient(root);
+  try {
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const ws = opened.structuredContent.workspace_id;
+
+    await expectToolError(client, 'read', { workspace_id: ws, path: 'late-null.txt' }, /binary/i);
+    await expectToolError(client, 'edit', { workspace_id: ws, path: 'late-null.txt', old_text: 'needle before', new_text: 'changed' }, /binary/i);
+
+    const blockedSearch = await client.request('tools/call', {
+      name: 'search',
+      arguments: { workspace_id: ws, query: 'needle blocked env', glob: '.env/**', include_hidden: true, max_results: 10 }
+    });
+    assert(blockedSearch.structuredContent.matches.length === 0, `blocked search glob leaked matches: ${JSON.stringify(blockedSearch.structuredContent.matches)}`);
+    assert(blockedSearch.structuredContent.truncated === false, `blocked-only search reported truncation: ${JSON.stringify(blockedSearch.structuredContent)}`);
+
+    if (outsideDirLink) {
+      await expectToolError(client, 'tree', { workspace_id: ws, path: 'outside-dir-link', include_hidden: true }, /symlink|outside/i);
+      await expectToolError(client, 'search', { workspace_id: ws, query: 'needle outside', path: 'outside-dir-link', include_hidden: true }, /symlink|outside/i);
+      await expectToolError(client, 'read', { workspace_id: ws, path: 'outside-dir-link/secret.txt' }, /symlink|outside/i);
+    }
+
+    if (aliasRoot) {
+      const aliasVisible = path.join(aliasRoot, 'visible.txt');
+      const aliasRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: aliasVisible } });
+      assert(aliasRead.isError !== true && aliasRead.structuredContent.path === 'visible.txt', `absolute realpath-inside read failed: ${JSON.stringify(aliasRead.structuredContent)}`);
+      const aliasSearch = await client.request('tools/call', { name: 'search', arguments: { workspace_id: ws, query: 'needle visible', path: aliasVisible, max_results: 10 } });
+      assert(aliasSearch.structuredContent.matches.some((match) => match.path === 'visible.txt'), `absolute realpath-inside search failed: ${JSON.stringify(aliasSearch.structuredContent)}`);
+      await expectToolError(client, 'write', { workspace_id: ws, path: path.join(aliasRoot, '.env', 'created.txt'), content: 'blocked\n' }, /blocked/i);
+      assert(!(await pathExists(path.join(root, '.env', 'created.txt'))), 'absolute alias write created a blocked file');
+    }
   } finally {
     client.close();
   }
@@ -480,13 +580,20 @@ async function runMinimalHandoffStress(root) {
     const tools = await client.request('tools/list', {});
     const names = tools.tools.map((tool) => tool.name);
     assert(names.includes('handoff_to_agent'), 'minimal handoff mode missing handoff_to_agent');
+    assert(!names.includes('write') && !names.includes('edit'), 'minimal handoff mode exposed write/edit');
     const actions = await client.request('tools/call', { name: 'codexpro', arguments: { action: 'list_actions' } });
     assert(actions.structuredContent.actions.includes('handoff_to_agent'), 'minimal handoff supertool actions missing handoff_to_agent');
+    assert(!actions.structuredContent.actions.includes('write') && !actions.structuredContent.actions.includes('edit'), 'minimal handoff supertool actions exposed write/edit');
     const handoff = await client.request('tools/call', {
       name: 'codexpro',
       arguments: { action: 'agent_handoff', args: { title: 'Stress Plan', plan: '- keep it narrow' } }
     });
     assert(handoff.structuredContent.codexpro_tool === 'handoff_to_agent' && handoff.structuredContent.wrapped_tool === 'handoff_to_agent', 'minimal handoff supertool did not write plan');
+    const blockedWrite = await client.request('tools/call', {
+      name: 'codexpro',
+      arguments: { action: 'write', args: { path: 'demo.txt', content: 'bypass\n' } }
+    });
+    assert(blockedWrite.isError === true && String(blockedWrite.structuredContent.error).includes('not available'), 'minimal handoff supertool allowed disabled write');
   } finally {
     client.close();
   }
@@ -511,6 +618,7 @@ const root = await makeFixture();
 await runFullModeStress(root);
 await runGlobalSkillStress(root);
 await runMaxReadSearchStress();
+await runGuardEdgeStress();
 await runSupertoolModeStress(root);
 await runShowChangesStatsStress();
 await runMinimalHandoffStress(root);
