@@ -318,8 +318,41 @@ await withStartedCodexPro([
   const runtime = await waitForJson(cloudflarePath, (data) => data.endpoint?.includes('trycloudflare.com'), 'cloudflare runtime status');
   if (runtime.endpoint.includes('api.trycloudflare.com') || !runtime.endpoint.startsWith('https://real-codexpro.trycloudflare.com/mcp')) {
     throw new Error(`quick tunnel saved the wrong endpoint: ${JSON.stringify(runtime)}`);
-  }
+	}
 });
+
+const namedCloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-named-'));
+const namedCloudflarePort = await getFreePort();
+const fakeNamedCloudflared = path.join(home, 'fake-cloudflared-named.mjs');
+const cloudflareRawToken = 'cf_audit_secret_1234567890TOKEN';
+await fs.writeFile(fakeNamedCloudflared, [
+  '#!/usr/bin/env node',
+  "if (process.argv.includes('--version')) { console.log('cloudflared version 2026.6.0'); process.exit(0); }",
+  "console.error('fake tunnel saw TUNNEL_TOKEN=' + process.env.TUNNEL_TOKEN);",
+  'process.exit(2);',
+  ''
+].join('\n'), { mode: 0o700 });
+const namedFailure = runFail([
+  'start',
+  '--root',
+  namedCloudflareRoot,
+  '--tunnel',
+  'cloudflare-named',
+  '--hostname',
+  'codexpro-audit.example.com',
+  '--cloudflare-token',
+  cloudflareRawToken,
+  '--cloudflared',
+  fakeNamedCloudflared,
+  '--port',
+  String(namedCloudflarePort),
+  '--token',
+  'codexpro-named-http-token',
+  '--no-copy-url'
+], env, /Recent cloudflared output/);
+if (namedFailure.includes(cloudflareRawToken) || !namedFailure.includes('TUNNEL_TOKEN= [REDACTED_SECRET]')) {
+  throw new Error(`named tunnel failure leaked or failed to redact Cloudflare token\n${namedFailure}`);
+}
 
 const listed = run(['settings', 'list'], env);
 if (!listed.includes(root) || !listed.includes('codexpro-test.ngrok-free.app')) {

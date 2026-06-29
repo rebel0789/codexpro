@@ -1100,6 +1100,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const requestedPath = typeof args.path === "string" ? args.path : undefined;
       const includeGlobalDefault =
+        args.source === undefined ||
         (args.source !== undefined && args.source !== "workspace") ||
         Boolean(requestedPath && !requestedPath.startsWith("$WORKSPACE/"));
       const loaded = await loadSkill(workspace, {
@@ -1650,10 +1651,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
       const status = gitStatus(config, workspace, guard, scopedPath);
       const includeDiff = parseBool(args.include_diff, true);
-      const rawDiff = includeDiff ? normalizeGitOutput(gitDiff(config, guard, workspace, scopedPath, parseBool(args.staged, false))) : "";
+      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, scopedPath, parseBool(args.staged, false)));
       const statusError = looksLikeGitError(status) ? status : "";
       const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
       const diff = diffError ? "" : rawDiff;
+      const responseDiff = includeDiff ? diff : "";
       const stats = diffStats(diff);
       const changedFiles = statusError ? [] : changedStatusLines(status);
       const changedText = statusError
@@ -1682,7 +1684,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         additions: stats.additions,
         deletions: stats.deletions,
         changed: !statusError && (changedFiles.length > 0 || stats.changed),
-        diff
+        diff: responseDiff
       });
     }
   );
@@ -1999,7 +2001,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           "Opt-in, read-only local Codex session history browser. Lists metadata from the user's configured Codex session JSONL files without reading full transcripts.",
         inputSchema: {
           max_sessions: z.number().int().min(1).max(200).optional().describe("Maximum sessions to return. Default: 30."),
-          query: z.string().optional().describe("Optional case-insensitive search over session id, title, summary, cwd, and source path.")
+          query: z.string().optional().describe("Optional case-insensitive search over session id, title, cwd, and source path.")
         },
         annotations: READ_ONLY_ANNOTATIONS,
         _meta: {

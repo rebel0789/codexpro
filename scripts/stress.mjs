@@ -98,6 +98,10 @@ async function makeFixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-'));
   await fs.writeFile(path.join(root, 'AGENTS.md'), '# Stress Agents\n\nKeep checks local.\n', 'utf8');
   await fs.writeFile(path.join(root, 'demo.txt'), 'alpha\n--flag root\narrow -> value\n', 'utf8');
+  await fs.writeFile(path.join(root, '.hidden.txt'), 'needle hidden\n', 'utf8');
+  await fs.writeFile(path.join(root, 'visible:123:file.txt'), 'needle colon path\n', 'utf8');
+  await fs.mkdir(path.join(root, '.github', 'workflows'), { recursive: true });
+  await fs.writeFile(path.join(root, '.github', 'workflows', 'ci.yml'), 'name: ci\n', 'utf8');
   await fs.mkdir(path.join(root, 'many'), { recursive: true });
   for (let file = 0; file < 50; file += 1) {
     const lines = Array.from({ length: 60 }, (_, line) => `file ${file} line ${line} --flag -> stress-needle-${line % 11}`);
@@ -189,6 +193,18 @@ async function runFullModeStress(root) {
       assert(rgRegex.structuredContent.used === 'ripgrep' && rgRegex.structuredContent.matches.length === 10, 'ripgrep regex search rejected rg syntax');
     }
 
+    const hiddenSearch = await client.request('tools/call', {
+      name: 'search',
+      arguments: { workspace_id: ws, query: 'needle hidden', include_hidden: true, max_results: 10 }
+    });
+    assert(hiddenSearch.structuredContent.matches.some((match) => match.path === '.hidden.txt'), 'include_hidden search missed hidden file');
+
+    const colonSearch = await client.request('tools/call', {
+      name: 'search',
+      arguments: { workspace_id: ws, query: 'needle colon path', max_results: 10 }
+    });
+    assert(colonSearch.structuredContent.matches.some((match) => match.path === 'visible:123:file.txt' && match.line === 1), `colon path search parsed incorrectly: ${JSON.stringify(colonSearch.structuredContent.matches)}`);
+
     const superRead = await client.request('tools/call', {
       name: 'codexpro',
       arguments: { action: 'read', args: { workspace_id: ws, path: 'demo.txt', start_line: 1, end_line: 3 } }
@@ -223,6 +239,13 @@ async function runFullModeStress(root) {
     });
     assert(blockedSuperNewline.isError === true && blockedSuperNewline.structuredContent.codexpro_tool === 'bash', 'supertool safe bash newline error was not tagged as bash');
     assert(!(await pathExists(newlineSuperTarget)), 'supertool safe bash newline command created a file');
+
+    const blockedEnvWrite = await client.request('tools/call', {
+      name: 'write',
+      arguments: { workspace_id: ws, path: '.env/notes.txt', content: 'not a literal secret\n' }
+    });
+    assert(blockedEnvWrite.isError === true, 'write allowed .env descendant path');
+    assert(!(await pathExists(path.join(root, '.env', 'notes.txt'))), 'blocked .env descendant write created a file');
 
     const arrows = await Promise.all(Array.from({ length: 12 }, () =>
       client.request('tools/call', { name: 'search', arguments: { workspace_id: ws, query: '->', path: 'many', max_results: 25 } })
@@ -305,6 +328,21 @@ async function runFullModeStress(root) {
     assert(superExport.structuredContent.codexpro_tool === 'export_pro_context' && superExport.structuredContent.wrapped_tool === 'export_pro_context', 'supertool pro_export did not wrap export_pro_context');
     assert(superExport.structuredContent.files_included.length === 1 && superExport.structuredContent.files_included[0] === 'demo.txt', `supertool Pro export included wrong files: ${JSON.stringify(superExport.structuredContent.files_included)}`);
 
+    const hiddenGlobExport = await client.request('tools/call', {
+      name: 'export_pro_context',
+      arguments: {
+        workspace_id: ws,
+        extra_globs: ['.github/**/*.yml'],
+        include_important_files: false,
+        include_changed_files: false,
+        include_diff: false,
+        include_ai_bridge: false,
+        max_files: 4,
+        max_total_bytes: 20000
+      }
+    });
+    assert(hiddenGlobExport.structuredContent.files_included.includes('.github/workflows/ci.yml'), `Pro export extra_globs missed hidden path: ${JSON.stringify(hiddenGlobExport.structuredContent.files_included)}`);
+
     const selfTest = await client.request('tools/call', { name: 'codexpro_self_test', arguments: { workspace_id: ws } });
     assert(selfTest.structuredContent.status !== 'fail', `codexpro_self_test failed: ${JSON.stringify(selfTest.structuredContent.checks)}`);
   } finally {
@@ -334,6 +372,11 @@ async function runGlobalSkillStress(root) {
       arguments: { workspace_id: opened.structuredContent.workspace_id, name: skill.name, source: skill.source, path: skill.path }
     });
     assert(loaded.structuredContent.text.includes('# Global Only Skill'), 'default load_skill did not load inventory global skill');
+    const loadedByName = await client.request('tools/call', {
+      name: 'load_skill',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, name }
+    });
+    assert(loadedByName.structuredContent.text.includes('# Global Only Skill'), 'load_skill did not load unique user skill by name');
   } finally {
     client?.close();
     await fs.rm(dir, { recursive: true, force: true });
@@ -389,6 +432,44 @@ async function runSupertoolModeStress(root) {
   }
 }
 
+async function runMaxReadSearchStress() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-max-read-'));
+  await fs.writeFile(path.join(root, 'large.txt'), `needle in large file\n${'x'.repeat(5000)}\n`, 'utf8');
+  const client = await initClient(root, { CODEXPRO_MAX_READ_BYTES: '1000' });
+  try {
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const search = await client.request('tools/call', {
+      name: 'search',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, query: 'needle in large file', max_results: 10 }
+    });
+    assert(search.structuredContent.matches.length === 0, `search ignored maxReadBytes: ${JSON.stringify(search.structuredContent.matches)}`);
+  } finally {
+    client.close();
+  }
+}
+
+async function runShowChangesStatsStress() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-git-'));
+  await fs.writeFile(path.join(root, 'demo.txt'), 'alpha\n', 'utf8');
+  spawnSync('git', ['init'], { cwd: root, stdio: 'ignore' });
+  spawnSync('git', ['config', 'user.email', 'stress@example.com'], { cwd: root, stdio: 'ignore' });
+  spawnSync('git', ['config', 'user.name', 'Stress Test'], { cwd: root, stdio: 'ignore' });
+  spawnSync('git', ['add', 'demo.txt'], { cwd: root, stdio: 'ignore' });
+  spawnSync('git', ['commit', '-m', 'init'], { cwd: root, stdio: 'ignore' });
+  await fs.appendFile(path.join(root, 'demo.txt'), 'beta\n', 'utf8');
+  const client = await initClient(root);
+  try {
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const changes = await client.request('tools/call', {
+      name: 'show_changes',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, include_diff: false }
+    });
+    assert(changes.structuredContent.additions === 1 && changes.structuredContent.deletions === 0 && changes.structuredContent.diff === '', `show_changes include_diff=false lost stats: ${JSON.stringify(changes.structuredContent)}`);
+  } finally {
+    client.close();
+  }
+}
+
 async function runMinimalHandoffStress(root) {
   const client = await initClient(root, {
     CODEXPRO_TOOL_MODE: 'minimal',
@@ -429,7 +510,9 @@ async function runCardStress(root) {
 const root = await makeFixture();
 await runFullModeStress(root);
 await runGlobalSkillStress(root);
+await runMaxReadSearchStress();
 await runSupertoolModeStress(root);
+await runShowChangesStatsStress();
 await runMinimalHandoffStress(root);
 await runCardStress(root);
 console.log(`✓ stress test passed (${root})`);

@@ -143,7 +143,7 @@ async function filesForGlobs(
     const matches = await listFiles(guard, workspace, {
       root: ".",
       glob,
-      includeHidden: false,
+      includeHidden: /(^|\/)\./.test(glob),
       maxFiles: Math.max(1, maxFiles - out.length)
     });
     out.push(...matches);

@@ -103,6 +103,11 @@ await fs.writeFile(path.join(codexSessionDir, `rollout-2026-06-18T01-02-03-${lar
   JSON.stringify({ timestamp: '2026-06-18T01:02:05Z', type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(140000) } }),
   JSON.stringify({ timestamp: '2026-06-18T01:02:06Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'Large tail summary' } })
 ].join('\n') + '\n', 'utf8');
+const unreadableCodexSessionPath = path.join(codexSessionDir, 'rollout-2026-06-17T01-02-03-019cc366-bbbb-7444-8555-123456789aaa.jsonl');
+await fs.writeFile(unreadableCodexSessionPath, [
+  JSON.stringify({ timestamp: '2026-06-17T01:02:03Z', type: 'session_meta', payload: { id: '019cc366-bbbb-7444-8555-123456789aaa', cwd: tmp } })
+].join('\n') + '\n', 'utf8');
+await fs.chmod(unreadableCodexSessionPath, 0o000);
 await fs.mkdir(path.join(tmp, '.codex', 'skills', 'smoke-skill'), { recursive: true });
 await fs.writeFile(path.join(tmp, '.codex', 'skills', 'smoke-skill', 'SKILL.md'), [
   '---',
@@ -703,6 +708,10 @@ if (!standardCodexSessionToolNames.includes('codex_sessions')) {
 if (standardCodexSessionToolNames.includes('read_codex_session')) {
   throw new Error(`metadata mode should not expose read_codex_session: ${standardCodexSessionToolNames.join(', ')}`);
 }
+const metadataSessions = await standardCodexSessionsClient.request('tools/call', { name: 'codex_sessions', arguments: { query: 'Large tail summary', max_sessions: 5 } });
+if (metadataSessions.structuredContent.total_found !== 0 || JSON.stringify(metadataSessions.structuredContent).includes('Large tail summary')) {
+  throw new Error(`metadata mode exposed transcript tail content: ${JSON.stringify(metadataSessions.structuredContent)}`);
+}
 standardCodexSessionsClient.close();
 
 const fullTranscriptClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
@@ -803,10 +812,16 @@ const olderCodexTranscript = await codexSessionsClient.request('tools/call', {
 if (!olderCodexTranscript.content?.[0]?.text?.includes('Older session still readable by id')) {
   throw new Error(`read_codex_session only searched visible list window: ${olderCodexTranscript.content?.[0]?.text}`);
 }
+const sourcePathTranscript = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: { source_path: session.source_path, max_messages: 10 }
+});
+if (!sourcePathTranscript.content?.[0]?.text?.includes('Fix the smoke session browser')) {
+  throw new Error(`read_codex_session rejected source_path returned by codex_sessions: ${sourcePathTranscript.content?.[0]?.text}`);
+}
 const largeTailSessions = await codexSessionsClient.request('tools/call', { name: 'codex_sessions', arguments: { query: 'Large tail summary', max_sessions: 5 } });
-const largeTailSession = largeTailSessions.structuredContent.sessions?.find?.((item) => item.session_id === largeCodexSessionId);
-if (!largeTailSession || largeTailSession.summary !== 'Large tail summary') {
-  throw new Error(`codex_sessions did not parse summary from bounded tail window: ${JSON.stringify(largeTailSessions.structuredContent)}`);
+if (largeTailSessions.structuredContent.total_found !== 0 || JSON.stringify(largeTailSessions.structuredContent).includes('Large tail summary')) {
+  throw new Error(`read mode codex_sessions exposed transcript tail summary: ${JSON.stringify(largeTailSessions.structuredContent)}`);
 }
 codexSessionsClient.close();
 

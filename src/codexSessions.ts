@@ -242,16 +242,11 @@ async function parseSessionMeta(filePath: string): Promise<CodexSessionMeta | un
   }
 
   let lastActiveAt: number | undefined;
-  let summary: string | undefined;
   for (const line of [...tail].reverse()) {
     const value = parseJsonLine(line);
     if (!value) continue;
     lastActiveAt ??= parseTimestamp(value.timestamp);
-    if (!summary && value.type === "response_item" && value.payload?.type === "message") {
-      const text = extractText(value.payload.content);
-      if (text.trim()) summary = text;
-    }
-    if (lastActiveAt && summary) break;
+    if (lastActiveAt) break;
   }
 
   const id = String(sessionId || inferSessionIdFromFilename(filePath) || "").trim();
@@ -262,7 +257,6 @@ async function parseSessionMeta(filePath: string): Promise<CodexSessionMeta | un
     provider_id: "codex",
     session_id: id,
     ...(title ? { title } : {}),
-    ...(summary ? { summary: truncate(summary, 180) } : {}),
     ...(projectDir ? { project_dir: projectDir } : {}),
     ...(createdAt ? { created_at: createdAt } : {}),
     ...(lastActiveAt ? { last_active_at: lastActiveAt } : {}),
@@ -279,7 +273,7 @@ async function collectSessionMetas(config: CodexProConfig): Promise<CodexSession
 
   const sessions: CodexSessionMeta[] = [];
   for (const file of files) {
-    const meta = await parseSessionMeta(file);
+    const meta = await parseSessionMeta(file).catch(() => undefined);
     if (meta) sessions.push(meta);
   }
   return sessions;
@@ -298,7 +292,6 @@ export async function listCodexSessions(
     ? sessions.filter((session) => [
         session.session_id,
         session.title,
-        session.summary,
         session.project_dir,
         session.source_path
       ].filter(Boolean).join("\n").toLowerCase().includes(query))
@@ -316,7 +309,7 @@ export async function listCodexSessions(
 
 async function resolveSessionSource(config: CodexProConfig, sessionId?: string, sourcePath?: string): Promise<CodexSessionMeta> {
   ensureEnabled(config, true);
-  const roots = sessionRoots(config).map((root) => path.resolve(root));
+  const roots = await Promise.all(sessionRoots(config).map(async (root) => fsp.realpath(root).catch(() => path.resolve(root))));
 
   if (sourcePath) {
     const resolved = path.resolve(sourcePath);

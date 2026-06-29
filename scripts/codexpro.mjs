@@ -907,7 +907,7 @@ function spawnLogged(name, command, args, options = {}) {
   const child = spawn(command, args, { ...spawnOptions, stdio: ['ignore', 'pipe', 'pipe'] });
   const logLines = [];
   const record = (stream, chunk) => {
-    const text = String(chunk);
+    const text = redactForLog(String(chunk));
     logLines.push(...text.split(/\r?\n/).filter(Boolean).map((line) => `[${name}] ${line}`));
     while (logLines.length > 120) logLines.shift();
     if (verbose) stream.write(`[${name}] ${text}`);

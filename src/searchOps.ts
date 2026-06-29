@@ -40,9 +40,9 @@ function truncateLine(line: string, max = 400): string {
 
 async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: Workspace, options: SearchOptions): Promise<SearchResult> {
   const target = guard.resolve(workspace, options.root ?? ".");
-  const args = ["--line-number", "--with-filename", "--no-heading", "--color=never", "--max-columns", "500", "--max-count", "50"];
+  const args = ["--json", "--line-number", "--with-filename", "--no-heading", "--color=never", "--max-columns", "500", "--max-count", "50", "--max-filesize", String(config.maxReadBytes)];
   if (!options.regex) args.push("--fixed-strings");
-  if (!options.includeHidden) args.push("--hidden", "-g", "!.*", "-g", "!**/.*");
+  if (options.includeHidden) args.push("--hidden");
   for (const glob of config.blockedGlobs) args.push("-g", `!${glob}`);
   if (options.glob) args.push("-g", options.glob);
   // Pass the query via -e so patterns beginning with "-" (e.g. "->", "--flag")
@@ -69,13 +69,14 @@ async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: W
       const matches: Array<{ path: string; line: number; text: string }> = [];
       const lines = stdout.split("\n").filter(Boolean);
       for (const line of lines) {
-        const match = line.match(/^(.*?):(\d+):(.*)$/);
-        if (!match) continue;
-        const absPath = path.resolve(match[1]);
+        const value = JSON.parse(line);
+        if (value.type !== "match") continue;
+        const absPath = path.resolve(value.data?.path?.text ?? "");
         const rel = path.relative(workspace.root, absPath).split(path.sep).join("/");
         if (rel.startsWith("..")) continue;
         if (guard.isBlockedRelativePath(rel)) continue;
-        matches.push({ path: rel || ".", line: Number(match[2]), text: redactSensitiveText(truncateLine(match[3])) });
+        const lineText = String(value.data?.lines?.text ?? "").replace(/\r?\n$/, "");
+        matches.push({ path: rel || ".", line: Number(value.data?.line_number ?? 0), text: redactSensitiveText(truncateLine(lineText)) });
         if (matches.length >= options.maxResults) break;
       }
       const text = matches.map((m) => `${m.path}:${m.line}: ${m.text}`).join("\n") || "No matches.";
