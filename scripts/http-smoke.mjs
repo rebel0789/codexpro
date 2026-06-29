@@ -183,7 +183,6 @@ function postToolsListWithSession(baseUrl, token, sessionId) {
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
-const realRoot = await fs.realpath(root);
 const profileHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-profile-home-'));
 await fs.mkdir(path.join(root, '.codex', 'skills', 'http-smoke-skill'), { recursive: true });
 await fs.writeFile(path.join(root, '.codex', 'skills', 'http-smoke-skill', 'SKILL.md'), [
@@ -201,6 +200,7 @@ const token = 'codexpro-http-smoke-token';
 const runtimeQuerySecret = 'runtimequerysecret1234567890';
 const runtimeAccessSecret = 'runtimeaccesssecret1234567890';
 const runtimeCloudflareSecret = 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJodHRwLXNtb2tlIn0.signature1234567890';
+const staleCloudflareToken = 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJzdGFsZS1odHRwLXNtb2tlIn0.signature1234567890';
 const runtimeId = createHash('sha256').update(root).digest('hex').slice(0, 24);
 await fs.mkdir(path.join(profileHome, 'runtime'), { recursive: true });
 await fs.writeFile(path.join(profileHome, 'runtime', `${runtimeId}.json`), JSON.stringify({
@@ -348,6 +348,15 @@ try {
   if (invalidProfile.status !== 400) {
     throw new Error(`expected invalid guarded profile to return 400, got ${invalidProfile.status}`);
   }
+  await fs.mkdir(path.join(profileHome, 'profiles'), { recursive: true });
+  await fs.writeFile(path.join(profileHome, 'profiles', `${runtimeId}.json`), JSON.stringify({
+    version: 1,
+    root,
+    tunnel: 'cloudflare-named',
+    hostname: 'stale.example.com',
+    cloudflareToken: staleCloudflareToken,
+    cloudflareTokenFile: path.join(root, 'stale-cloudflare-token')
+  }, null, 2), 'utf8');
 
   const profileSave = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
     method: 'POST',
@@ -389,11 +398,13 @@ try {
     savedProfile.requireBashSession !== true ||
     savedProfile.toolCards !== true ||
     savedProfile.ngrokConfig !== path.join(root, 'ngrok.yml') ||
-    savedProfile.cloudflareTokenFile !== path.join(realRoot, 'cloudflare-token') ||
     savedProfile.noInstallCloudflared !== true ||
     savedProfile.token !== token
   ) {
     throw new Error(`admin profile save wrote unexpected profile: ${JSON.stringify(savedProfile)}`);
+  }
+  if (savedProfile.cloudflareToken || savedProfile.cloudflareTokenFile) {
+    throw new Error(`admin profile save kept cloudflare token config on ngrok profile: ${JSON.stringify(savedProfile)}`);
   }
 
   const localProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
@@ -403,8 +414,24 @@ try {
   });
   const localProfileJson = await localProfile.json();
   const localSavedProfile = JSON.parse(await fs.readFile(localProfileJson.profile_path, 'utf8'));
-  if (localProfile.status !== 200 || localSavedProfile.hostname || localProfileJson.profile?.hostname || localProfileJson.effective?.hostname) {
-    throw new Error(`admin profile local-only save kept a stale hostname: ${JSON.stringify(localProfileJson)} ${JSON.stringify(localSavedProfile)}`);
+  if (
+    localProfile.status !== 200 ||
+    localSavedProfile.hostname ||
+    localSavedProfile.ngrokConfig ||
+    localSavedProfile.tunnelName ||
+    localSavedProfile.cloudflareConfig ||
+    localSavedProfile.cloudflareToken ||
+    localSavedProfile.cloudflareTokenFile ||
+    localProfileJson.profile?.hostname ||
+    localProfileJson.profile?.ngrokConfig ||
+    localProfileJson.profile?.cloudflareToken ||
+    localProfileJson.profile?.cloudflareTokenFile ||
+    localProfileJson.effective?.hostname ||
+    localProfileJson.effective?.ngrokConfig ||
+    localProfileJson.effective?.cloudflareToken ||
+    localProfileJson.effective?.cloudflareTokenFile
+  ) {
+    throw new Error(`admin profile local-only save kept stale tunnel config: ${JSON.stringify(localProfileJson)} ${JSON.stringify(localSavedProfile)}`);
   }
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);

@@ -3240,7 +3240,7 @@ function writeControlPrompt() {
   process.stdout.write('codexpro> ');
 }
 
-function runControlPanel(details) {
+function runControlPanel(details, cleanup = cleanupChildren) {
   if (!process.stdin.isTTY) return new Promise(() => {});
 
   writeControlPrompt();
@@ -3253,7 +3253,7 @@ function runControlPanel(details) {
     process.stdin.on('data', (key) => {
       if (key === '\u0003') {
         console.log('\nStopping CodexPro...');
-        cleanupChildren();
+        cleanup();
         process.exit(130);
       }
       const normalized = key.toLowerCase();
@@ -3290,7 +3290,7 @@ function runControlPanel(details) {
         writeControlPrompt();
       } else if (normalized === 'q') {
         console.log('\nStopping CodexPro...');
-        cleanupChildren();
+        cleanup();
         process.exit(0);
       }
     });
@@ -3532,7 +3532,7 @@ async function main() {
       requireBashSession
     });
     saveRuntimeConnection(root, details, runtimeOptions);
-    await runControlPanel(details);
+    await runControlPanel(details, cleanup);
     return;
   }
 
@@ -3575,7 +3575,7 @@ async function main() {
       requireBashSession
     });
     saveRuntimeConnection(root, details, runtimeOptions);
-    await runControlPanel(details);
+    await runControlPanel(details, cleanup);
     return;
   }
 
@@ -3599,7 +3599,7 @@ async function main() {
       requireBashSession
     });
     saveRuntimeConnection(root, details, runtimeOptions);
-    await runControlPanel(details);
+    await runControlPanel(details, cleanup);
     return;
   }
 
@@ -3622,7 +3622,7 @@ async function main() {
       requireBashSession
     });
     saveRuntimeConnection(root, details, runtimeOptions);
-    await runControlPanel(details);
+    await runControlPanel(details, cleanup);
     return;
   }
 
@@ -3690,7 +3690,7 @@ async function main() {
     requireBashSession
   });
   saveRuntimeConnection(root, details, runtimeOptions);
-  await runControlPanel(details);
+  await runControlPanel(details, cleanup);
 }
 
 main().catch((error) => {

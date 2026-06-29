@@ -344,17 +344,18 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
   }
 
   const token = typeof existing.token === "string" && existing.token ? existing.token : config.authToken ?? "";
-  const cloudflareToken = typeof existing.cloudflareToken === "string" && existing.cloudflareToken ? existing.cloudflareToken : "";
+  const cloudflareToken = next.tunnel === "cloudflare-named" && typeof existing.cloudflareToken === "string" && existing.cloudflareToken ? existing.cloudflareToken : "";
   const write = effectiveWriteMode(next.mode, next.write);
-  const ngrokConfig = normalizeProfilePath(config.defaultRoot, next.ngrokConfig);
-  const cloudflareConfig = normalizeProfilePath(config.defaultRoot, next.cloudflareConfig);
-  const cloudflareTokenFile = normalizeProfilePath(config.defaultRoot, next.cloudflareTokenFile);
+  const tunnelName = next.tunnel === "cloudflare-named" ? next.tunnelName : "";
+  const ngrokConfig = next.tunnel === "ngrok" ? normalizeProfilePath(config.defaultRoot, next.ngrokConfig) : "";
+  const cloudflareConfig = next.tunnel === "cloudflare-named" ? normalizeProfilePath(config.defaultRoot, next.cloudflareConfig) : "";
+  const cloudflareTokenFile = next.tunnel === "cloudflare-named" ? normalizeProfilePath(config.defaultRoot, next.cloudflareTokenFile) : "";
   return {
     port: next.port,
     mode: next.mode,
     tunnel: next.tunnel,
     ...(next.hostname ? { hostname: next.hostname } : {}),
-    ...(next.tunnelName ? { tunnelName: next.tunnelName } : {}),
+    ...(tunnelName ? { tunnelName } : {}),
     ...(ngrokConfig ? { ngrokConfig } : {}),
     ...(cloudflareConfig ? { cloudflareConfig } : {}),
     ...(cloudflareTokenFile ? { cloudflareTokenFile } : {}),
