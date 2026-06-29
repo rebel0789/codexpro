@@ -239,6 +239,15 @@ const cardSearch = await cardClient.request('tools/call', {
 if (!cardSearch.structuredContent.text?.includes('read')) {
   throw new Error(`CODEXPRO_TOOL_CARDS=1 search did not include structured text: ${JSON.stringify(cardSearch.structuredContent)}`);
 }
+if (spawnSync(process.platform === 'win32' ? 'where' : 'sh', process.platform === 'win32' ? ['rg'] : ['-lc', 'command -v rg >/dev/null 2>&1']).status === 0) {
+  const cardRegexSearch = await cardClient.request('tools/call', {
+    name: 'search',
+    arguments: { workspace_id: cardOpened.structuredContent.workspace_id, query: '(?i)READ', path: 'demo.txt', regex: true, max_results: 5 }
+  });
+  if (!cardRegexSearch.structuredContent.matches?.length || cardRegexSearch.structuredContent.used !== 'ripgrep') {
+    throw new Error(`ripgrep regex search did not accept rg syntax: ${JSON.stringify(cardRegexSearch.structuredContent)}`);
+  }
+}
 await cardClient.close();
 const resources = await client.request('resources/list', {});
 const toolCard = resources.resources.find((resource) => resource.uri === toolCardUri);

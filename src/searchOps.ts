@@ -25,7 +25,9 @@ export interface SearchResult {
 
 function commandExists(command: string): Promise<boolean> {
   return new Promise((resolve) => {
-    const child = spawn("/bin/sh", ["-lc", `command -v ${command} >/dev/null 2>&1`], { stdio: "ignore" });
+    const child = process.platform === "win32"
+      ? spawn("where", [command], { stdio: "ignore", shell: false })
+      : spawn("/bin/sh", ["-lc", `command -v ${command} >/dev/null 2>&1`], { stdio: "ignore" });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", () => resolve(false));
   });
@@ -127,15 +129,6 @@ export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, 
     includeHidden: Boolean(rawOptions.includeHidden),
     maxResults: Math.max(1, Math.min(rawOptions.maxResults ?? config.maxSearchResults, config.maxSearchResults))
   };
-  if (options.regex) {
-    try {
-      // Validate early for fallback and clearer errors.
-      new RegExp(options.query);
-    } catch (error) {
-      throw new CodexProError(`Invalid regex: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-
   if (await commandExists("rg")) {
     return runRipgrep(config, guard, workspace, options);
   }

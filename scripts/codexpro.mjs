@@ -1237,6 +1237,7 @@ function runProcessCaptured(command, args, options) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let closed = false;
     const appendBounded = (current, chunk) => {
       if (Buffer.byteLength(current, 'utf8') > retainedOutputBytes) return current;
       const next = current + String(chunk);
@@ -1249,7 +1250,7 @@ function runProcessCaptured(command, args, options) {
       timedOut = true;
       child.kill('SIGTERM');
       setTimeout(() => {
-        if (!child.killed) child.kill('SIGKILL');
+        if (!closed) child.kill('SIGKILL');
       }, 1500).unref();
     }, timeoutMs);
     timer.unref();
@@ -1273,6 +1274,7 @@ function runProcessCaptured(command, args, options) {
       });
     });
     child.on('close', (exitCode, signal) => {
+      closed = true;
       clearTimeout(timer);
       const out = trimBytes(stdout, maxOutputBytes);
       const err = trimBytes(`${stderr}${timedOut ? `\n[codexpro] Command timed out after ${timeoutMs} ms.` : ''}`, maxOutputBytes);

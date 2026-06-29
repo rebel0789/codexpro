@@ -186,6 +186,38 @@ if (!timeoutState.includes('"state": "timed_out"') || !timeoutState.includes('"e
   throw new Error(`execute-handoff timeout state was wrong\n${timeoutState}`);
 }
 
+if (process.platform !== 'win32') {
+  const stubbornRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-execute-stubborn-timeout-'));
+  await fs.mkdir(path.join(stubbornRoot, '.ai-bridge'), { recursive: true });
+  await fs.writeFile(path.join(stubbornRoot, '.ai-bridge', 'current-plan.md'), '# Stubborn timeout plan\n\nIgnore SIGTERM.\n', 'utf8');
+  await fs.writeFile(path.join(stubbornRoot, 'stubborn-agent.mjs'), `
+process.on('SIGTERM', () => console.log('ignored SIGTERM'));
+setTimeout(() => process.exit(42), 6000);
+setInterval(() => {}, 1000);
+`, 'utf8');
+  const stubbornStarted = Date.now();
+  const stubbornRun = run([
+    'execute-handoff',
+    '--root',
+    stubbornRoot,
+    '--agent',
+    'custom',
+    '--command',
+    `${quoteArg(process.execPath)} stubborn-agent.mjs --task-file {{plan_file}}`,
+    '--timeout-ms',
+    '1000',
+    '--yes'
+  ]);
+  const stubbornDuration = Date.now() - stubbornStarted;
+  if (stubbornRun.status === 0 || stubbornDuration > 5000) {
+    throw new Error(`execute-handoff stubborn timeout did not escalate\nstatus: ${stubbornRun.status}\nduration: ${stubbornDuration}\nstdout:\n${stubbornRun.stdout}\nstderr:\n${stubbornRun.stderr}`);
+  }
+  const stubbornStatus = await fs.readFile(path.join(stubbornRoot, '.ai-bridge', 'agent-status.md'), 'utf8');
+  if (!stubbornStatus.includes('Timed out: yes') || !stubbornStatus.includes('Signal: SIGKILL')) {
+    throw new Error(`execute-handoff stubborn timeout status was wrong\n${stubbornStatus}`);
+  }
+}
+
 const noisyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-execute-noisy-'));
 await fs.mkdir(path.join(noisyRoot, '.ai-bridge'), { recursive: true });
 await fs.writeFile(path.join(noisyRoot, '.ai-bridge', 'current-plan.md'), '# Noisy plan\n\nPrint a lot, then edit.\n', 'utf8');

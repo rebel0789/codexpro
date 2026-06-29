@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -158,6 +158,14 @@ async function runFullModeStress(root) {
     assert(largeSearch.structuredContent.matches.length === 2000, `expected 2000 search matches, got ${largeSearch.structuredContent.matches.length}`);
     assert(largeSearch.structuredContent.truncated === true, 'large search did not report truncation');
     assert(!('text' in largeSearch.structuredContent), 'search duplicated text in structuredContent with cards off');
+
+    if (spawnSync(process.platform === 'win32' ? 'where' : 'sh', process.platform === 'win32' ? ['rg'] : ['-lc', 'command -v rg >/dev/null 2>&1']).status === 0) {
+      const rgRegex = await client.request('tools/call', {
+        name: 'search',
+        arguments: { workspace_id: ws, query: '(?i)STRESS-NEEDLE-3', path: 'many', regex: true, max_results: 10 }
+      });
+      assert(rgRegex.structuredContent.used === 'ripgrep' && rgRegex.structuredContent.matches.length === 10, 'ripgrep regex search rejected rg syntax');
+    }
 
     const superRead = await client.request('tools/call', {
       name: 'codexpro',
