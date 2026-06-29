@@ -35,7 +35,7 @@
 
 ## Installation
 
-CodexPro requires Node.js 20+ and a ChatGPT Plus or Pro account with Apps / Developer Mode access.
+CodexPro requires Node.js 20+ and a ChatGPT account with Apps / Developer Mode access. OpenAI currently lists Developer Mode for Pro, Plus, Business, Enterprise, and Education accounts on web.
 
 Install the CLI:
 
@@ -137,15 +137,15 @@ CodexPro is not an OS sandbox. It is a local developer bridge with safety defaul
 
 ```text
 Node.js 20+
-ChatGPT Plus or Pro account with Apps / Developer Mode access
+ChatGPT account with Apps / Developer Mode access
 Developer mode enabled from Settings -> Apps -> Advanced settings
 Enforce CSP in developer mode kept enabled
 One public tunnel option: Cloudflare quick tunnel, ngrok free dev domain, or Cloudflare named tunnel
 ```
 
-Current testing shows free / Go ChatGPT accounts do not expose the app flow needed for CodexPro. Use Plus or Pro for the best experience.
+Current testing shows free / Go ChatGPT accounts do not expose the app flow needed for CodexPro. Use an account tier where ChatGPT shows Apps / Developer Mode.
 
-Account tier and model tool support are separate things. Plus/Pro can expose Apps / Developer Mode, but a specific model surface may still be unable to call the connector. If CodexPro actions are unavailable in that chat, use another tool-capable ChatGPT surface or the Pro context fallback for that session.
+Account tier and model tool support are separate things. Eligible accounts can expose Apps / Developer Mode, but a specific model surface may still be unable to call the connector. If CodexPro actions are unavailable in that chat, use another tool-capable ChatGPT surface or the Pro context fallback for that session.
 
 ## Status
 

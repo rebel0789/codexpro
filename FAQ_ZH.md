@@ -2,7 +2,7 @@
 
 ## 我应该用什么 ChatGPT 账号？
 
-使用 ChatGPT Plus 或 Pro，并确保账号能访问 Apps / Developer Mode。
+使用能访问 Apps / Developer Mode 的 ChatGPT 账号。OpenAI 当前文档列出的 web 端 Developer Mode 账号范围包括 Pro、Plus、Business、Enterprise 和 Education。
 
 当前测试显示，Free / Go 账号不暴露 CodexPro 需要的 App 创建流程。
 

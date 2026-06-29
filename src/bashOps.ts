@@ -110,7 +110,7 @@ const SAFE_BLOCKED_PATTERNS = [
   /(^|\s)(cat|grep|rg|head|tail|wc)\s+/,
   /[;&|<>`]/,
   /\$\(/,
-  /\n/
+  /[\r\n]/
 ];
 
 function compact(command: string): string {
@@ -134,9 +134,10 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
   }
   if (config.bashMode === "full") return;
 
+  const raw = command.trim();
   const normalized = compact(command);
   for (const pattern of SAFE_BLOCKED_PATTERNS) {
-    if (pattern.test(normalized)) {
+    if (pattern.test(raw) || pattern.test(normalized)) {
       throw new CodexProError(
         `Command is blocked in CODEXPRO_BASH_MODE=safe: ${normalized}\n` +
           "Use separate read/search/git tools, or restart with CODEXPRO_BASH_MODE=full only for trusted repos."
