@@ -87,7 +87,7 @@ async function withStartedCodexPro(args, env, fn) {
   child.stdout.on('data', (chunk) => { output += chunk; });
   child.stderr.on('data', (chunk) => { output += chunk; });
   try {
-    await fn();
+    await fn(child);
   } catch (error) {
     throw new Error(`${error.message}\nstart output:\n${output}`);
   } finally {
@@ -100,6 +100,8 @@ const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-root-'))
 const reuseRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-reuse-'));
 const policyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-policy-'));
 const runtimeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-runtime-'));
+const staleRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-stale-'));
+const ngrokRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-ngrok-'));
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-home-'));
 const env = { ...process.env, CODEXPRO_HOME: home };
 
@@ -199,6 +201,47 @@ const realPolicyRoot = await fs.realpath(policyRoot);
 if (policyProfile.write !== 'handoff' || policyProfile.hostname !== 'policy.ngrok-free.app' || policyProfile.ngrokConfig !== path.join(realPolicyRoot, 'ngrok.yml')) {
   throw new Error(`settings policy profile did not normalize write/path values: ${JSON.stringify(policyProfile)}`);
 }
+run([
+  'settings',
+  'set',
+  '--root',
+  policyRoot,
+  '--tunnel',
+  'none'
+], env);
+const localPolicyProfile = await readProfile(policyRoot, home);
+if (localPolicyProfile.tunnel !== 'none' || localPolicyProfile.hostname || localPolicyProfile.ngrokConfig) {
+  throw new Error(`settings local-only profile kept stale ngrok values: ${JSON.stringify(localPolicyProfile)}`);
+}
+
+run([
+  'settings',
+  'set',
+  '--root',
+  staleRoot,
+  '--tunnel',
+  'cloudflare-named',
+  '--hostname',
+  'codexpro-stale.example.com',
+  '--tunnel-name',
+  'stale-tunnel',
+  '--cloudflare-config',
+  'cloudflared.yml',
+  '--cloudflare-token-file',
+  'cloudflare-token'
+], env);
+run([
+  'settings',
+  'set',
+  '--root',
+  staleRoot,
+  '--tunnel',
+  'cloudflare'
+], env);
+const quickProfile = await readProfile(staleRoot, home);
+if (quickProfile.tunnel !== 'cloudflare' || quickProfile.hostname || quickProfile.tunnelName || quickProfile.cloudflareConfig || quickProfile.cloudflareTokenFile) {
+  throw new Error(`settings quick tunnel profile kept stale named-tunnel values: ${JSON.stringify(quickProfile)}`);
+}
 
 runFail([
   'settings',
@@ -283,12 +326,18 @@ run([
 await withStartedCodexPro([
   '--root',
   runtimeRoot
-], env, async () => {
-  const runtime = await waitForJson(runtimePath, (data) => data.toolCards === true, 'tool-cards runtime status');
-  if (runtime.toolCards !== true) {
+], env, async (child) => {
+  const runtime = await waitForJson(runtimePath, (data) => data.toolCards === true && data.pid === child.pid, 'tool-cards runtime status');
+  if (runtime.toolCards !== true || runtime.pid !== child.pid) {
     throw new Error(`runtime status did not persist toolCards: ${JSON.stringify(runtime)}`);
   }
 });
+try {
+  await fs.access(runtimePath);
+  throw new Error('runtime status was not cleared after launcher SIGTERM');
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
 
 const cloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-'));
 const cloudflarePort = await getFreePort();
@@ -352,6 +401,48 @@ const namedFailure = runFail([
 ], env, /Recent cloudflared output/);
 if (namedFailure.includes(cloudflareRawToken) || !namedFailure.includes('TUNNEL_TOKEN= [REDACTED_SECRET]')) {
   throw new Error(`named tunnel failure leaked or failed to redact Cloudflare token\n${namedFailure}`);
+}
+
+const fakeNgrok = path.join(home, 'fake-ngrok.mjs');
+await fs.writeFile(fakeNgrok, [
+  '#!/usr/bin/env node',
+  "if (process.argv.includes('version')) { console.log('ngrok version 3.0.0'); process.exit(0); }",
+  "console.error('NGROK_ARGS=' + process.argv.slice(2).join('|'));",
+  'process.exit(2);',
+  ''
+].join('\n'), { mode: 0o700 });
+run([
+  'settings',
+  'set',
+  '--root',
+  ngrokRoot,
+  '--tunnel',
+  'ngrok',
+  '--hostname',
+  'codexpro-env.ngrok-free.app',
+  '--ngrok-config',
+  'old-ngrok.yml'
+], env);
+const ngrokPort = await getFreePort();
+const ngrokFailure = runFail([
+  'start',
+  '--root',
+  ngrokRoot,
+  '--tunnel',
+  'ngrok',
+  '--hostname',
+  'codexpro-env.ngrok-free.app',
+  '--ngrok',
+  fakeNgrok,
+  '--port',
+  String(ngrokPort),
+  '--token',
+  'codexpro-ngrok-env-token',
+  '--no-copy-url'
+], { ...env, NGROK_CONFIG: 'new-ngrok.yml' }, /Recent ngrok output/);
+const realNgrokRoot = await fs.realpath(ngrokRoot);
+if (!ngrokFailure.includes(`--config|${path.join(realNgrokRoot, 'new-ngrok.yml')}`) || ngrokFailure.includes('old-ngrok.yml')) {
+  throw new Error(`ngrok start did not let env config override saved profile\n${ngrokFailure}`);
 }
 
 const listed = run(['settings', 'list'], env);
