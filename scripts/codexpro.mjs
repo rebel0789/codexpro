@@ -1113,11 +1113,13 @@ function splitCommandTemplate(input) {
   const tokens = [];
   let current = '';
   let quote = '';
+  let tokenStarted = false;
   const text = String(input);
   for (let i = 0; i < text.length; i += 1) {
     const char = text[i];
     if (char === '\\') {
       const next = text[i + 1];
+      tokenStarted = true;
       if (next && (next === quote || next === '\\' || (!quote && /\s|["']/.test(next)))) {
         current += next;
         i += 1;
@@ -1128,24 +1130,30 @@ function splitCommandTemplate(input) {
     }
     if (quote) {
       if (char === quote) quote = '';
-      else current += char;
+      else {
+        tokenStarted = true;
+        current += char;
+      }
       continue;
     }
     if (char === '"' || char === "'") {
       quote = char;
+      tokenStarted = true;
       continue;
     }
     if (/\s/.test(char)) {
-      if (current) {
+      if (tokenStarted) {
         tokens.push(current);
         current = '';
+        tokenStarted = false;
       }
       continue;
     }
+    tokenStarted = true;
     current += char;
   }
   if (quote) throw new Error('Custom command has an unterminated quote.');
-  if (current) tokens.push(current);
+  if (tokenStarted) tokens.push(current);
   return tokens;
 }
 
@@ -1217,6 +1225,7 @@ function executorCommandPreview(commandInfo) {
 function runProcessCaptured(command, args, options) {
   const timeoutMs = options.timeoutMs;
   const maxOutputBytes = options.maxOutputBytes;
+  const retainedOutputBytes = maxOutputBytes + 1;
   const started = Date.now();
   return new Promise((resolve) => {
     const child = spawn(command, args, {
@@ -1228,6 +1237,14 @@ function runProcessCaptured(command, args, options) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    const appendBounded = (current, chunk) => {
+      if (Buffer.byteLength(current, 'utf8') > retainedOutputBytes) return current;
+      const next = current + String(chunk);
+      const buffer = Buffer.from(next, 'utf8');
+      return buffer.byteLength > retainedOutputBytes
+        ? buffer.subarray(0, retainedOutputBytes).toString('utf8')
+        : next;
+    };
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill('SIGTERM');
@@ -1238,12 +1255,10 @@ function runProcessCaptured(command, args, options) {
     timer.unref();
 
     child.stdout.on('data', (chunk) => {
-      stdout += String(chunk);
-      if (Buffer.byteLength(stdout, 'utf8') > maxOutputBytes * 2) child.kill('SIGTERM');
+      stdout = appendBounded(stdout, chunk);
     });
     child.stderr.on('data', (chunk) => {
-      stderr += String(chunk);
-      if (Buffer.byteLength(stderr, 'utf8') > maxOutputBytes * 2) child.kill('SIGTERM');
+      stderr = appendBounded(stderr, chunk);
     });
     child.on('error', (error) => {
       clearTimeout(timer);
@@ -1430,7 +1445,7 @@ async function executeHandoffRequest(request, args, options = {}) {
     timeoutMs: request.timeoutMs,
     maxOutputBytes: request.maxOutputBytes
   });
-  const diffText = readGitDiff(request.root, request.maxOutputBytes);
+  const diffText = readGitDiffExcludingContext(request.root, request.contextDir, request.maxOutputBytes);
   const outputs = writeExecutionOutputs(request.root, request.contextDir, request.commandInfo, result, diffText);
 
   const runState = result.timedOut ? 'timed_out' : (result.exitCode === 0 ? 'completed' : 'failed');
@@ -1472,7 +1487,7 @@ async function runExecuteHandoff(argv) {
   }
 
   const execution = await executeHandoffRequest(request, args);
-  if (execution.result?.exitCode && execution.result.exitCode !== 0) process.exitCode = execution.result.exitCode;
+  if (execution.result && execution.result.exitCode !== 0) process.exitCode = execution.result.exitCode ?? 1;
 }
 
 function planHash(planText) {
@@ -1662,7 +1677,7 @@ async function runWatchHandoff(argv) {
     });
 
     if (args.once) {
-      if (exitCode && exitCode !== 0) process.exitCode = exitCode;
+      if (execution.result && execution.result.exitCode !== 0) process.exitCode = execution.result.exitCode ?? 1;
       return;
     }
 

@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { CodexProConfig } from "./config.js";
-import type { Workspace } from "./guard.js";
+import { isSubpath, type Workspace } from "./guard.js";
 
 export interface SkillInventoryItem {
   name: string;
@@ -79,6 +79,14 @@ async function safeReaddir(dir: string): Promise<fs.Dirent[]> {
   }
 }
 
+function realpathOrUndefined(filePath: string): string | undefined {
+  try {
+    return fs.realpathSync(filePath);
+  } catch {
+    return undefined;
+  }
+}
+
 function displayPath(absPath: string, workspaceRoot: string): string {
   const home = os.homedir();
   if (absPath === workspaceRoot) return "$WORKSPACE";
@@ -150,10 +158,16 @@ async function discoverSkillRecords(
   options: { includeGlobal?: boolean; maxSkills?: number } = {}
 ): Promise<SkillInventoryRecord[]> {
   const maxSkills = Math.max(1, Math.min(options.maxSkills ?? 120, 500));
-  const roots = [
+  const workspaceRoots = [
     path.join(workspace.root, ".codex", "skills"),
     path.join(workspace.root, ".agents", "skills"),
-    path.join(workspace.root, "skills"),
+    path.join(workspace.root, "skills")
+  ].flatMap((dir) => {
+    const real = realpathOrUndefined(dir);
+    return real && isSubpath(real, workspace.root) ? [real] : [];
+  });
+  const roots = [
+    ...workspaceRoots,
     ...(options.includeGlobal
       ? [
           path.join(os.homedir(), ".codex", "skills"),
@@ -171,20 +185,22 @@ async function discoverSkillRecords(
 
   const items: SkillInventoryRecord[] = [];
   for (const file of skillFiles.slice(0, maxSkills)) {
+    const realFile = realpathOrUndefined(file) ?? file;
+    if (isSubpath(file, workspace.root) && !isSubpath(realFile, workspace.root)) continue;
     let text = "";
     try {
-      text = await safeReadText(file);
+      text = await safeReadText(realFile);
     } catch {
       // Keep the skill visible even if the file cannot be read.
     }
-    const name = frontmatterValue(text, "name") ?? path.basename(path.dirname(file));
+    const name = frontmatterValue(text, "name") ?? path.basename(path.dirname(realFile));
     const description = frontmatterValue(text, "description");
     items.push({
       name,
       description,
-      source: skillSource(file, workspace.root),
-      path: displayPath(file, workspace.root),
-      absPath: file
+      source: skillSource(realFile, workspace.root),
+      path: displayPath(realFile, workspace.root),
+      absPath: realFile
     });
   }
 
@@ -240,6 +256,12 @@ export async function loadSkill(
   const [skill] = matches;
   if (path.basename(skill.absPath) !== "SKILL.md") {
     throw new Error(`Refusing to load non-skill file: ${skill.path}`);
+  }
+  if (skill.source === "workspace") {
+    const realSkillPath = realpathOrUndefined(skill.absPath);
+    if (!realSkillPath || !isSubpath(realSkillPath, workspace.root)) {
+      throw new Error(`Refusing to load workspace skill outside workspace: ${skill.path}`);
+    }
   }
   const maxBytes = Math.max(1_000, Math.min(options.maxBytes ?? 40_000, 100_000));
   const loaded = await readTextWithStats(skill.absPath, maxBytes);

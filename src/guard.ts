@@ -149,6 +149,13 @@ export class PathGuard {
     }
 
     if (options.forWrite) {
+      try {
+        if (fs.lstatSync(absPath).isSymbolicLink()) {
+          throw new CodexProError(`Refusing to write through a symlink: ${inputPath}`);
+        }
+      } catch (error) {
+        if (error instanceof CodexProError) throw error;
+      }
       const parent = closestExistingParent(path.dirname(absPath));
       const realParent = maybeRealpath(parent);
       if (realParent && !isSubpath(realParent, workspace.root)) {

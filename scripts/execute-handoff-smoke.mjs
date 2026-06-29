@@ -71,6 +71,25 @@ if (missingPlaceholder.status === 0 || !missingPlaceholder.stderr.includes('must
   throw new Error(`custom command without plan placeholder should fail\nstdout:\n${missingPlaceholder.stdout}\nstderr:\n${missingPlaceholder.stderr}`);
 }
 
+await fs.writeFile(path.join(root, 'empty-arg-agent.mjs'), `
+const emptyIndex = process.argv.indexOf('--empty');
+if (emptyIndex < 0 || process.argv[emptyIndex + 1] !== '') {
+  console.error(\`EMPTY_ARG=\${JSON.stringify(process.argv[emptyIndex + 1])}\`);
+  process.exit(7);
+}
+`, 'utf8');
+const emptyArg = run([
+  'execute-handoff',
+  '--root',
+  root,
+  '--agent',
+  'custom',
+  '--command',
+  `${quoteArg(process.execPath)} empty-arg-agent.mjs --empty "" --task-file {{plan_file}}`,
+  '--yes'
+]);
+requireSuccess(emptyArg, 'execute-handoff empty quoted arg');
+
 const executed = run([
   'execute-handoff',
   '--root',
@@ -113,6 +132,85 @@ if (runState.exit_code !== 0 || runState.timed_out !== false || runState.executo
 }
 if (!runState.plan_hash || !runState.started_at || !runState.finished_at || runState.status_file !== '.ai-bridge/agent-status.md') {
   throw new Error(`handoff-run-state missing lifecycle fields\n${runStateRaw}`);
+}
+
+const executeStagedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-execute-staged-untracked-'));
+await fs.mkdir(path.join(executeStagedRoot, '.ai-bridge'), { recursive: true });
+await fs.writeFile(path.join(executeStagedRoot, '.ai-bridge', 'current-plan.md'), '# Staged plan\n\nStage one edit and create one file.\n', 'utf8');
+await fs.writeFile(path.join(executeStagedRoot, 'app.txt'), 'base\n', 'utf8');
+await fs.writeFile(path.join(executeStagedRoot, 'stage-agent.mjs'), `
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+fs.appendFileSync('app.txt', 'staged change\\n');
+spawnSync('git', ['add', 'app.txt'], { stdio: 'inherit' });
+fs.writeFileSync('new-feature.txt', 'new feature\\n');
+`, 'utf8');
+requireSuccess(spawnSync('git', ['init'], { cwd: executeStagedRoot, encoding: 'utf8' }), 'execute staged git init');
+requireSuccess(spawnSync('git', ['add', 'app.txt'], { cwd: executeStagedRoot, encoding: 'utf8' }), 'execute staged git add');
+requireSuccess(run([
+  'execute-handoff',
+  '--root',
+  executeStagedRoot,
+  '--agent',
+  'custom',
+  '--command',
+  `${quoteArg(process.execPath)} stage-agent.mjs --task-file {{plan_file}}`,
+  '--yes'
+]), 'execute-handoff staged/untracked diff');
+const executeStagedDiff = await fs.readFile(path.join(executeStagedRoot, '.ai-bridge', 'implementation-diff.patch'), 'utf8');
+if (!executeStagedDiff.includes('# Staged diff') || !executeStagedDiff.includes('staged change') || !executeStagedDiff.includes('# Untracked files') || !executeStagedDiff.includes('new-feature.txt')) {
+  throw new Error(`execute-handoff diff missed staged or untracked changes\n${executeStagedDiff}`);
+}
+
+const timeoutRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-execute-timeout-'));
+await fs.mkdir(path.join(timeoutRoot, '.ai-bridge'), { recursive: true });
+await fs.writeFile(path.join(timeoutRoot, '.ai-bridge', 'current-plan.md'), '# Timeout plan\n\nSleep too long.\n', 'utf8');
+await fs.writeFile(path.join(timeoutRoot, 'slow-agent.mjs'), `setTimeout(() => {}, 5000);\n`, 'utf8');
+const timeoutRun = run([
+  'execute-handoff',
+  '--root',
+  timeoutRoot,
+  '--agent',
+  'custom',
+  '--command',
+  `${quoteArg(process.execPath)} slow-agent.mjs --task-file {{plan_file}}`,
+  '--timeout-ms',
+  '50',
+  '--yes'
+]);
+if (timeoutRun.status === 0) {
+  throw new Error(`execute-handoff timeout exited successfully\nstdout:\n${timeoutRun.stdout}\nstderr:\n${timeoutRun.stderr}`);
+}
+const timeoutState = await fs.readFile(path.join(timeoutRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8');
+if (!timeoutState.includes('"state": "timed_out"') || !timeoutState.includes('"exit_code": null')) {
+  throw new Error(`execute-handoff timeout state was wrong\n${timeoutState}`);
+}
+
+const noisyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-execute-noisy-'));
+await fs.mkdir(path.join(noisyRoot, '.ai-bridge'), { recursive: true });
+await fs.writeFile(path.join(noisyRoot, '.ai-bridge', 'current-plan.md'), '# Noisy plan\n\nPrint a lot, then edit.\n', 'utf8');
+await fs.writeFile(path.join(noisyRoot, 'app.txt'), 'base\n', 'utf8');
+await fs.writeFile(path.join(noisyRoot, 'noisy-agent.mjs'), `
+import fs from 'node:fs';
+console.log('x'.repeat(200000));
+fs.appendFileSync('app.txt', 'after noisy output\\n');
+`, 'utf8');
+requireSuccess(run([
+  'execute-handoff',
+  '--root',
+  noisyRoot,
+  '--agent',
+  'custom',
+  '--command',
+  `${quoteArg(process.execPath)} noisy-agent.mjs --task-file {{plan_file}}`,
+  '--max-output-bytes',
+  '2048',
+  '--yes'
+]), 'execute-handoff noisy output');
+const noisyApp = await fs.readFile(path.join(noisyRoot, 'app.txt'), 'utf8');
+const noisyStatus = await fs.readFile(path.join(noisyRoot, '.ai-bridge', 'agent-status.md'), 'utf8');
+if (!noisyApp.includes('after noisy output') || !noisyStatus.includes('[output truncated to 4000 bytes]')) {
+  throw new Error(`execute-handoff output cap killed or failed to truncate\napp:\n${noisyApp}\nstatus:\n${noisyStatus}`);
 }
 
 const watchRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-watch-handoff-'));
@@ -175,6 +273,33 @@ const watchState = await fs.readFile(path.join(watchRoot, '.ai-bridge', 'watch-h
 const watchLog = await fs.readFile(path.join(watchRoot, '.ai-bridge', 'execution-log.jsonl'), 'utf8');
 if (!watchState.includes('lastPlanHash') || !watchLog.includes('"event":"watch_handoff_started"') || !watchLog.includes('"event":"watch_handoff_finished"')) {
   throw new Error(`watch did not write state/log\nstate:\n${watchState}\nlog:\n${watchLog}`);
+}
+
+const watchTimeoutRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-watch-timeout-'));
+await fs.mkdir(path.join(watchTimeoutRoot, '.ai-bridge'), { recursive: true });
+await fs.writeFile(path.join(watchTimeoutRoot, '.ai-bridge', 'current-plan.md'), '# Watch timeout\n\nSleep too long.\n', 'utf8');
+await fs.writeFile(path.join(watchTimeoutRoot, 'slow-agent.mjs'), `setTimeout(() => {}, 5000);\n`, 'utf8');
+const watchTimeoutRun = run([
+  'watch-handoff',
+  '--root',
+  watchTimeoutRoot,
+  '--agent',
+  'custom',
+  '--command',
+  `${quoteArg(process.execPath)} slow-agent.mjs --task-file {{plan_file}}`,
+  '--once',
+  '--timeout-ms',
+  '50',
+  '--yes',
+  '--debounce-ms',
+  '0'
+]);
+if (watchTimeoutRun.status === 0) {
+  throw new Error(`watch-handoff timeout exited successfully\nstdout:\n${watchTimeoutRun.stdout}\nstderr:\n${watchTimeoutRun.stderr}`);
+}
+const watchTimeoutState = await fs.readFile(path.join(watchTimeoutRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8');
+if (!watchTimeoutState.includes('"state": "timed_out"') || !watchTimeoutState.includes('"exit_code": null')) {
+  throw new Error(`watch-handoff timeout state was wrong\n${watchTimeoutState}`);
 }
 
 const loopRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-loop-handoff-'));
@@ -354,31 +479,31 @@ if (!barePassLog.includes('"stop_reason":"unknown_verdict"')) {
   throw new Error(`loop did not reject bare PASS as unknown verdict\nlog:\n${barePassLog}`);
 }
 
-const stagedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-loop-staged-change-'));
-await fs.mkdir(path.join(stagedRoot, '.ai-bridge'), { recursive: true });
-await fs.writeFile(path.join(stagedRoot, '.ai-bridge', 'current-plan.md'), '# Staged plan\n\nStage a change.\n', 'utf8');
-await fs.writeFile(path.join(stagedRoot, 'app.txt'), 'start\n', 'utf8');
-await fs.writeFile(path.join(stagedRoot, 'stage-agent.mjs'), `
+const loopStagedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-loop-staged-change-'));
+await fs.mkdir(path.join(loopStagedRoot, '.ai-bridge'), { recursive: true });
+await fs.writeFile(path.join(loopStagedRoot, '.ai-bridge', 'current-plan.md'), '# Staged plan\n\nStage a change.\n', 'utf8');
+await fs.writeFile(path.join(loopStagedRoot, 'app.txt'), 'start\n', 'utf8');
+await fs.writeFile(path.join(loopStagedRoot, 'stage-agent.mjs'), `
 import fs from 'node:fs';
 import { spawnSync } from 'node:child_process';
 fs.appendFileSync('app.txt', 'staged change\\n');
 const result = spawnSync('git', ['add', 'app.txt'], { stdio: 'inherit' });
 process.exit(result.status ?? 1);
 `, 'utf8');
-await fs.writeFile(path.join(stagedRoot, 'reviewer.mjs'), `
+await fs.writeFile(path.join(loopStagedRoot, 'reviewer.mjs'), `
 import fs from 'node:fs';
 const diffPath = process.argv[process.argv.indexOf('--diff') + 1];
 const diff = fs.readFileSync(diffPath, 'utf8');
 if (!diff.includes('# Staged diff') || !diff.includes('staged change')) process.exit(4);
 console.log('CODEXPRO_REVIEW=PASS');
 `, 'utf8');
-requireSuccess(spawnSync('git', ['init'], { cwd: stagedRoot, encoding: 'utf8' }), 'staged git init');
-requireSuccess(spawnSync('git', ['add', 'app.txt'], { cwd: stagedRoot, encoding: 'utf8' }), 'staged git add');
+requireSuccess(spawnSync('git', ['init'], { cwd: loopStagedRoot, encoding: 'utf8' }), 'staged git init');
+requireSuccess(spawnSync('git', ['add', 'app.txt'], { cwd: loopStagedRoot, encoding: 'utf8' }), 'staged git add');
 
 const stagedRun = run([
   'loop-handoff',
   '--root',
-  stagedRoot,
+  loopStagedRoot,
   '--agent',
   'custom',
   '--command',

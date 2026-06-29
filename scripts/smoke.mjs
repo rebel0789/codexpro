@@ -123,6 +123,22 @@ await fs.writeFile(path.join(tmp, '.agents', 'skills', 'smoke-skill', 'SKILL.md'
   '# Duplicate Smoke Skill',
   ''
 ].join('\n'), 'utf8');
+const outsideSkillRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-outside-skills-'));
+await fs.mkdir(path.join(outsideSkillRoot, 'outside-skill'), { recursive: true });
+await fs.writeFile(path.join(outsideSkillRoot, 'outside-skill', 'SKILL.md'), [
+  '---',
+  'name: outside-skill',
+  'description: Outside workspace skill.',
+  '---',
+  '',
+  '# Outside Skill',
+  ''
+].join('\n'), 'utf8');
+try {
+  await fs.symlink(outsideSkillRoot, path.join(tmp, 'skills'), 'dir');
+} catch (error) {
+  if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error;
+}
 await fs.writeFile(path.join(tmp, 'package.json'), JSON.stringify({
   scripts: {
     'build:clients': "node -e \"console.log('clients ok')\""
@@ -130,6 +146,18 @@ await fs.writeFile(path.join(tmp, 'package.json'), JSON.stringify({
 }, null, 2), 'utf8');
 const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-outside-'));
 await fs.writeFile(path.join(outside, 'secret.txt'), 'do-not-read', 'utf8');
+const danglingSymlinks = [];
+for (const [linkPath, targetPath] of [
+  ['dangling-outside.txt', path.join(outside, 'created-outside.txt')],
+  ['dangling-env.txt', path.join(tmp, '.env')]
+]) {
+  try {
+    await fs.symlink(targetPath, path.join(tmp, linkPath));
+    danglingSymlinks.push(linkPath);
+  } catch (error) {
+    if (process.platform !== 'win32' || error?.code !== 'EPERM') throw error;
+  }
+}
 let symlinkEscapePath = 'secret-link.txt';
 try {
   await fs.symlink(path.join(outside, 'secret.txt'), path.join(tmp, symlinkEscapePath));
@@ -250,6 +278,9 @@ const currentWithSkills = await client.request('tools/call', { name: 'open_curre
 if (!currentWithSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'smoke-skill')) {
   throw new Error('open_current_workspace did not discover workspace skill inventory when requested');
 }
+if (currentWithSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'outside-skill')) {
+  throw new Error('open_current_workspace followed a symlinked workspace skill root outside the workspace');
+}
 const selfTest = await client.request('tools/call', {
   name: 'codexpro_self_test',
   arguments: {
@@ -291,6 +322,7 @@ if (loadedSkill.structuredContent.skill?.name !== 'smoke-skill' || !loadedSkill.
   throw new Error('load_skill did not return bounded SKILL.md content for smoke-skill');
 }
 await expectToolError('load_skill', { name: 'missing-skill' }, /Skill not found/);
+await expectToolError('load_skill', { name: 'outside-skill', source: 'workspace', include_global_skills: false }, /Skill not found/);
 const inventory = await client.request('tools/call', { name: 'codexpro_inventory', arguments: { include_global_skills: false, include_mcp_servers: false } });
 if (inventory.structuredContent.codexpro_tool !== 'codexpro_inventory') throw new Error('inventory result was not tagged for widget rendering');
 const opened = await client.request('tools/call', { name: 'open_workspace', arguments: { root: tmp, include_tree: true } });
@@ -337,6 +369,9 @@ if (envRefPayload.includes('[REDACTED_SECRET]')) {
 }
 const symlinkRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: symlinkEscapePath } });
 if (!symlinkRead.isError) throw new Error('symlink escape read was not blocked');
+for (const linkPath of danglingSymlinks) {
+  await expectToolError('write', { workspace_id: ws, path: linkPath, content: 'escaped write\n' }, /symlink/i);
+}
 await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'demo.txt', old_text: 'read\nread', new_text: 'read\nwrite' } });
 const changes = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws } });
 if (!changes.structuredContent.changed || !changes.structuredContent.diff.includes('demo.txt')) {
