@@ -48,6 +48,7 @@
 codexpro setup</code>
             <button class="copy-button" data-copy="npm install -g codexpro&#10;codexpro setup">复制</button>
           </div>
+          <p class="eyebrow">main 文档可能早于 npm 发布；全局安装前请看 npm 版本，未发布行为用 source checkout。</p>
           <div class="hero-proof" aria-label="核心能力">
             <span>AGENTS.md 上下文</span>
             <span>.ai-bridge handoff</span>
@@ -333,8 +334,8 @@ codexpro start</code></pre>
           </article>
           <article>
             <small>可视卡片</small>
-            <h3>只给关键动作卡片</h3>
-            <p>open workspace 摘要、write/edit diff、show_changes 审查和 handoff 导出会显示紧凑卡片。skills、git 和 tree 详情默认折叠；<code>load_skill</code> 按需加载有限长度的说明，bash 保持纯数据。</p>
+            <h3>默认关闭，需要时开启</h3>
+            <p>默认只暴露纯 MCP 描述。用 <code>CODEXPRO_TOOL_CARDS=1</code> 开启后，workspace 摘要、读写 diff、bash、git/tree/search/context 和 handoff/export 都会使用紧凑结构化视图；长输出会折叠或截断。</p>
           </article>
           <article>
             <small>上下文持久化</small>

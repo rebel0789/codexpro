@@ -408,6 +408,20 @@ const LOCAL_FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 6
   <rect x="8" y="8" width="48" height="48" rx="12" fill="#ffffff" fill-opacity=".12" stroke="#ffffff" stroke-opacity=".38"/>
   <path d="M38.4 40.3c-1.8 1.1-3.9 1.7-6.3 1.7-6.1 0-10.3-4.2-10.3-10s4.2-10 10.4-10c2.4 0 4.5.6 6.2 1.7l-2.1 4.1c-1.1-.7-2.3-1-3.8-1-2.9 0-4.9 2.1-4.9 5.2s2 5.2 4.9 5.2c1.5 0 2.8-.4 3.9-1.1l2 4.2Z" fill="#ffffff"/>
 </svg>`;
+const CODEXPRO_VERSION = "0.28.6";
+
+function printHelp(): void {
+  console.log(`CodexPro MCP HTTP server
+
+Usage:
+  codexpro-mcp-http --root /path/to/repo --port 8787
+  codexpro-mcp-http --version
+  codexpro-mcp-http --help
+
+Set CODEXPRO_HTTP_TOKEN for public/tunnel use.
+For trusted local-only testing, set CODEXPRO_ALLOW_NO_HTTP_TOKEN=1.
+Most users should run: codexpro start`);
+}
 
 function onboardingPage(config: CodexProConfig): string {
   const localMcp = `http://${config.host}:${config.port}/mcp`;
@@ -1406,6 +1420,16 @@ function onboardingPage(config: CodexProConfig): string {
 }
 
 async function main(): Promise<void> {
+  const argv = process.argv.slice(2);
+  if (argv.includes("--version") || argv.includes("-v") || argv[0] === "version") {
+    console.log(CODEXPRO_VERSION);
+    return;
+  }
+  if (argv.includes("--help") || argv[0] === "help") {
+    printHelp();
+    return;
+  }
+
   const config = loadConfig();
   if (config.requireHttpToken && !config.authToken) {
     throw new Error(
