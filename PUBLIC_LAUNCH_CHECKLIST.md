@@ -17,7 +17,10 @@ npm run build
 npm run smoke
 npm pack --dry-run
 codexpro doctor --tunnel none
+npm view codexpro version dist-tags --json
 ```
+
+After publishing, do not announce npm availability until the `latest` dist-tag matches `package.json`.
 
 The tarball must not include:
 

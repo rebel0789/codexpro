@@ -142,7 +142,7 @@ async function withClient(url, fn) {
   const transport = new StreamableHTTPClientTransport(new URL(url));
   try {
     await client.connect(transport);
-    return await fn(client);
+    return await fn(client, transport);
   } finally {
     await client.close();
   }
@@ -155,6 +155,30 @@ async function callTool(client, name, args = {}) {
     throw new Error(`${name} failed: ${text}`);
   }
   return result;
+}
+
+async function expectSessionNotFound(response, label) {
+  const body = await response.json();
+  if (
+    response.status !== 404 ||
+    !response.headers.get('content-type')?.includes('application/json') ||
+    body.error?.code !== -32001 ||
+    body.error?.message !== 'Session not found'
+  ) {
+    throw new Error(`expected ${label} to return JSON-RPC session-not-found 404, got ${response.status} ${JSON.stringify(body)}`);
+  }
+}
+
+function postToolsListWithSession(baseUrl, token, sessionId) {
+  return fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+      'mcp-session-id': sessionId
+    },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 404, method: 'tools/list', params: {} })
+  });
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
@@ -390,6 +414,22 @@ try {
   }
 
   const mcpUrl = `${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`;
+  const unknownSession = '00000000-0000-4000-8000-000000000000';
+  await expectSessionNotFound(await postToolsListWithSession(baseUrl, token, unknownSession), 'unknown POST session');
+  await expectSessionNotFound(await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+    headers: {
+      accept: 'text/event-stream',
+      'mcp-session-id': unknownSession
+    }
+  }), 'unknown GET session');
+  await withClient(mcpUrl, async (client, transport) => {
+    await client.listTools();
+    const staleSession = transport.sessionId;
+    if (!staleSession) throw new Error('HTTP MCP client did not receive a session id');
+    await transport.terminateSession();
+    await expectSessionNotFound(await postToolsListWithSession(baseUrl, token, staleSession), 'stale POST session');
+  });
+
   await withClient(mcpUrl, async (client) => {
     const resources = await client.listResources();
     const toolCard = resources.resources.find((resource) => resource.uri === toolCardUri);

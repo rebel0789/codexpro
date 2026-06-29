@@ -6,6 +6,8 @@ CodexPro exposes a local workspace to an MCP client. Treat it like a developer t
 
 Security fixes target the latest published version only until the project reaches `1.0.0`.
 
+Feature-specific notes follow GitHub `main`; npm users should check the published version before relying on a new command.
+
 ## Reporting
 
 Please report security issues privately before opening a public issue. If the repository has GitHub private vulnerability reporting enabled, use that. Otherwise contact the maintainer listed by the project owner.

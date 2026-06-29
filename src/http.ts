@@ -1521,6 +1521,25 @@ async function main(): Promise<void> {
   const transports = new Map<string, TransportRecord>();
   const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+  function requestSessionId(req: Request): string | undefined {
+    const value = req.headers["mcp-session-id"];
+    return Array.isArray(value) ? value[0] : value;
+  }
+
+  function sendSessionError(res: Response, sessionId: string | undefined): void {
+    const missing = !sessionId;
+    const malformed = Boolean(sessionId && !sessionIdPattern.test(sessionId));
+    res.status(missing || malformed ? 400 : 404).json({
+      jsonrpc: "2.0",
+      error: missing
+        ? { code: -32000, message: "Bad Request: Mcp-Session-Id header is required" }
+        : malformed
+          ? { code: -32000, message: "Bad Request: invalid MCP session id" }
+          : { code: -32001, message: "Session not found" },
+      id: null
+    });
+  }
+
   function closeTransport(record: TransportRecord): void {
     void record.transport.close?.();
   }
@@ -1612,7 +1631,7 @@ async function main(): Promise<void> {
 
   app.post("/mcp", express.json({ limit: "20mb" }), async (req, res) => {
     try {
-      const sessionId = req.headers["mcp-session-id"] as string | undefined;
+      const sessionId = requestSessionId(req);
       let transport: StreamableHTTPServerTransport;
 
       const existingTransport = getTransport(sessionId);
@@ -1640,11 +1659,7 @@ async function main(): Promise<void> {
         const server = createCodexProServer(config);
         await server.connect(transport);
       } else {
-        res.status(400).json({
-          jsonrpc: "2.0",
-          error: { code: -32000, message: "Bad Request: missing or invalid MCP session id" },
-          id: null
-        });
+        sendSessionError(res, sessionId);
         return;
       }
 
@@ -1662,10 +1677,10 @@ async function main(): Promise<void> {
   });
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
-    const sessionId = req.headers["mcp-session-id"] as string | undefined;
+    const sessionId = requestSessionId(req);
     const transport = getTransport(sessionId);
     if (!transport) {
-      res.status(400).send("Invalid or missing MCP session id");
+      sendSessionError(res, sessionId);
       return;
     }
     await transport.handleRequest(req, res);

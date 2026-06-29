@@ -528,6 +528,7 @@ function saveRuntimeConnection(root, details, options = {}) {
   const payload = {
     version: 1,
     root,
+    pid: process.pid,
     updatedAt: new Date().toISOString(),
     endpoint: details.endpoint,
     localBase: options.localBase ?? '',
@@ -548,6 +549,14 @@ function saveRuntimeConnection(root, details, options = {}) {
     fs.chmodSync(filePath, 0o600);
   } catch {}
   return filePath;
+}
+
+function clearRuntimeConnection(root) {
+  try {
+    const filePath = runtimeStatusPathForRoot(root);
+    const runtime = readJsonFile(filePath);
+    if (runtime?.pid === process.pid) fs.rmSync(filePath, { force: true });
+  } catch {}
 }
 
 function sanitizedProfile(profile) {
@@ -821,8 +830,8 @@ function resolveNgrok(args) {
   throw new Error('ngrok was not found on PATH. Install it with Homebrew, winget, apt, or from https://ngrok.com/download, then run ngrok config add-authtoken <token>.');
 }
 
-function ngrokConfigPath(root, args) {
-  const configPath = args.ngrokConfig ?? process.env.NGROK_CONFIG ?? process.env.CODEXPRO_NGROK_CONFIG ?? '';
+function ngrokConfigPath(root, args, profile = {}) {
+  const configPath = optionValue(args, profile, 'ngrokConfig', ['NGROK_CONFIG', 'CODEXPRO_NGROK_CONFIG'], '');
   return resolveConfigPath(root, configPath);
 }
 
@@ -3025,7 +3034,7 @@ function saveSettingsFromArgs(root, args, profile) {
   if (!['none', 'cloudflare', 'cloudflare-named', 'ngrok'].includes(tunnel)) {
     throw new Error('--tunnel must be none, cloudflare, cloudflare-named, or ngrok');
   }
-  const rawHostname = args.hostname ?? args.url ?? profile.hostname ?? '';
+  const rawHostname = (tunnel === 'ngrok' || tunnel === 'cloudflare-named') ? (args.hostname ?? args.url ?? profile.hostname ?? '') : '';
   const hostname = (tunnel === 'ngrok' || tunnel === 'cloudflare-named') ? normalizePublicHostname(rawHostname) : String(rawHostname ?? '').trim();
   if ((tunnel === 'ngrok' || tunnel === 'cloudflare-named') && !hostname) {
     throw new Error('--hostname is required for ngrok and cloudflare-named settings.');
@@ -3043,10 +3052,16 @@ function saveSettingsFromArgs(root, args, profile) {
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = writeOption(args, profile, mode);
   const bash = optionalChoice('bash', optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], profile.bash ?? ''), ['off', 'safe', 'full']);
-  const tunnelName = args.tunnelName ?? profile.tunnelName ?? '';
-  const ngrokConfig = resolveConfigPath(root, args.ngrokConfig ?? profile.ngrokConfig ?? '');
-  const cloudflareConfig = resolveConfigPath(root, args.cloudflareConfig ?? profile.cloudflareConfig ?? '');
-  const cloudflareTokenFile = resolveConfigPath(root, args.cloudflareTokenFile ?? profile.cloudflareTokenFile ?? '');
+  const tunnelName = tunnel === 'cloudflare-named' ? (args.tunnelName ?? profile.tunnelName ?? '') : '';
+  const ngrokConfig = tunnel === 'ngrok'
+    ? resolveConfigPath(root, optionValue(args, profile, 'ngrokConfig', ['NGROK_CONFIG', 'CODEXPRO_NGROK_CONFIG'], ''))
+    : '';
+  const cloudflareConfig = tunnel === 'cloudflare-named'
+    ? resolveConfigPath(root, optionValue(args, profile, 'cloudflareConfig', ['CODEXPRO_CLOUDFLARE_CONFIG', 'CLOUDFLARE_TUNNEL_CONFIG'], ''))
+    : '';
+  const cloudflareTokenFile = tunnel === 'cloudflare-named'
+    ? resolveConfigPath(root, optionValue(args, profile, 'cloudflareTokenFile', ['CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN_FILE', 'CLOUDFLARE_TUNNEL_TOKEN_FILE'], ''))
+    : '';
   const token = tunnel === 'none'
     ? optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], profile.token ?? '')
     : stableToken(optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], profile.token ?? ''));
@@ -3473,7 +3488,10 @@ async function main() {
   statusLine('wait', 'Starting local MCP server');
   const server = spawnLogged('codexpro', process.execPath, [httpPath], { cwd: projectRoot, env: serverEnv, verbose: verboseLogs });
   let cloudflared;
-  const cleanup = cleanupChildren;
+  const cleanup = () => {
+    cleanupChildren();
+    clearRuntimeConnection(root);
+  };
   process.on('SIGINT', () => { cleanup(); process.exit(130); });
   process.on('SIGTERM', () => { cleanup(); process.exit(143); });
 
@@ -3522,7 +3540,7 @@ async function main() {
     const ngrokPath = resolveNgrok(effectiveArgs);
     const publicBase = publicBaseFromHostname(stableHostname);
     const ngrokArgs = ['http', localBase, '--url', publicBase];
-    const configPath = ngrokConfigPath(root, effectiveArgs);
+    const configPath = ngrokConfigPath(root, args, profile);
     if (configPath) ngrokArgs.push('--config', configPath);
     statusLine('wait', `Opening ngrok endpoint for ${publicBase}`);
     cloudflared = spawnLogged('ngrok', ngrokPath, ngrokArgs, { cwd: root, env: process.env, verbose: verboseLogs });

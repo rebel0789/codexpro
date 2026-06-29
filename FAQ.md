@@ -32,6 +32,8 @@ Short version: other tools may share the bridge idea; CodexPro is the cleaner Ch
 
 ## What is the `codexpro` supertool?
 
+Note: this FAQ follows GitHub `main`. Check the npm badge/version before assuming a `main` feature is in `codexpro@latest`.
+
 `codexpro` is a stable wrapper tool for advanced setups. It accepts:
 
 ```json
