@@ -151,6 +151,19 @@ async function runFullModeStress(root) {
     });
     assert(loaded.structuredContent.text.includes('# Stress Skill'), 'load_skill did not return skill body');
 
+    const inventory = await client.request('tools/call', {
+      name: 'codexpro_inventory',
+      arguments: { workspace_id: ws, include_global_skills: false, include_mcp_servers: false, max_skills: 140 }
+    });
+    assert(inventory.structuredContent.skill_count === 140, `expected 140 inventory skills, got ${inventory.structuredContent.skill_count}`);
+    const lastSkill = inventory.structuredContent.skills.find((skill) => skill.name === 'stress-skill-139');
+    assert(lastSkill, 'inventory did not include stress-skill-139');
+    const loadedLast = await client.request('tools/call', {
+      name: 'load_skill',
+      arguments: { workspace_id: ws, name: lastSkill.name, source: lastSkill.source, path: lastSkill.path }
+    });
+    assert(loadedLast.structuredContent.text.includes('# Stress Skill 139'), 'load_skill did not load high-cap inventory skill');
+
     const largeSearch = await client.request('tools/call', {
       name: 'search',
       arguments: { workspace_id: ws, query: '--flag', path: 'many', max_results: 2000 }
@@ -219,6 +232,14 @@ async function runFullModeStress(root) {
     });
     assert(mismatch.structuredContent.awaited_completed === false && mismatch.structuredContent.plan_hash_mismatch === true, 'wait_for_handoff mismatch did not fail closed');
 
+    await fs.rm(path.join(root, '.ai-bridge', 'handoff-run-state.json'), { force: true });
+    const slowPollStart = Date.now();
+    await client.request('tools/call', {
+      name: 'wait_for_handoff',
+      arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 5000 }
+    });
+    assert(Date.now() - slowPollStart < 2500, 'wait_for_handoff exceeded max_wait_seconds by a full poll interval');
+
     const exactExport = await client.request('tools/call', {
       name: 'export_pro_context',
       arguments: {
@@ -257,6 +278,34 @@ async function runFullModeStress(root) {
     assert(selfTest.structuredContent.status !== 'fail', `codexpro_self_test failed: ${JSON.stringify(selfTest.structuredContent.checks)}`);
   } finally {
     client.close();
+  }
+}
+
+async function runGlobalSkillStress(root) {
+  void root;
+  const isolatedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-global-root-'));
+  const name = `000-codexpro-global-stress-${Date.now()}`;
+  const dir = path.join(os.homedir(), '.codex', 'skills', name);
+  await fs.mkdir(dir, { recursive: true });
+  await fs.writeFile(path.join(dir, 'SKILL.md'), `---\nname: ${name}\ndescription: Global stress skill.\n---\n\n# Global Only Skill\n`, 'utf8');
+  let client;
+  try {
+    client = await initClient(isolatedRoot);
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const inventory = await client.request('tools/call', {
+      name: 'codexpro_inventory',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, include_mcp_servers: false, max_skills: 500 }
+    });
+    const skill = inventory.structuredContent.skills.find((item) => item.name === name);
+    assert(skill, 'default inventory did not include global skill');
+    const loaded = await client.request('tools/call', {
+      name: 'load_skill',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, name: skill.name, source: skill.source, path: skill.path }
+    });
+    assert(loaded.structuredContent.text.includes('# Global Only Skill'), 'default load_skill did not load inventory global skill');
+  } finally {
+    client?.close();
+    await fs.rm(dir, { recursive: true, force: true });
   }
 }
 
@@ -309,6 +358,28 @@ async function runSupertoolModeStress(root) {
   }
 }
 
+async function runMinimalHandoffStress(root) {
+  const client = await initClient(root, {
+    CODEXPRO_TOOL_MODE: 'minimal',
+    CODEXPRO_BASH_MODE: 'off',
+    CODEXPRO_WRITE_MODE: 'handoff'
+  });
+  try {
+    const tools = await client.request('tools/list', {});
+    const names = tools.tools.map((tool) => tool.name);
+    assert(names.includes('handoff_to_agent'), 'minimal handoff mode missing handoff_to_agent');
+    const actions = await client.request('tools/call', { name: 'codexpro', arguments: { action: 'list_actions' } });
+    assert(actions.structuredContent.actions.includes('handoff_to_agent'), 'minimal handoff supertool actions missing handoff_to_agent');
+    const handoff = await client.request('tools/call', {
+      name: 'codexpro',
+      arguments: { action: 'agent_handoff', args: { title: 'Stress Plan', plan: '- keep it narrow' } }
+    });
+    assert(handoff.structuredContent.codexpro_tool === 'handoff_to_agent' && handoff.structuredContent.wrapped_tool === 'handoff_to_agent', 'minimal handoff supertool did not write plan');
+  } finally {
+    client.close();
+  }
+}
+
 async function runCardStress(root) {
   const client = await initClient(root, { CODEXPRO_TOOL_CARDS: '1' });
   try {
@@ -326,6 +397,8 @@ async function runCardStress(root) {
 
 const root = await makeFixture();
 await runFullModeStress(root);
+await runGlobalSkillStress(root);
 await runSupertoolModeStress(root);
+await runMinimalHandoffStress(root);
 await runCardStress(root);
 console.log(`✓ stress test passed (${root})`);

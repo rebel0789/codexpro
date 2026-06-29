@@ -332,6 +332,7 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
     noInstallCloudflared: input.noInstallCloudflared ?? current.noInstallCloudflared
   };
   next.hostname = normalizePublicHostname(next.hostname);
+  if (next.tunnel !== "ngrok" && next.tunnel !== "cloudflare-named") next.hostname = "";
   next.widgetDomain = normalizeWidgetDomain(next.widgetDomain);
   if ((next.tunnel === "ngrok" || next.tunnel === "cloudflare-named") && !next.hostname) {
     throw new Error("hostname is required for ngrok and cloudflare-named profiles.");
@@ -1498,9 +1499,7 @@ async function main(): Promise<void> {
       next();
       return;
     }
-    const bearer = req.headers.authorization?.startsWith("Bearer ")
-      ? req.headers.authorization.slice("Bearer ".length)
-      : undefined;
+    const bearer = req.headers.authorization?.match(/^Bearer\s+(.+)$/i)?.[1]?.trim();
     const queryToken = typeof req.query.codexpro_token === "string"
       ? req.query.codexpro_token
       : typeof req.query.token === "string"
@@ -1578,7 +1577,7 @@ async function main(): Promise<void> {
       widgetDomain: config.widgetDomain,
       contextDir: config.contextDir,
       authEnabled: Boolean(config.authToken),
-      authRequired: config.requireHttpToken
+      authRequired: Boolean(config.authToken)
     });
   });
 

@@ -55,12 +55,16 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+function resolvePlanPath(args) {
+  const callerCwd = process.env.CODEXPRO_CALLER_CWD || process.cwd();
+  return path.isAbsolute(args.file) ? args.file : path.resolve(callerCwd, args.file);
+}
+
 async function readPlan(args) {
   if (args.stdin && args.file) throw new Error('Use either --stdin or --file, not both.');
   if (args.stdin) return readStdin();
   if (!args.file) throw new Error('Missing --file <path> or --stdin.');
-  const callerCwd = process.env.CODEXPRO_CALLER_CWD || process.cwd();
-  return fsp.readFile(path.isAbsolute(args.file) ? args.file : path.resolve(callerCwd, args.file), 'utf8');
+  return fsp.readFile(resolvePlanPath(args), 'utf8');
 }
 
 function normalizePlan(rawPlan, title) {
@@ -118,7 +122,7 @@ async function main() {
   const executionLogResolved = guard.resolve(workspace, executionLogRel, { forWrite: true });
   const event = jsonlEvent('pro_apply', {
     plan_path: planPath,
-    source_file: args.file ? path.resolve(args.file) : 'stdin',
+    source_file: args.file ? resolvePlanPath(args) : 'stdin',
     append: Boolean(args.append)
   });
   await fsp.appendFile(logResolved.absPath, event, 'utf8');

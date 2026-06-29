@@ -67,6 +67,7 @@ await fs.writeFile(path.join(home, 'profiles', `${invalidId}.json`), JSON.string
   updatedAt: new Date().toISOString(),
   tunnel: 'none',
   bash: 'banana',
+  write: 'banana',
   toolMode: 'banana'
 }, null, 2), 'utf8');
 const invalidDoctor = spawnSync(process.execPath, [
@@ -82,7 +83,7 @@ const invalidDoctor = spawnSync(process.execPath, [
   encoding: 'utf8'
 });
 const invalidOutput = `${invalidDoctor.stdout}\n${invalidDoctor.stderr}`;
-if (invalidDoctor.status === 0 || !invalidOutput.includes('Bash mode') || !invalidOutput.includes('Tool mode')) {
+if (invalidDoctor.status === 0 || !invalidOutput.includes('Bash mode') || !invalidOutput.includes('Write mode') || !invalidOutput.includes('Tool mode')) {
   throw new Error(`doctor did not reject invalid saved profile\nstdout:\n${invalidDoctor.stdout}\nstderr:\n${invalidDoctor.stderr}`);
 }
 

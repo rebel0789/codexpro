@@ -330,6 +330,7 @@ function toolNamesForMode(config: CodexProConfig): string[] {
       if (toolIndex !== -1) names.splice(toolIndex, 1);
     }
   }
+  if (config.writeMode === "handoff" && !names.includes("handoff_to_agent")) names.push("handoff_to_agent");
   for (const name of codexSessionToolNames(config)) {
     if (!names.includes(name)) names.push(name);
   }
@@ -356,6 +357,7 @@ function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if ((name === "write" || name === "edit") && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
+  if (name === "handoff_to_agent" && config.writeMode === "handoff") return true;
   if (config.toolMode === "full") return true;
   if (config.toolMode === "minimal") return MINIMAL_TOOLS.has(name);
   return STANDARD_TOOLS.has(name);
@@ -1083,7 +1085,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         name: z.string().describe("Exact skill name from skill_inventory or codexpro_inventory."),
         source: z.enum(["workspace", "user", "plugin", "other"]).optional().describe("Optional source when multiple skills share a name."),
         path: z.string().optional().describe("Exact sanitized path from skill_inventory when name/source are still ambiguous."),
-        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills. Default: false."),
+        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills. Default: auto when source/path is not workspace."),
+        max_skills: z.number().int().min(1).max(500).optional().describe("Maximum skills to scan while resolving the requested skill. Default: 500."),
         max_bytes: z.number().int().min(1000).max(100000).optional().describe("Maximum bytes to return from SKILL.md. Default: 40000.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
@@ -1095,11 +1098,16 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
+      const requestedPath = typeof args.path === "string" ? args.path : undefined;
+      const includeGlobalDefault =
+        (args.source !== undefined && args.source !== "workspace") ||
+        Boolean(requestedPath && !requestedPath.startsWith("$WORKSPACE/"));
       const loaded = await loadSkill(workspace, {
         name: String(args.name ?? ""),
         source: args.source,
-        path: typeof args.path === "string" ? args.path : undefined,
-        includeGlobal: parseBool(args.include_global_skills, false),
+        path: requestedPath,
+        includeGlobal: parseBool(args.include_global_skills, includeGlobalDefault),
+        maxSkills: limitInt(args.max_skills, 500, 1, 500),
         maxBytes: limitInt(args.max_bytes, 40_000, 1_000, 100_000)
       });
       const truncated = loaded.truncated ? "\n\n[truncated: increase max_bytes if more context is required]" : "";
@@ -1773,7 +1781,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const deadline = Date.now() + maxWaitSeconds * 1000;
       let state = await readState();
       while (Date.now() < deadline && !isAwaited(state)) {
-        await new Promise((resolve) => setTimeout(resolve, pollMs));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(pollMs, Math.max(0, deadline - Date.now()))));
         state = await readState();
       }
 

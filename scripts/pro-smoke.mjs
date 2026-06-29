@@ -78,6 +78,10 @@ const executionLog = await fs.readFile(path.join(root, '.ai-bridge', 'execution-
 if (!executionLog.includes('"event":"pro_apply"')) {
   throw new Error('pro apply did not append execution-log event');
 }
+const proApplyEvents = executionLog.trim().split('\n').map((line) => JSON.parse(line));
+if (!proApplyEvents.some((event) => event.source_file === planFile)) {
+  throw new Error(`pro apply logged the wrong source file\n${executionLog}`);
+}
 
 const missingRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-pro-missing-'));
 runFail(['scripts/pro-apply.mjs', `--root=${missingRoot}`, '--file=missing-plan.md'], { env: { ...process.env, CODEXPRO_CALLER_CWD: missingRoot } });

@@ -255,6 +255,17 @@ runFail([
   'banana'
 ], env, /--tool-mode must be minimal, standard, or full/i);
 
+runFail([
+  'settings',
+  'set',
+  '--root',
+  policyRoot,
+  '--tunnel',
+  'none',
+  '--port',
+  'abc'
+], env, /Invalid port: abc/i);
+
 const runtimePort = await getFreePort();
 const runtimePath = await runtimeStatusPath(runtimeRoot, home);
 run([

@@ -209,6 +209,19 @@ try {
   if (authorized.status !== 200) {
     throw new Error(`expected authenticated healthz to return 200, got ${authorized.status}`);
   }
+  const authorizedJson = await authorized.json();
+  if (authorizedJson.authRequired !== true) {
+    throw new Error(`expected authenticated healthz to report authRequired=true, got ${JSON.stringify(authorizedJson)}`);
+  }
+
+  for (const header of [`bearer ${token}`, `Bearer    ${token}`]) {
+    const variant = await fetch(`${baseUrl}/healthz`, {
+      headers: { Authorization: header }
+    });
+    if (variant.status !== 200) {
+      throw new Error(`expected authorization header variant ${JSON.stringify(header)} to return 200, got ${variant.status}`);
+    }
+  }
 
   const queryAuthorized = await fetch(`${baseUrl}/healthz?codexpro_token=${encodeURIComponent(token)}`);
   if (queryAuthorized.status !== 200) {
@@ -338,6 +351,17 @@ try {
     savedProfile.token !== token
   ) {
     throw new Error(`admin profile save wrote unexpected profile: ${JSON.stringify(savedProfile)}`);
+  }
+
+  const localProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tunnel: 'none' })
+  });
+  const localProfileJson = await localProfile.json();
+  const localSavedProfile = JSON.parse(await fs.readFile(localProfileJson.profile_path, 'utf8'));
+  if (localProfile.status !== 200 || localSavedProfile.hostname || localProfileJson.profile?.hostname || localProfileJson.effective?.hostname) {
+    throw new Error(`admin profile local-only save kept a stale hostname: ${JSON.stringify(localProfileJson)} ${JSON.stringify(localSavedProfile)}`);
   }
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);

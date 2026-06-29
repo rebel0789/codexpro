@@ -874,12 +874,16 @@ function portInUseHelp(host, port) {
   ].join('\n');
 }
 
-async function assertPortAvailable(host, port) {
+function normalizePort(port) {
   const numericPort = Number(port);
   if (!Number.isInteger(numericPort) || numericPort <= 0 || numericPort > 65535) {
     throw new Error(`Invalid port: ${port}`);
   }
+  return String(numericPort);
+}
 
+async function assertPortAvailable(host, port) {
+  const numericPort = Number(normalizePort(port));
   await new Promise((resolve, reject) => {
     const server = net.createServer();
     server.once('error', (error) => {
@@ -2517,7 +2521,14 @@ async function runDoctor(argv) {
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
   const mode = optionValue(args, profile, 'mode', ['CODEXPRO_MODE'], 'agent');
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], 'safe');
-  const write = writeOption(args, profile, mode);
+  const rawWrite = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], mode === 'agent' ? 'workspace' : 'handoff');
+  let write = String(rawWrite);
+  let writeError = '';
+  try {
+    write = effectiveWriteMode(mode, rawWrite);
+  } catch (error) {
+    writeError = error instanceof Error ? error.message : String(error);
+  }
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
   const stableHostname = args.hostname
     ?? args.url
@@ -2557,7 +2568,7 @@ async function runDoctor(argv) {
   record(profile.profilePath ? 'ok' : 'warn', 'Saved profile', profile.profilePath ? profileSummary(profile) || profile.profilePath : 'none for this workspace');
   record(['agent', 'handoff', 'pro'].includes(mode) ? 'ok' : 'fail', 'Mode', ['agent', 'handoff', 'pro'].includes(mode) ? mode : '--mode must be agent, handoff, or pro');
   record(['off', 'safe', 'full'].includes(bash) ? 'ok' : 'fail', 'Bash mode', ['off', 'safe', 'full'].includes(bash) ? bash : '--bash must be off, safe, or full');
-  record(['off', 'handoff', 'workspace'].includes(write) ? 'ok' : 'fail', 'Write mode', ['off', 'handoff', 'workspace'].includes(write) ? write : '--write must be off, handoff, or workspace');
+  record(!writeError && ['off', 'handoff', 'workspace'].includes(write) ? 'ok' : 'fail', 'Write mode', writeError || write);
   record(['minimal', 'standard', 'full'].includes(toolMode) ? 'ok' : 'fail', 'Tool mode', ['minimal', 'standard', 'full'].includes(toolMode) ? toolMode : '--tool-mode must be minimal, standard, or full');
   record(clipboard ? 'ok' : 'warn', 'Clipboard', clipboard || 'not found; URL will be printed for manual copy');
   record(browser ? 'ok' : 'warn', 'Browser open', browser || 'not found; open ChatGPT manually');
@@ -2822,8 +2833,7 @@ async function runSetupWizard(argv) {
     const defaultPort = String(optionValue(defaults, profile, 'port', ['CODEXPRO_PORT'], '8787'));
     const defaultMode = normalizeSetupChoice(optionValue(defaults, profile, 'mode', ['CODEXPRO_MODE'], 'agent'), ['agent', 'handoff', 'pro'], 'agent');
 
-    const port = await ask(rl, 'Which local port should CodexPro use?', defaultPort);
-    if (!/^\d+$/.test(port)) throw new Error('Port must be a number.');
+    const port = normalizePort(await ask(rl, 'Which local port should CodexPro use?', defaultPort));
     const modeAnswer = await ask(rl, 'Mode: agent, handoff, or pro?', defaultMode);
     const mode = normalizeSetupChoice(modeAnswer, ['agent', 'handoff', 'pro'], defaultMode);
 
@@ -2843,7 +2853,7 @@ async function runSetupWizard(argv) {
     const codexSessions = codexSessionsOption(defaults, profile);
     const codexDir = optionValue(defaults, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
     const write = optionalWriteOption(defaults, profile, mode);
-    const toolMode = optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
+    const toolMode = optionalChoice('tool-mode', optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], ''), ['minimal', 'standard', 'full']);
     const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
     const toolCardsEntry = toolCardsProfileEntry(defaults, profile);
     if (bash) args.push('--bash', bash);
@@ -3026,7 +3036,7 @@ function saveSettingsFromArgs(root, args, profile) {
   }
   const toolMode = optionalChoice('tool-mode', optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], profile.toolMode ?? ''), ['minimal', 'standard', 'full']);
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], profile.widgetDomain ?? '');
-  const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], profile.port ?? '8787'));
+  const port = normalizePort(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], profile.port ?? '8787'));
   const bashTranscript = bashTranscriptOption(args, profile);
   const codexSessions = codexSessionsOption(args, profile);
   const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], profile.codexDir ?? '');
