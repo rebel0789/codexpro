@@ -59,6 +59,23 @@ class McpStdioClient {
   }
 }
 
+const pkg = JSON.parse(await fs.readFile('package.json', 'utf8'));
+
+function assertCommand(args, expected) {
+  const result = spawnSync(process.execPath, args, { cwd: path.resolve('.'), encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(`${args.join(' ')} failed: ${result.stderr || result.stdout}`);
+  }
+  if (!result.stdout.includes(expected)) {
+    throw new Error(`${args.join(' ')} did not print ${expected}: ${result.stdout}`);
+  }
+}
+
+assertCommand(['dist/stdio.js', '--version'], pkg.version);
+assertCommand(['dist/stdio.js', '--help'], 'CodexPro MCP stdio server');
+assertCommand(['dist/http.js', '--version'], pkg.version);
+assertCommand(['dist/http.js', '--help'], 'CodexPro MCP HTTP server');
+
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-'));
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'config.txt'), 'OPENAI_API_KEY=sk-realSecretValue123\n', 'utf8');

@@ -72,8 +72,10 @@ CodexPro is not a rate-limit bypass, model proxy, hosted SaaS, or OS sandbox. It
 | Default tool surface | `CODEXPRO_TOOL_MODE=standard` |
 | Full diagnostics | `codexpro start --tool-mode full` |
 | No ChatGPT-triggered shell | `codexpro start --no-bash` |
-| Compact chat transcript | default bash cards; use `--bash-transcript full` only when needed |
+| Compact chat transcript | default compact bash output; use `--bash-transcript full` only when needed |
 | Local Codex history lookup | opt in with `--codex-sessions metadata` or `read` |
+
+The GitHub `main` README can describe changes before they reach npm. Check the npm badge/version when installing with `npm install -g codexpro`; use the source-checkout path below for unreleased `main` behavior.
 
 ## Product Boundary
 
