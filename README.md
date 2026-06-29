@@ -208,7 +208,7 @@ show_changes
 Full mode adds:
 
 - `codexpro_inventory` — list discovered skill names and configured MCP server names without exposing MCP command arguments or secrets.
-- `list_workspaces` — show opened workspaces in the current MCP session.
+- `list_workspaces` — show opened workspaces for the current CodexPro server/config.
 - `workspace_snapshot` — project status plus `.ai-bridge` handoff context.
 - `git_status` — inspect git status.
 - `git_diff` — inspect current diff.
@@ -343,6 +343,8 @@ _meta["openai/widgetCSP"]
 `CODEXPRO_WIDGET_DOMAIN` defaults to `https://rebel0789.github.io` for this package. For app submission, set it to a dedicated HTTPS origin you control, for example `https://widgets.yourdomain.com`. The CSP lists are intentionally strict because the widget has no external fetches, fonts, scripts, images, or iframes.
 
 After enabling cards, upgrading, or changing widget metadata, open the CodexPro app settings in ChatGPT Developer Mode and click `Refresh` / `Refresh actions` so ChatGPT reloads the tool descriptors and resource URI.
+
+If an old ChatGPT conversation still sees old tools or fails during discovery while `/healthz` and a fresh raw MCP `tools/list` are correct, treat that chat as stale. Start a brand-new ChatGPT chat, and for major visible schema/tool-count changes create a fresh connector/app name as well.
 
 ## Other Install Paths
 

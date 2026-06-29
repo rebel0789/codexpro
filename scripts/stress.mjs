@@ -285,6 +285,12 @@ async function runSupertoolModeStress(root) {
     });
     assert(blockedSearch.isError === true && String(blockedSearch.structuredContent.error).includes('not available'), 'supertool allowed disabled search action');
 
+    const missingRead = await client.request('tools/call', {
+      name: 'codexpro',
+      arguments: { action: 'read', args: { workspace_id: opened.structuredContent.workspace_id, path: 'missing.txt' } }
+    });
+    assert(missingRead.isError === true && missingRead.structuredContent.codexpro_tool === 'read' && missingRead.structuredContent.wrapped_tool === 'read', 'supertool failed read was not tagged as read');
+
     const blockedBash = await client.request('tools/call', {
       name: 'codexpro',
       arguments: { action: 'bash', args: { workspace_id: opened.structuredContent.workspace_id, command: 'pwd' } }

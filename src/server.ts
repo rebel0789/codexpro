@@ -735,7 +735,12 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         args.args && typeof args.args === "object" && !Array.isArray(args.args)
           ? args.args
           : {};
-      const result = await handler(childArgs);
+      let result: any;
+      try {
+        result = await handler(childArgs);
+      } catch (error) {
+        result = errorResult(error);
+      }
       if (result && typeof result === "object") {
         const structured = result.structuredContent;
         result.structuredContent = {
@@ -1117,7 +1122,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     "list_workspaces",
     {
       title: "List Workspaces",
-      description: "List currently opened CodexPro workspaces for this MCP session.",
+      description: "List currently opened CodexPro workspaces for this server/config.",
       inputSchema: {},
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
@@ -1130,7 +1135,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const current = workspaces.listWorkspaces();
       const text = current.length
         ? current.map((workspace) => `- ${workspace.id} — ${workspace.root} (opened ${workspace.openedAt})`).join("\n")
-        : "No workspaces opened yet. Call open_workspace first.";
+        : "No workspaces opened on this CodexPro server/config yet. Call open_workspace first.";
       return textResult(text, { workspaces: current, count: current.length });
     }
   );
