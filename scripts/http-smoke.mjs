@@ -170,13 +170,17 @@ await fs.writeFile(path.join(root, '.codex', 'skills', 'http-smoke-skill', 'SKIL
   ''
 ].join('\n'), 'utf8');
 const port = await getFreePort();
+const genericPort = await getFreePort();
 const token = 'codexpro-http-smoke-token';
 const child = spawn('node', ['dist/http.js'], {
   cwd: path.resolve('.'),
   env: {
     ...process.env,
+    HOST: '0.0.0.0',
+    PORT: String(genericPort),
     CODEXPRO_ROOT: root,
     CODEXPRO_ALLOWED_ROOTS: root,
+    CODEXPRO_HOST: '127.0.0.1',
     CODEXPRO_PORT: String(port),
     CODEXPRO_HTTP_TOKEN: token,
     CODEXPRO_BASH_MODE: 'safe',

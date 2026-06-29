@@ -107,6 +107,10 @@ const empty = run(['settings', 'show', '--root', root], env);
 if (!empty.includes('No saved settings')) {
   throw new Error(`expected empty settings output, got:\n${empty}`);
 }
+const emptyEquals = run([`settings`, `show`, `--root=${root}`], env);
+if (!emptyEquals.includes('No saved settings')) {
+  throw new Error(`expected --root= settings output, got:\n${emptyEquals}`);
+}
 
 const saved = run([
   'settings',
@@ -163,6 +167,17 @@ runFail([
   'raw-cloudflare-token'
 ], env, /does not save raw --cloudflare-token/i);
 
+runFail([
+  'settings',
+  'set',
+  '--root',
+  policyRoot,
+  '--tunnel',
+  'ngrok',
+  '--hostname',
+  'http://policy.ngrok-free.app'
+], env, /hostname must use https/i);
+
 run([
   'settings',
   'set',
@@ -171,7 +186,7 @@ run([
   '--tunnel',
   'ngrok',
   '--hostname',
-  'policy.ngrok-free.app',
+  'https://policy.ngrok-free.app/mcp',
   '--mode',
   'handoff',
   '--write',
@@ -181,7 +196,7 @@ run([
 ], env);
 const policyProfile = await readProfile(policyRoot, home);
 const realPolicyRoot = await fs.realpath(policyRoot);
-if (policyProfile.write !== 'handoff' || policyProfile.ngrokConfig !== path.join(realPolicyRoot, 'ngrok.yml')) {
+if (policyProfile.write !== 'handoff' || policyProfile.hostname !== 'policy.ngrok-free.app' || policyProfile.ngrokConfig !== path.join(realPolicyRoot, 'ngrok.yml')) {
   throw new Error(`settings policy profile did not normalize write/path values: ${JSON.stringify(policyProfile)}`);
 }
 

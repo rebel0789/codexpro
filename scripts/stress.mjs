@@ -163,13 +163,13 @@ async function runFullModeStress(root) {
       name: 'codexpro',
       arguments: { action: 'read', args: { workspace_id: ws, path: 'demo.txt', start_line: 1, end_line: 3 } }
     });
-    assert(superRead.structuredContent.wrapped_tool === 'read' && superRead.structuredContent.text.includes('--flag root'), 'supertool read failed');
+    assert(superRead.structuredContent.codexpro_tool === 'read' && superRead.structuredContent.wrapped_tool === 'read' && superRead.structuredContent.text.includes('--flag root'), 'supertool read failed');
 
     const superSearch = await client.request('tools/call', {
       name: 'codexpro',
       arguments: { action: 'search', args: { workspace_id: ws, query: 'stress-needle-3', path: 'many', max_results: 20 } }
     });
-    assert(superSearch.structuredContent.wrapped_tool === 'search', 'supertool search did not report wrapped tool');
+    assert(superSearch.structuredContent.codexpro_tool === 'search' && superSearch.structuredContent.wrapped_tool === 'search', 'supertool search did not report wrapped tool');
     assert(superSearch.structuredContent.matches.length === 20, `supertool search returned ${superSearch.structuredContent.matches.length} matches`);
 
     const arrows = await Promise.all(Array.from({ length: 12 }, () =>
@@ -203,7 +203,7 @@ async function runFullModeStress(root) {
       name: 'codexpro',
       arguments: { action: 'handoff_poll', args: { workspace_id: ws, plan_hash: 'stress-plan', since_iteration: 6, max_wait_seconds: 1, poll_ms: 250 } }
     });
-    assert(superWait.structuredContent.wrapped_tool === 'wait_for_handoff' && superWait.structuredContent.succeeded === true, 'supertool handoff_poll failed');
+    assert(superWait.structuredContent.codexpro_tool === 'wait_for_handoff' && superWait.structuredContent.wrapped_tool === 'wait_for_handoff' && superWait.structuredContent.succeeded === true, 'supertool handoff_poll failed');
 
     const mismatch = await client.request('tools/call', {
       name: 'wait_for_handoff',
@@ -242,7 +242,7 @@ async function runFullModeStress(root) {
         }
       }
     });
-    assert(superExport.structuredContent.wrapped_tool === 'export_pro_context', 'supertool pro_export did not wrap export_pro_context');
+    assert(superExport.structuredContent.codexpro_tool === 'export_pro_context' && superExport.structuredContent.wrapped_tool === 'export_pro_context', 'supertool pro_export did not wrap export_pro_context');
     assert(superExport.structuredContent.files_included.length === 1 && superExport.structuredContent.files_included[0] === 'demo.txt', `supertool Pro export included wrong files: ${JSON.stringify(superExport.structuredContent.files_included)}`);
 
     const selfTest = await client.request('tools/call', { name: 'codexpro_self_test', arguments: { workspace_id: ws } });
@@ -277,7 +277,7 @@ async function runSupertoolModeStress(root) {
       name: 'codexpro',
       arguments: { action: 'read', args: { workspace_id: opened.structuredContent.workspace_id, path: 'demo.txt', start_line: 1, end_line: 2 } }
     });
-    assert(read.structuredContent.wrapped_tool === 'read' && read.structuredContent.text.includes('alpha'), 'minimal supertool read failed');
+    assert(read.structuredContent.codexpro_tool === 'read' && read.structuredContent.wrapped_tool === 'read' && read.structuredContent.text.includes('alpha'), 'minimal supertool read failed');
 
     const blockedSearch = await client.request('tools/call', {
       name: 'codexpro',

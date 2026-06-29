@@ -286,6 +286,8 @@ await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws
 await fs.writeFile(path.join(tmp, 'tokens.txt'), [
   'Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456',
   'https://example.test/mcp?codexpro_token=verysecretcodexprotoken123&x=1',
+  'codexpro_token=secretsecret12345',
+  '"codexpro_token": "shortcodextoken"',
   'ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz123456',
   '"api_key": "jsonsecretvalueabcdefghijklmnop"',
   'service_token: yamlsecretvalueabcdefghijklmnop'
@@ -297,10 +299,11 @@ if (secretPayload.includes('sk-realSecretValue123') || !secretPayload.includes('
 }
 const tokenRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'tokens.txt' } });
 const tokenPayload = JSON.stringify(tokenRead);
-for (const leaked of ['ghp_abcdefghijklmnopqrstuvwxyz123456', 'verysecretcodexprotoken123', 'sk-ant-abcdefghijklmnopqrstuvwxyz123456', 'jsonsecretvalueabcdefghijklmnop', 'yamlsecretvalueabcdefghijklmnop']) {
+for (const leaked of ['ghp_abcdefghijklmnopqrstuvwxyz123456', 'verysecretcodexprotoken123', 'secretsecret12345', 'shortcodextoken', 'sk-ant-abcdefghijklmnopqrstuvwxyz123456', 'jsonsecretvalueabcdefghijklmnop', 'yamlsecretvalueabcdefghijklmnop']) {
   if (tokenPayload.includes(leaked)) throw new Error(`read leaked token-like content: ${leaked}`);
 }
 await expectToolError('write', { workspace_id: ws, path: 'notes.md', content: 'OPENAI_API_KEY=sk-realSecretValue123\n' }, /Secret-looking content is blocked/);
+await expectToolError('write', { workspace_id: ws, path: 'token.txt', content: 'codexpro_token=shorttok\n' }, /Secret-looking content is blocked/);
 await expectToolError('write', { workspace_id: ws, path: 'notes.yaml', content: 'api_key: yamlsecretvalueabcdefghijklmnop\n' }, /Secret-looking content is blocked/);
 await client.request('tools/call', {
   name: 'write',
@@ -490,7 +493,7 @@ const waitFailed = await client.request('tools/call', {
   name: 'wait_for_handoff',
   arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'failed-plan' }
 });
-if (waitFailed.structuredContent.awaited_terminal !== true || waitFailed.structuredContent.succeeded !== false || waitFailed.structuredContent.state !== 'failed') {
+if (waitFailed.structuredContent.awaited_terminal !== true || waitFailed.structuredContent.awaited_completed !== false || waitFailed.structuredContent.succeeded !== false || waitFailed.structuredContent.state !== 'failed') {
   throw new Error(`wait_for_handoff did not report failed terminal state: ${JSON.stringify(waitFailed.structuredContent)}`);
 }
 if (waitFailed.structuredContent.status_file !== '.ai-bridge/agent-status.md' || waitFailed.structuredContent.diff_file !== '.ai-bridge/implementation-diff.patch') {
@@ -507,7 +510,7 @@ const waitTimedOut = await client.request('tools/call', {
   name: 'wait_for_handoff',
   arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'timed-out-plan' }
 });
-if (waitTimedOut.structuredContent.awaited_terminal !== true || waitTimedOut.structuredContent.succeeded !== false || waitTimedOut.structuredContent.state !== 'timed_out') {
+if (waitTimedOut.structuredContent.awaited_terminal !== true || waitTimedOut.structuredContent.awaited_completed !== false || waitTimedOut.structuredContent.succeeded !== false || waitTimedOut.structuredContent.state !== 'timed_out') {
   throw new Error(`wait_for_handoff did not report timed-out terminal state: ${JSON.stringify(waitTimedOut.structuredContent)}`);
 }
 await fs.rm(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), { force: true });

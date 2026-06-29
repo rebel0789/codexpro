@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.28.6
+
+- Added the stable `codexpro` supertool wrapper for advanced connector-cache/custom workflows, while preserving tool/write/bash mode gates.
+- Hardened direct HTTP auth defaults, local `--no-auth`, token redaction, search parsing, selected-path Pro exports, and handoff polling state.
+- Added `npm run stress` to cover full-mode MCP behavior, supertool dispatch, skill caps, card payloads, search edge cases, Pro export, and handoff polling.
+- Fixed CLI env precedence so `CODEXPRO_HOST` / `CODEXPRO_PORT` override generic `HOST` / `PORT`, preventing ambient process env from widening a launcher-validated bind.
+- Normalized stable public hostnames in CLI settings/setup/start flows and accepted common `--flag=value` syntax.
+
 - Made ChatGPT tool-card descriptor metadata opt-in with `CODEXPRO_TOOL_CARDS=1`, so default `tools/list` responses stay plain MCP and avoid fragile widget metadata during tool discovery.
 - Added `codexpro loop-handoff` for bounded local execute/review loops over `.ai-bridge/current-plan.md`, with a required local `--review-command`, `--max-iters`, dry-run preview, optional test command capture, and stop conditions for no diff, repeated diff, missing follow-up plans, reviewer errors, and human cancellation.
 - Hardened `loop-handoff` external-command boundaries: commands are preflighted before execution, reviewer verdicts require explicit `CODEXPRO_REVIEW=...` assignment lines by default, and reviewer `PASS` no longer masks failed executor/test/reviewer commands unless the user opts into the supported override behavior.

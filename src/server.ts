@@ -667,7 +667,7 @@ function getSharedWorkspaceManager(config: CodexProConfig): WorkspaceManager {
 export function createCodexProServer(config: CodexProConfig): McpServer {
   const workspaces = getSharedWorkspaceManager(config);
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.28.5" }, { instructions: serverInstructions(config) });
+  const server = new McpServer({ name: "CodexPro", version: "0.28.6" }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
 
@@ -739,6 +739,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       if (result && typeof result === "object") {
         const structured = result.structuredContent;
         result.structuredContent = {
+          codexpro_tool: action,
+          codexpro_title: action,
           codexpro_super_action: action,
           wrapped_tool: action,
           ...(structured && typeof structured === "object" && !Array.isArray(structured) ? structured : {})
@@ -1770,9 +1772,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         state = await readState();
       }
 
-      const completed = isAwaited(state);
+      const awaitedTerminal = isAwaited(state);
+      const awaitedCompleted = awaitedTerminal && state?.state === "completed";
       const planHashMismatch = Boolean(expectedPlanHash && state && state.plan_hash !== expectedPlanHash);
-      const reportedState = completed
+      const reportedState = awaitedTerminal
         ? String(state?.state)
         : state
           ? state.state === "running" || planHashMismatch || sinceIteration !== undefined
@@ -1802,9 +1805,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         workspace_id: workspace.id,
         root: workspace.root,
         state: reportedState,
-        awaited_completed: completed,
-        awaited_terminal: completed,
-        succeeded: completed && state?.state === "completed",
+        awaited_completed: awaitedCompleted,
+        awaited_terminal: awaitedTerminal,
+        succeeded: awaitedCompleted,
         state_file: stateRel,
         ...(state ? { run_state: state.state } : {}),
         ...(typeof state?.iteration === "number" ? { iteration: state.iteration } : {}),
@@ -1816,10 +1819,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         ...(state?.finished_at ? { finished_at: state.finished_at } : {}),
         ...(state?.executor ? { executor: state.executor } : {}),
         ...(state?.model ? { model: state.model } : {}),
-        ...(completed ? {} : { next_poll_after_seconds: Math.max(1, Math.ceil(pollMs / 1000)) })
+        ...(awaitedTerminal ? {} : { next_poll_after_seconds: Math.max(1, Math.ceil(pollMs / 1000)) })
       };
 
-      if (completed) {
+      if (awaitedTerminal) {
         const statusFile = bridgeArtifact(state?.status_file, `${config.contextDir}/agent-status.md`);
         const diffFile = bridgeArtifact(state?.diff_file, `${config.contextDir}/implementation-diff.patch`);
         const logFile = bridgeArtifact(state?.log_file, `${config.contextDir}/execution-log.jsonl`);
@@ -1848,7 +1851,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
 
       const summary = !state
         ? `No handoff run state found at ${stateRel}. Start a run with handoff_to_agent + local execute-handoff/watch-handoff, then call wait_for_handoff again.`
-        : completed
+        : awaitedTerminal
           ? `Handoff run ${state.state} (iteration ${state.iteration ?? 1}, exit ${state.exit_code ?? "null"}).`
           : planHashMismatch
             ? `Executor has not completed the expected plan yet (last known run plan_hash=${state.plan_hash ?? "unknown"}). Still waiting.`
@@ -1861,10 +1864,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         "",
         `State file: ${stateRel}`,
         ...(state?.plan_hash ? [`Plan hash: ${state.plan_hash}`] : []),
-        ...(completed && structured.status_excerpt ? ["", "## Status", "", `\`\`\`text\n${structured.status_excerpt}\n\`\`\``] : []),
-        ...(completed && structured.diff_excerpt ? ["", "## Diff", "", `\`\`\`diff\n${structured.diff_excerpt}\n\`\`\``] : []),
-        ...(completed && structured.tests_excerpt ? ["", "## Tests", "", `\`\`\`text\n${structured.tests_excerpt}\n\`\`\``] : []),
-        ...(completed && structured.log_excerpt ? ["", "## Log tail", "", `\`\`\`text\n${structured.log_excerpt}\n\`\`\``] : [])
+        ...(awaitedTerminal && structured.status_excerpt ? ["", "## Status", "", `\`\`\`text\n${structured.status_excerpt}\n\`\`\``] : []),
+        ...(awaitedTerminal && structured.diff_excerpt ? ["", "## Diff", "", `\`\`\`diff\n${structured.diff_excerpt}\n\`\`\``] : []),
+        ...(awaitedTerminal && structured.tests_excerpt ? ["", "## Tests", "", `\`\`\`text\n${structured.tests_excerpt}\n\`\`\``] : []),
+        ...(awaitedTerminal && structured.log_excerpt ? ["", "## Log tail", "", `\`\`\`text\n${structured.log_excerpt}\n\`\`\``] : [])
       ];
       return textResult(lines.join("\n"), structured);
     }

@@ -181,7 +181,7 @@ Standard mode exposes:
 - `open_current_workspace` — open the configured default workspace without accepting a path. Fastest/safest first call.
 - `open_workspace` — open a local project directory using `root` or `path` and return workspace id, git status, AGENTS.md status, optional skill discovery, and optional file tree.
 - `tree` — inspect files.
-- `search` — search code with ripgrep or a Node fallback.
+- `search` — search code; literal search falls back to Node when ripgrep is unavailable, while regex search requires ripgrep.
 - `load_skill` — load bounded `SKILL.md` instructions for a discovered workspace, user, or plugin skill by name, with optional source/path disambiguation.
 - `read` — read text files with line numbers.
 - `write` — create/overwrite files and return a diff. Advertised only when `CODEXPRO_WRITE_MODE=workspace`.

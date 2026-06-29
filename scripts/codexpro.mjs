@@ -292,7 +292,10 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const raw = argv[i];
     if (!raw.startsWith('--')) continue;
-    const key = raw.slice(2);
+    const option = raw.slice(2);
+    const eq = option.indexOf('=');
+    const key = eq >= 0 ? option.slice(0, eq) : option;
+    const inlineValue = eq >= 0 ? option.slice(eq + 1) : undefined;
     if (key === 'help') out.help = true;
     else if (key === 'allow-home') out.allowHome = true;
     else if (key === 'no-auth') out.noAuth = true;
@@ -323,9 +326,9 @@ function parseArgs(argv) {
     else if (key === 'no-install-cloudflared') out.noInstallCloudflared = true;
     else if (key === 'agent') {
       const next = argv[i + 1];
-      if (next && !next.startsWith('--')) {
-        out.agent = next;
-        i += 1;
+      if (inlineValue !== undefined || (next && !next.startsWith('--'))) {
+        out.agent = inlineValue ?? next;
+        if (inlineValue === undefined) i += 1;
       } else {
         out.mode = 'agent';
       }
@@ -336,10 +339,11 @@ function parseArgs(argv) {
     else if (key === 'print-env') out.printEnv = true;
     else {
       const next = argv[i + 1];
-      if (!next || next.startsWith('--')) throw new Error(`Missing value for --${key}`);
-      i += 1;
-      if (key === 'allow-root') out.allowRoots.push(next);
-      else out[key.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = next;
+      const value = inlineValue ?? next;
+      if (value === undefined || (inlineValue === undefined && value.startsWith('--'))) throw new Error(`Missing value for --${key}`);
+      if (inlineValue === undefined) i += 1;
+      if (key === 'allow-root') out.allowRoots.push(value);
+      else out[key.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = value;
     }
   }
   return out;
@@ -950,16 +954,18 @@ function endpointWithToken(endpoint, token) {
   return url.toString();
 }
 
+function normalizePublicHostname(value) {
+  const raw = String(value ?? '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  const url = new URL(raw.includes('://') ? raw : `https://${raw}`);
+  if (url.protocol !== 'https:') throw new Error('hostname must use https when a scheme is provided.');
+  if (url.search || url.hash) throw new Error('hostname must not include query strings or fragments.');
+  if (url.pathname !== '/' && url.pathname !== '/mcp') throw new Error('hostname must be a host, URL root, or /mcp URL.');
+  return url.host;
+}
+
 function publicBaseFromHostname(hostname) {
-  const raw = hostname.includes('://') ? hostname : `https://${hostname}`;
-  const url = new URL(raw);
-  if (url.pathname === '/mcp' || url.pathname.endsWith('/mcp')) {
-    url.pathname = url.pathname.slice(0, -4) || '/';
-  }
-  url.pathname = url.pathname.replace(/\/+$/, '');
-  url.search = '';
-  url.hash = '';
-  return url.toString().replace(/\/$/, '');
+  return `https://${normalizePublicHostname(hostname)}`;
 }
 
 function readTokenFile(filePath) {
@@ -2615,6 +2621,7 @@ async function collectTunnelPreference(rl, defaults, profile, options = {}) {
       optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'NGROK_DOMAIN'], '')
     );
     if (!hostname) throw new Error('Ngrok setup needs your reserved domain, for example name.ngrok-free.dev.');
+    hostname = normalizePublicHostname(hostname);
     ngrokConfig = optionValue(defaults, profile, 'ngrokConfig', ['NGROK_CONFIG', 'CODEXPRO_NGROK_CONFIG'], '');
   } else if (tunnel === 'cloudflare-named') {
     hostname = await ask(
@@ -2623,6 +2630,7 @@ async function collectTunnelPreference(rl, defaults, profile, options = {}) {
       optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME'], '')
     );
     if (!hostname) throw new Error('Stable public URL setup needs a real hostname, for example codexpro.yourdomain.com.');
+    hostname = normalizePublicHostname(hostname);
     tunnelName = await ask(rl, 'Cloudflare tunnel name', optionValue(defaults, profile, 'tunnelName', ['CODEXPRO_TUNNEL_NAME', 'CLOUDFLARE_TUNNEL_NAME'], 'codexpro'));
     cloudflareConfig = optionValue(defaults, profile, 'cloudflareConfig', ['CODEXPRO_CLOUDFLARE_CONFIG', 'CLOUDFLARE_TUNNEL_CONFIG'], '');
     cloudflareTokenFile = optionValue(defaults, profile, 'cloudflareTokenFile', ['CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN_FILE', 'CLOUDFLARE_TUNNEL_TOKEN_FILE'], '');
@@ -2831,12 +2839,13 @@ async function runSetupWizard(argv) {
       args.push('--tunnel', 'none');
     } else if (tunnelChoice === 'stable') {
       profileTunnel = 'cloudflare-named';
-      const hostname = await ask(
+      let hostname = await ask(
         rl,
         'Stable Cloudflare hostname, without /mcp',
         optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME'], '')
       );
       if (!hostname) throw new Error('Stable public URL setup needs a real hostname, for example codexpro.yourdomain.com.');
+      hostname = normalizePublicHostname(hostname);
       profileHostname = hostname;
       const tunnelName = await ask(rl, 'Cloudflare tunnel name', optionValue(defaults, profile, 'tunnelName', ['CODEXPRO_TUNNEL_NAME', 'CLOUDFLARE_TUNNEL_NAME'], 'codexpro'));
       profileTunnelName = tunnelName;
@@ -2847,12 +2856,13 @@ async function runSetupWizard(argv) {
       if (profileCloudflareTokenFile) args.push('--cloudflare-token-file', profileCloudflareTokenFile);
     } else if (tunnelChoice === 'ngrok') {
       profileTunnel = 'ngrok';
-      const hostname = await ask(
+      let hostname = await ask(
         rl,
         'Ngrok domain or URL, without /mcp',
         optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'NGROK_DOMAIN'], '')
       );
       if (!hostname) throw new Error('Ngrok setup needs your reserved domain, for example name.ngrok-free.dev.');
+      hostname = normalizePublicHostname(hostname);
       profileHostname = hostname;
       args.push('--tunnel', 'ngrok', '--hostname', hostname);
       const ngrokConfig = optionValue(defaults, profile, 'ngrokConfig', ['NGROK_CONFIG', 'CODEXPRO_NGROK_CONFIG'], '');
@@ -2970,7 +2980,8 @@ function saveSettingsFromArgs(root, args, profile) {
   if (!['none', 'cloudflare', 'cloudflare-named', 'ngrok'].includes(tunnel)) {
     throw new Error('--tunnel must be none, cloudflare, cloudflare-named, or ngrok');
   }
-  const hostname = args.hostname ?? args.url ?? profile.hostname ?? '';
+  const rawHostname = args.hostname ?? args.url ?? profile.hostname ?? '';
+  const hostname = (tunnel === 'ngrok' || tunnel === 'cloudflare-named') ? normalizePublicHostname(rawHostname) : String(rawHostname ?? '').trim();
   if ((tunnel === 'ngrok' || tunnel === 'cloudflare-named') && !hostname) {
     throw new Error('--hostname is required for ngrok and cloudflare-named settings.');
   }
