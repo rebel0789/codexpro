@@ -18,6 +18,7 @@ import {
   type TunnelMode,
   type WorkspaceProfile
 } from "./profileStore.js";
+import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
 
 function escapeHtml(value: unknown): string {
@@ -215,9 +216,10 @@ function selectOptions(values: readonly string[], current: string): string {
 
 function serverUrlDisplay(endpoint: string | undefined, authEnabled: boolean): string {
   if (!endpoint) return "";
-  if (!authEnabled) return endpoint;
-  const glue = endpoint.includes("?") ? "&" : "?";
-  return `${endpoint}${glue}codexpro_token=<redacted>`;
+  const safeEndpoint = redactSensitiveText(endpoint);
+  if (!authEnabled) return safeEndpoint;
+  const glue = safeEndpoint.includes("?") ? "&" : "?";
+  return `${safeEndpoint}${glue}codexpro_token=<redacted>`;
 }
 
 function currentTunnelMessage(tunnel: TunnelMode, endpoint: string): string {
@@ -256,7 +258,7 @@ function profileForm(config: CodexProConfig): string {
           <code>${escapeHtml(runtimeUrl)}</code>
           <p>${escapeHtml(currentTunnelMessage(runtimeTunnel, runtimeEndpoint))}</p>
         </div>
-        <button type="button" class="copy-mini" data-copy-kind="server-url" data-copy-base="${escapeHtml(runtimeEndpoint)}">Copy</button>
+        <button type="button" class="copy-mini" data-copy-kind="server-url" data-copy-base="${escapeHtml(redactSensitiveText(runtimeEndpoint))}">Copy</button>
       </div>`
     : `<div class="current-url idle">
         <div>
@@ -264,7 +266,7 @@ function profileForm(config: CodexProConfig): string {
           <code>${savedUrl ? escapeHtml(savedUrl) : "No public URL detected for this run"}</code>
           <p>${escapeHtml(savedUrl ? "This is based on the saved hostname. It becomes current after the launcher starts that tunnel." : currentTunnelMessage(values.tunnel, ""))}</p>
         </div>
-        ${savedEndpoint ? `<button type="button" class="copy-mini" data-copy-kind="server-url" data-copy-base="${escapeHtml(savedEndpoint)}">Copy</button>` : ""}
+        ${savedEndpoint ? `<button type="button" class="copy-mini" data-copy-kind="server-url" data-copy-base="${escapeHtml(redactSensitiveText(savedEndpoint))}">Copy</button>` : ""}
       </div>`;
   return `<section class="panel profile-panel" id="profile">
       <div class="section-head">
@@ -375,7 +377,7 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
 function profileResponse(config: CodexProConfig): Record<string, unknown> {
   const profile = readWorkspaceProfile(config.defaultRoot);
   const runtime = readRuntimeConnection(config.defaultRoot);
-  return {
+  return redactStructured({
     ok: true,
     profile_path: profile.profilePath ?? profilePathForRoot(config.defaultRoot),
     exists: Boolean(profile.profilePath),
@@ -394,7 +396,7 @@ function profileResponse(config: CodexProConfig): Record<string, unknown> {
       widgetDomain: config.widgetDomain,
       authEnabled: Boolean(config.authToken)
     }
-  };
+  });
 }
 
 function jsonError(res: Response, status: number, code: string, message: string, issues?: unknown): void {

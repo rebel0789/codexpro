@@ -353,7 +353,10 @@ await fs.writeFile(path.join(tmp, 'tokens.txt'), [
   '"codexpro_token": "shortcodextoken"',
   'ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz123456',
   '"api_key": "jsonsecretvalueabcdefghijklmnop"',
-  'service_token: yamlsecretvalueabcdefghijklmnop'
+  'service_token: yamlsecretvalueabcdefghijklmnop',
+  'ngrok config add-authtoken 2abcDEFghiJKLmnopQRSTuvWXyz_1234567890',
+  'cloudflared tunnel run --token eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJjb2RleHBybyJ9.signature1234567890',
+  'cloudflared tunnel run --token-file /Users/rebel/.codexpro/cloudflare-tunnel-token'
 ].join('\n'), 'utf8');
 const secretRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'config.txt' } });
 const secretPayload = JSON.stringify(secretRead);
@@ -362,8 +365,11 @@ if (secretPayload.includes('sk-realSecretValue123') || !secretPayload.includes('
 }
 const tokenRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'tokens.txt' } });
 const tokenPayload = JSON.stringify(tokenRead);
-for (const leaked of ['ghp_abcdefghijklmnopqrstuvwxyz123456', 'verysecretcodexprotoken123', 'secretsecret12345', 'shortcodextoken', 'sk-ant-abcdefghijklmnopqrstuvwxyz123456', 'jsonsecretvalueabcdefghijklmnop', 'yamlsecretvalueabcdefghijklmnop']) {
+for (const leaked of ['ghp_abcdefghijklmnopqrstuvwxyz123456', 'verysecretcodexprotoken123', 'secretsecret12345', 'shortcodextoken', 'sk-ant-abcdefghijklmnopqrstuvwxyz123456', 'jsonsecretvalueabcdefghijklmnop', 'yamlsecretvalueabcdefghijklmnop', '2abcDEFghiJKLmnopQRSTuvWXyz_1234567890', 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJjb2RleHBybyJ9.signature1234567890']) {
   if (tokenPayload.includes(leaked)) throw new Error(`read leaked token-like content: ${leaked}`);
+}
+if (!tokenPayload.includes('/Users/rebel/.codexpro/cloudflare-tunnel-token')) {
+  throw new Error('redaction hid a non-secret Cloudflare token-file path');
 }
 await expectToolError('write', { workspace_id: ws, path: 'notes.md', content: 'OPENAI_API_KEY=sk-realSecretValue123\n' }, /Secret-looking content is blocked/);
 await expectToolError('write', { workspace_id: ws, path: 'token.txt', content: 'codexpro_token=shorttok\n' }, /Secret-looking content is blocked/);

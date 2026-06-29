@@ -29,6 +29,8 @@ export interface McpServerInventoryItem {
   source: string;
 }
 
+const MAX_MCP_SERVER_INVENTORY = 120;
+
 function unique<T>(items: T[], key: (item: T) => string): T[] {
   const seen = new Set<string>();
   const out: T[] = [];
@@ -297,10 +299,10 @@ function parseJsonMcpServers(text: string, source: string): McpServerInventoryIt
 
 export async function discoverMcpServers(workspace: Workspace): Promise<McpServerInventoryItem[]> {
   const candidates = [
-    { file: path.join(os.homedir(), ".codex", "config.toml"), kind: "toml" },
-    { file: path.join(workspace.root, ".mcp.json"), kind: "json" },
-    { file: path.join(workspace.root, ".cursor", "mcp.json"), kind: "json" },
-    { file: path.join(os.homedir(), ".cursor", "mcp.json"), kind: "json" }
+    { file: path.join(os.homedir(), ".codex", "config.toml"), kind: "toml", source: "user codex config" },
+    { file: path.join(workspace.root, ".mcp.json"), kind: "json", source: "workspace config" },
+    { file: path.join(workspace.root, ".cursor", "mcp.json"), kind: "json", source: "workspace cursor config" },
+    { file: path.join(os.homedir(), ".cursor", "mcp.json"), kind: "json", source: "user cursor config" }
   ];
 
   const servers: McpServerInventoryItem[] = [];
@@ -312,11 +314,12 @@ export async function discoverMcpServers(workspace: Workspace): Promise<McpServe
     } catch {
       continue;
     }
-    const source = displayPath(candidate.file, workspace.root);
-    servers.push(...(candidate.kind === "toml" ? parseTomlMcpServers(text, source) : parseJsonMcpServers(text, source)));
+    servers.push(...(candidate.kind === "toml" ? parseTomlMcpServers(text, candidate.source) : parseJsonMcpServers(text, candidate.source)));
   }
 
-  return unique(servers, (server) => `${server.source}:${server.name}`).sort((a, b) => a.name.localeCompare(b.name));
+  return unique(servers, (server) => `${server.source}:${server.name}`)
+    .sort((a, b) => a.name.localeCompare(b.name) || a.source.localeCompare(b.source))
+    .slice(0, MAX_MCP_SERVER_INVENTORY);
 }
 
 export async function codexproInventory(

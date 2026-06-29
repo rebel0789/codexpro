@@ -412,6 +412,72 @@ async function runGlobalSkillStress(root) {
   }
 }
 
+async function runRedactionStress() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-redact-'));
+  const ngrokToken = '2redactDEFghiJKLmnopQRSTuvWXyz_1234567890';
+  const cloudflareToken = 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJzdHJlc3MifQ.signature1234567890';
+  const tokenFile = '/Users/rebel/.codexpro/cloudflare-tunnel-token';
+  await fs.writeFile(path.join(root, 'tokens.txt'), [
+    `ngrok config add-authtoken ${ngrokToken}`,
+    `cloudflared tunnel run --token ${cloudflareToken}`,
+    `cloudflared tunnel run --token-file ${tokenFile}`
+  ].join('\n'), 'utf8');
+
+  const client = await initClient(root);
+  try {
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    for (const request of [
+      { name: 'read', arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'tokens.txt' } },
+      { name: 'codexpro', arguments: { action: 'read', args: { workspace_id: opened.structuredContent.workspace_id, path: 'tokens.txt' } } }
+    ]) {
+      const result = await client.request('tools/call', request);
+      const payload = JSON.stringify(result);
+      assert(!payload.includes(ngrokToken), 'read leaked ngrok authtoken');
+      assert(!payload.includes(cloudflareToken), 'read leaked cloudflared token');
+      assert(payload.includes(tokenFile), 'redaction hid non-secret token-file path');
+    }
+  } finally {
+    client.close();
+  }
+}
+
+async function runMcpInventoryStress() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-mcp-root-'));
+  const fakeHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-mcp-home-'));
+  await fs.mkdir(path.join(fakeHome, '.codex'), { recursive: true });
+  await fs.mkdir(path.join(fakeHome, '.cursor'), { recursive: true });
+  const toml = Array.from({ length: 80 }, (_, i) =>
+    `[mcp_servers.codex_${String(i).padStart(3, '0')}]\ncommand = "secret-command"\nargs = ["secret-arg"]\n`
+  ).join('\n');
+  const cursorServers = Object.fromEntries(Array.from({ length: 80 }, (_, i) => [
+    `cursor_${String(i).padStart(3, '0')}`,
+    { command: 'secret-command', args: ['secret-arg'] }
+  ]));
+  await fs.writeFile(path.join(fakeHome, '.codex', 'config.toml'), toml, 'utf8');
+  await fs.writeFile(path.join(fakeHome, '.cursor', 'mcp.json'), JSON.stringify({ mcpServers: cursorServers }), 'utf8');
+
+  const client = await initClient(root, { HOME: fakeHome });
+  try {
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const inventory = await client.request('tools/call', {
+      name: 'codexpro_inventory',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, include_global_skills: false, include_mcp_servers: true }
+    });
+    const superInventory = await client.request('tools/call', {
+      name: 'codexpro',
+      arguments: { action: 'inventory', args: { workspace_id: opened.structuredContent.workspace_id, include_global_skills: false, include_mcp_servers: true } }
+    });
+    assert(inventory.structuredContent.mcp_server_count === 120, `MCP inventory was not capped: ${inventory.structuredContent.mcp_server_count}`);
+    assert(superInventory.structuredContent.codexpro_tool === 'codexpro_inventory' && superInventory.structuredContent.mcp_server_count === 120, 'supertool MCP inventory was not capped');
+    const payload = JSON.stringify([inventory, superInventory]);
+    for (const leaked of [fakeHome, '~/.codex', '~/.cursor', '.cursor/mcp.json', '.codex/config.toml', 'secret-command', 'secret-arg']) {
+      assert(!payload.includes(leaked), `MCP inventory leaked ${leaked}`);
+    }
+  } finally {
+    client.close();
+  }
+}
+
 async function runSupertoolModeStress(root) {
   const client = await initClient(root, {
     CODEXPRO_TOOL_MODE: 'minimal',
@@ -551,20 +617,42 @@ async function runGuardEdgeStress() {
 async function runShowChangesStatsStress() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-git-'));
   await fs.writeFile(path.join(root, 'demo.txt'), 'alpha\n', 'utf8');
+  await fs.writeFile(path.join(root, 'other.txt'), 'one\n', 'utf8');
+  await fs.writeFile(path.join(root, 'staged file.txt'), 'one\n', 'utf8');
   spawnSync('git', ['init'], { cwd: root, stdio: 'ignore' });
   spawnSync('git', ['config', 'user.email', 'stress@example.com'], { cwd: root, stdio: 'ignore' });
   spawnSync('git', ['config', 'user.name', 'Stress Test'], { cwd: root, stdio: 'ignore' });
   spawnSync('git', ['add', 'demo.txt'], { cwd: root, stdio: 'ignore' });
+  spawnSync('git', ['add', 'other.txt'], { cwd: root, stdio: 'ignore' });
+  spawnSync('git', ['add', 'staged file.txt'], { cwd: root, stdio: 'ignore' });
   spawnSync('git', ['commit', '-m', 'init'], { cwd: root, stdio: 'ignore' });
   await fs.appendFile(path.join(root, 'demo.txt'), 'beta\n', 'utf8');
+  await fs.appendFile(path.join(root, 'other.txt'), 'two\n', 'utf8');
+  await fs.appendFile(path.join(root, 'staged file.txt'), 'two\n', 'utf8');
+  spawnSync('git', ['add', 'staged file.txt'], { cwd: root, stdio: 'ignore' });
   const client = await initClient(root);
   try {
     const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const scopedStatus = await client.request('tools/call', {
+      name: 'git_status',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'demo.txt' }
+    });
+    assert(scopedStatus.structuredContent.changed_files.length === 1 && scopedStatus.structuredContent.changed_files[0].includes('demo.txt'), `git_status path leaked unrelated files: ${JSON.stringify(scopedStatus.structuredContent.changed_files)}`);
+    const superScopedStatus = await client.request('tools/call', {
+      name: 'codexpro',
+      arguments: { action: 'git_status', args: { workspace_id: opened.structuredContent.workspace_id, path: 'demo.txt' } }
+    });
+    assert(superScopedStatus.structuredContent.codexpro_tool === 'git_status' && superScopedStatus.structuredContent.changed_files.length === 1 && superScopedStatus.structuredContent.changed_files[0].includes('demo.txt'), `supertool git_status path leaked unrelated files: ${JSON.stringify(superScopedStatus.structuredContent.changed_files)}`);
     const changes = await client.request('tools/call', {
       name: 'show_changes',
-      arguments: { workspace_id: opened.structuredContent.workspace_id, include_diff: false }
+      arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'demo.txt', include_diff: false }
     });
     assert(changes.structuredContent.additions === 1 && changes.structuredContent.deletions === 0 && changes.structuredContent.diff === '', `show_changes include_diff=false lost stats: ${JSON.stringify(changes.structuredContent)}`);
+    const stagedDiff = await client.request('tools/call', {
+      name: 'git_diff',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'staged file.txt', staged: true, include_diff: false }
+    });
+    assert(stagedDiff.structuredContent.additions === 1 && stagedDiff.structuredContent.deletions === 0 && stagedDiff.structuredContent.diff === '', `git_diff staged path stats failed: ${JSON.stringify(stagedDiff.structuredContent)}`);
   } finally {
     client.close();
   }
@@ -617,6 +705,8 @@ async function runCardStress(root) {
 const root = await makeFixture();
 await runFullModeStress(root);
 await runGlobalSkillStress(root);
+await runRedactionStress();
+await runMcpInventoryStress();
 await runMaxReadSearchStress();
 await runGuardEdgeStress();
 await runSupertoolModeStress(root);

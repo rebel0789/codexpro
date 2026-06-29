@@ -1565,7 +1565,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       title: "Git Status",
       description: "Show git branch and changed files for the workspace.",
       inputSchema: {
-        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace.")
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
+        path: z.string().optional().describe("Optional file path relative to workspace root.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
@@ -1576,12 +1577,14 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const status = gitStatus(config, workspace);
+      const scopedPath = typeof args.path === "string" ? args.path : undefined;
+      const status = gitStatus(config, workspace, guard, scopedPath);
       const statusError = looksLikeGitError(status) ? status : "";
       const changedFiles = statusError ? [] : changedStatusLines(status);
       return textResult(status, {
         workspace_id: workspace.id,
         root: workspace.root,
+        path: args.path ?? "workspace status",
         status,
         status_error: statusError || undefined,
         changed_files: changedFiles,
