@@ -96,6 +96,92 @@ async function withStartedCodexPro(args, env, fn) {
   }
 }
 
+function findPythonForPty() {
+  if (process.platform === 'win32') return '';
+  for (const command of ['python3', 'python']) {
+    const result = spawnSync(command, ['-c', 'import pty, select, subprocess'], { stdio: 'ignore' });
+    if (result.status === 0) return command;
+  }
+  return '';
+}
+
+function runInteractiveQuit(args, env) {
+  const python = findPythonForPty();
+  if (!python) return false;
+  const payload = JSON.stringify({
+    cmd: process.execPath,
+    args: ['scripts/codexpro.mjs', 'start', ...args],
+    cwd: path.resolve('.')
+  });
+  const code = `
+import json, os, pty, select, subprocess, sys, time
+payload = json.loads(sys.argv[1])
+master, slave = pty.openpty()
+proc = subprocess.Popen([payload["cmd"]] + payload["args"], cwd=payload["cwd"], env=os.environ.copy(), stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
+out = bytearray()
+sent = False
+deadline = time.time() + 20
+while time.time() < deadline:
+    if proc.poll() is not None:
+        break
+    ready, _, _ = select.select([master], [], [], 0.1)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out.extend(chunk)
+    if not sent and b"codexpro> " in out:
+        os.write(master, b"q")
+        sent = True
+if proc.poll() is None:
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+if proc.poll() is None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    sys.stderr.write(out.decode(errors="replace"))
+    raise SystemExit(124)
+while True:
+    ready, _, _ = select.select([master], [], [], 0)
+    if not ready:
+        break
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out.extend(chunk)
+os.close(master)
+sys.stdout.write(out.decode(errors="replace"))
+if not sent:
+    sys.stderr.write("control prompt was not reached\\n")
+    raise SystemExit(125)
+raise SystemExit(proc.returncode or 0)
+`;
+  const result = spawnSync(python, ['-c', code, payload], {
+    cwd: path.resolve('.'),
+    env: { ...env, NO_COLOR: '1' },
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024
+  });
+  if (result.status !== 0) {
+    throw new Error(`interactive quit failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  }
+  return true;
+}
+
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-root-'));
 const reuseRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-reuse-'));
 const policyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-policy-'));
@@ -337,6 +423,26 @@ try {
   throw new Error('runtime status was not cleared after launcher SIGTERM');
 } catch (error) {
   if (error?.code !== 'ENOENT') throw error;
+}
+
+const quitRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-quit-'));
+const quitPort = await getFreePort();
+const quitRuntimePath = await runtimeStatusPath(quitRoot, home);
+if (runInteractiveQuit([
+  '--root',
+  quitRoot,
+  '--tunnel',
+  'none',
+  '--port',
+  String(quitPort),
+  '--no-copy-url'
+], env)) {
+  try {
+    await fs.access(quitRuntimePath);
+    throw new Error('runtime status was not cleared after interactive q exit');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+  }
 }
 
 const cloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-'));

@@ -18,7 +18,7 @@ async function pathExists(file) {
 
 class McpStdioClient {
   constructor(root, env = {}) {
-    this.child = spawn('node', ['dist/stdio.js'], {
+    this.child = spawn(process.execPath, ['dist/stdio.js'], {
       cwd: path.resolve('.'),
       env: {
         ...process.env,
@@ -551,6 +551,31 @@ async function runMaxReadSearchStress() {
   }
 }
 
+async function runNodeFallbackSearchLimitStress() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-node-search-'));
+  await fs.writeFile(path.join(root, 'exact.txt'), 'needle one\nneedle two\n', 'utf8');
+  await fs.writeFile(path.join(root, 'overflow.txt'), 'needle one\nneedle two\nneedle three\n', 'utf8');
+  const client = await initClient(root, { PATH: '/usr/bin:/bin' });
+  try {
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const exact = await client.request('tools/call', {
+      name: 'search',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, query: 'needle', path: 'exact.txt', max_results: 2 }
+    });
+    assert(exact.structuredContent.used === 'node', `expected node fallback, got ${exact.structuredContent.used}`);
+    assert(exact.structuredContent.matches.length === 2, `node fallback exact-limit search returned ${exact.structuredContent.matches.length} matches`);
+    assert(exact.structuredContent.truncated === false, `node fallback exact-limit search was incorrectly truncated: ${JSON.stringify(exact.structuredContent)}`);
+
+    const overflow = await client.request('tools/call', {
+      name: 'search',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, query: 'needle', path: 'overflow.txt', max_results: 2 }
+    });
+    assert(overflow.structuredContent.matches.length === 2 && overflow.structuredContent.truncated === true, `node fallback overflow search did not report truncation: ${JSON.stringify(overflow.structuredContent)}`);
+  } finally {
+    client.close();
+  }
+}
+
 async function runGuardEdgeStress() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-guard-'));
   const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-outside-'));
@@ -708,6 +733,7 @@ await runGlobalSkillStress(root);
 await runRedactionStress();
 await runMcpInventoryStress();
 await runMaxReadSearchStress();
+await runNodeFallbackSearchLimitStress();
 await runGuardEdgeStress();
 await runSupertoolModeStress(root);
 await runShowChangesStatsStress();

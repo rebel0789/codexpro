@@ -95,9 +95,10 @@ async function runNodeSearch(config: CodexProConfig, guard: PathGuard, workspace
     maxFiles: 20_000
   });
   const matches: Array<{ path: string; line: number; text: string }> = [];
+  let visibleMatches = 0;
   const matcher = options.regex ? new RegExp(options.query) : undefined;
   for (const rel of files) {
-    if (matches.length >= options.maxResults) break;
+    if (visibleMatches > options.maxResults) break;
     const resolved = guard.resolve(workspace, rel);
     try {
       const stat = await fsp.stat(resolved.absPath);
@@ -109,8 +110,11 @@ async function runNodeSearch(config: CodexProConfig, guard: PathGuard, workspace
         const line = lines[i];
         const hit = matcher ? matcher.test(line) : line.includes(options.query);
         if (hit) {
-          matches.push({ path: rel, line: i + 1, text: redactSensitiveText(truncateLine(line)) });
-          if (matches.length >= options.maxResults) break;
+          visibleMatches += 1;
+          if (matches.length < options.maxResults) {
+            matches.push({ path: rel, line: i + 1, text: redactSensitiveText(truncateLine(line)) });
+          }
+          if (visibleMatches > options.maxResults) break;
         }
       }
     } catch {
@@ -118,7 +122,7 @@ async function runNodeSearch(config: CodexProConfig, guard: PathGuard, workspace
     }
   }
   const text = matches.map((m) => `${m.path}:${m.line}: ${m.text}`).join("\n") || "No matches.";
-  return { text, matches, truncated: matches.length >= options.maxResults, used: "node" };
+  return { text, matches, truncated: visibleMatches > matches.length, used: "node" };
 }
 
 export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace, rawOptions: Partial<SearchOptions>): Promise<SearchResult> {
