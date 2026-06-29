@@ -2,13 +2,13 @@
 
 ## Which ChatGPT account should I use?
 
-Use ChatGPT Plus or Pro with Apps / Developer Mode access.
+Use a ChatGPT account with Apps / Developer Mode access. OpenAI currently lists Developer Mode for Pro, Plus, Business, Enterprise, and Education accounts on web.
 
 Current testing shows free and Go accounts do not expose the app flow needed for CodexPro.
 
 CodexPro does not unlock Developer Mode, unlock models, bypass account limits, or provide account access. It connects to the ChatGPT app surface your account already has.
 
-Account access and model tool support are separate. A Plus or Pro account can have Apps / Developer Mode, while a specific model surface may still be unable to call connectors or MCP tools directly. If CodexPro actions are unavailable in that chat, use another tool-capable ChatGPT surface or the Pro context fallback for that session.
+Account access and model tool support are separate. An eligible account can have Apps / Developer Mode, while a specific model surface may still be unable to call connectors or MCP tools directly. If CodexPro actions are unavailable in that chat, use another tool-capable ChatGPT surface or the Pro context fallback for that session.
 
 ## How is CodexPro different from generic workspace bridges?
 

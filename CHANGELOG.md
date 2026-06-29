@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Blocked raw newline and carriage-return command separators in safe bash mode before whitespace normalization, including through the stable `codexpro` supertool wrapper.
+- Corrected docs to describe Developer Mode account eligibility as broader than Plus/Pro while keeping the model/tool-surface limitation explicit.
+
 ## 0.28.6
 
 - Added the stable `codexpro` supertool wrapper for advanced connector-cache/custom workflows, while preserving tool/write/bash mode gates.

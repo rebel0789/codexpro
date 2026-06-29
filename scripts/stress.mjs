@@ -7,6 +7,15 @@ function assert(ok, message) {
   if (!ok) throw new Error(message);
 }
 
+async function pathExists(file) {
+  try {
+    await fs.access(file);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 class McpStdioClient {
   constructor(root, env = {}) {
     this.child = spawn('node', ['dist/stdio.js'], {
@@ -192,6 +201,28 @@ async function runFullModeStress(root) {
     });
     assert(superSearch.structuredContent.codexpro_tool === 'search' && superSearch.structuredContent.wrapped_tool === 'search', 'supertool search did not report wrapped tool');
     assert(superSearch.structuredContent.matches.length === 20, `supertool search returned ${superSearch.structuredContent.matches.length} matches`);
+
+    const safePwd = await client.request('tools/call', {
+      name: 'bash',
+      arguments: { workspace_id: ws, command: 'pwd' }
+    });
+    assert(safePwd.isError !== true && safePwd.structuredContent.exitCode === 0, 'safe bash rejected allowed pwd command');
+
+    const newlineDirectTarget = path.join(root, 'newline-direct-owned');
+    const blockedNewline = await client.request('tools/call', {
+      name: 'bash',
+      arguments: { workspace_id: ws, command: 'pwd\ntouch newline-direct-owned' }
+    });
+    assert(blockedNewline.isError === true && String(blockedNewline.structuredContent.error).includes('blocked'), 'safe bash allowed newline command chaining');
+    assert(!(await pathExists(newlineDirectTarget)), 'safe bash newline command created a file');
+
+    const newlineSuperTarget = path.join(root, 'newline-supertool-owned');
+    const blockedSuperNewline = await client.request('tools/call', {
+      name: 'codexpro',
+      arguments: { action: 'bash', args: { workspace_id: ws, command: 'pwd\ntouch newline-supertool-owned' } }
+    });
+    assert(blockedSuperNewline.isError === true && blockedSuperNewline.structuredContent.codexpro_tool === 'bash', 'supertool safe bash newline error was not tagged as bash');
+    assert(!(await pathExists(newlineSuperTarget)), 'supertool safe bash newline command created a file');
 
     const arrows = await Promise.all(Array.from({ length: 12 }, () =>
       client.request('tools/call', { name: 'search', arguments: { workspace_id: ws, query: '->', path: 'many', max_results: 25 } })
