@@ -278,6 +278,7 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   const authToken = process.env.CODEXPRO_HTTP_TOKEN ?? process.env.CODEBASE_BRIDGE_HTTP_TOKEN;
   const allowNoToken = boolFrom(process.env.CODEXPRO_ALLOW_NO_HTTP_TOKEN, false);
   const requireHttpToken =
+    (!authToken && !allowNoToken) ||
     boolFrom(process.env.CODEXPRO_REQUIRE_HTTP_TOKEN, false) ||
     boolFrom(process.env.CODEXPRO_TUNNEL_MODE, false) ||
     (!isLoopbackHost(host) && !allowNoToken);

@@ -69,7 +69,7 @@ CodexPro is not a rate-limit bypass, model proxy, hosted SaaS, or OS sandbox. It
 | Fast first setup | `npm install -g codexpro`, then `codexpro setup` |
 | Daily start | `codexpro start` from the same repo |
 | Stable ChatGPT URL | ngrok free dev domain or Cloudflare named tunnel |
-| Smallest tool surface | default `CODEXPRO_TOOL_MODE=standard` |
+| Default tool surface | `CODEXPRO_TOOL_MODE=standard` |
 | Full diagnostics | `codexpro start --tool-mode full` |
 | No ChatGPT-triggered shell | `codexpro start --no-bash` |
 | Compact chat transcript | default bash cards; use `--bash-transcript full` only when needed |
@@ -96,7 +96,7 @@ CodexPro is not a rate-limit bypass, model proxy, hosted SaaS, or OS sandbox. It
 
 If one workflow is unavailable and another product surface you already have access to is still available, CodexPro lets you keep working against the same local repo without modifying or evading either product's limits.
 
-If your ChatGPT account exposes a stronger model in the web app, and that model/surface can call Developer Mode apps, CodexPro lets it work against your local repo through MCP. Some ChatGPT model surfaces may not be able to call connectors or MCP tools directly. OpenAI's current GPT-5.5 help page says Apps are not available with GPT-5.5 Pro, so that model surface cannot use CodexPro tools. CodexPro does not provide, proxy, resell, or unlock models; it gives compatible ChatGPT sessions local coding tools and repo context.
+If your ChatGPT account exposes a stronger model in the web app, and that model/surface can call Developer Mode apps, CodexPro lets it work against your local repo through MCP. Some GPT-5.5 Pro or other model surfaces may not expose app actions in a given chat. If CodexPro actions are unavailable there, CodexPro cannot make that request reach the local server. Use a tool-capable ChatGPT surface or the Pro context fallback instead. CodexPro does not provide, proxy, resell, or unlock models; it gives compatible ChatGPT sessions local coding tools and repo context.
 
 ## CodexPro vs generic workspace bridges
 
@@ -143,7 +143,7 @@ One public tunnel option: Cloudflare quick tunnel, ngrok free dev domain, or Clo
 
 Current testing shows free / Go ChatGPT accounts do not expose the app flow needed for CodexPro. Use Plus or Pro for the best experience.
 
-Account tier and model tool support are separate things. Plus/Pro can expose Apps / Developer Mode, but a specific model surface may still be unable to call the connector. OpenAI currently documents GPT-5.5 Pro as not supporting Apps, so use another tool-capable ChatGPT surface or the Pro context fallback for those sessions.
+Account tier and model tool support are separate things. Plus/Pro can expose Apps / Developer Mode, but a specific model surface may still be unable to call the connector. If CodexPro actions are unavailable in that chat, use another tool-capable ChatGPT surface or the Pro context fallback for that session.
 
 ## Status
 
@@ -171,8 +171,11 @@ CodexPro defaults to `CODEXPRO_TOOL_MODE=standard`, which keeps ChatGPT's tool p
 
 The smaller default tool list is deliberate. ChatGPT behaves better when routine work goes through a few high-signal tools instead of a large action catalog. Workspace open calls stay lean by default; use explicit skill discovery or `codexpro_inventory` when ChatGPT needs installed user/plugin skills, then load only the required skill with `load_skill`.
 
+CodexPro also exposes one stable wrapper tool named `codexpro`. It accepts `action` plus `args` and can call only tools already registered by the current tool/write/bash mode. Use it for advanced connector-cache or custom workflow cases where a stable visible schema matters. The explicit tools below remain the preferred default because they give ChatGPT clearer descriptions and validation.
+
 Standard mode exposes:
 
+- `codexpro` — stable supertool wrapper for already-registered actions; call with `action=list_actions` to see what the current mode allows.
 - `server_config` — show safety modes, limits, blocked globs, and allowed roots.
 - `codexpro_self_test` — run one local-only diagnostic for modes, expected tools, safe bash policy, `.ai-bridge` write/edit, and selected-only Pro context.
 - `open_current_workspace` — open the configured default workspace without accepting a path. Fastest/safest first call.
@@ -186,12 +189,14 @@ Standard mode exposes:
 - `bash` — run allowlisted shell commands in the workspace. Hidden when `CODEXPRO_BASH_MODE=off`.
 - `show_changes` — one review-oriented summary with git status, diff stats, and optional diff.
 - `read_handoff` — read `.ai-bridge` files.
+- `wait_for_handoff` — read-only polling of `.ai-bridge/handoff-run-state.json` after a local executor run.
 - `export_pro_context` — write `.ai-bridge/pro-context.md` for models that cannot call MCP tools directly.
 - `handoff_to_agent` — write `.ai-bridge/current-plan.md` for Codex, OpenCode, Pi, or a custom local implementation agent without executing local commands.
 
 Minimal mode exposes only:
 
 ```text
+codexpro
 server_config
 codexpro_self_test
 open_current_workspace / open_workspace
@@ -248,6 +253,7 @@ The watcher writes the same review files as `execute-handoff`:
 .ai-bridge/agent-status.md
 .ai-bridge/implementation-diff.patch
 .ai-bridge/execution-log.jsonl
+.ai-bridge/handoff-run-state.json
 ```
 
 For autonomous local handoff loops, use `loop-handoff` with an explicit reviewer command:
@@ -617,6 +623,7 @@ In handoff mode, ChatGPT can create a plan for a local implementation agent with
 .ai-bridge/agent-status.md
 .ai-bridge/implementation-diff.patch
 .ai-bridge/execution-log.jsonl
+.ai-bridge/handoff-run-state.json
 ```
 
 Then run the implementation locally with `codexpro execute-handoff`:
@@ -712,6 +719,7 @@ Call open_current_workspace with include_tree=false unless you need the tree imm
 Use tree with max_depth=2 and max_entries=100 when you need file structure.
 Use open_current_workspace with include_skills=true only when skills are needed, then load_skill only for the specific discovered skill needed for the task.
 Use --tool-mode full and call codexpro_inventory only when you want ChatGPT to see full global skill and MCP server inventory.
+Use the codexpro supertool only when a stable action wrapper helps with ChatGPT connector cache or custom workflow issues; call action=list_actions first.
 Do not call open_workspace after open_current_workspace unless you are switching to a different root.
 Use tree/search/read for inspection, one targeted search plus show_changes for review, and bash only for focused build/test/lint verification.
 ```
@@ -1115,7 +1123,7 @@ The launcher defaults to `workspace` in normal coding mode and `handoff` in hand
 `CODEXPRO_TOOL_MODE=standard` is the default. It exposes the normal coding loop plus `show_changes`, Pro context export, and generic agent handoff.
 
 ```text
-minimal   smallest surface for demos and simple coding: open/read/write/edit/bash/show_changes, with write/bash removed when their modes are disabled
+minimal   codexpro supertool plus config/self-test/open/read/write/edit/bash/show_changes, with write/bash removed when disabled
 standard  default surface for normal coding plus handoff/export, with write/edit only in workspace write mode
 full      all tools, including inventory, workspace snapshots, raw git tools, codex_context, and compatibility wrappers
 ```
@@ -1139,6 +1147,8 @@ pytest, go test, cargo test, cargo check, cargo clippy, tsc, eslint, biome check
 ```
 
 Use the MCP `read` and `search` tools for file contents. The safe shell blocks obvious destructive commands, redirects, pipes, `curl`, `wget`, `ssh`, `docker`, `git push/reset/clean/checkout/switch/restore`, `find -exec`, `find -delete`, and file-content shell readers such as `cat`, `grep`, `rg`, `head`, and `tail`.
+
+Package-manager scripts such as `npm run build` execute code from the repo. Use `--no-bash` for untrusted repos.
 
 `CODEXPRO_BASH_MODE=off` disables bash completely and removes the `bash` MCP tool from the advertised tool list. `codexpro start --no-bash` is the CLI shortcut for the same setting.
 

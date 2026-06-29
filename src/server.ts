@@ -157,6 +157,42 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
   }
 }
 
+type CodexToolHandler = (args: any) => Promise<any> | any;
+
+const SUPERTOOL_NAME = "codexpro";
+const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
+  actions: "list_actions",
+  config: "server_config",
+  self_test: "codexpro_self_test",
+  inventory: "codexpro_inventory",
+  open: "open_current_workspace",
+  snapshot: "workspace_snapshot",
+  changes: "show_changes",
+  handoff_poll: "wait_for_handoff",
+  pro_export: "export_pro_context",
+  agent_handoff: "handoff_to_agent",
+  codex_handoff: "handoff_to_codex"
+};
+
+const registeredToolHandlersByServer = new WeakMap<object, Map<string, CodexToolHandler>>();
+
+function rememberRegisteredToolHandler(server: McpServer, name: string, handler: CodexToolHandler): void {
+  const key = server as object;
+  const handlers = registeredToolHandlersByServer.get(key) ?? new Map<string, CodexToolHandler>();
+  if (!registeredToolHandlersByServer.has(key)) registeredToolHandlersByServer.set(key, handlers);
+  handlers.set(name, handler);
+}
+
+function registeredToolHandler(server: McpServer, name: string): CodexToolHandler | undefined {
+  return registeredToolHandlersByServer.get(server as object)?.get(name);
+}
+
+function normalizeSupertoolAction(value: unknown): string {
+  const raw = String(value ?? "list_actions").trim();
+  const normalized = raw.toLowerCase().replace(/[\s-]+/g, "_");
+  return SUPERTOOL_ACTION_ALIASES[normalized] ?? normalized;
+}
+
 
 function isContextPath(config: CodexProConfig, relPath: string): boolean {
   const normalized = relPath.split(path.sep).join("/").replace(/^\.\//, "");
@@ -220,6 +256,7 @@ function registerToolCompat(
 }
 
 const MINIMAL_TOOL_NAMES = [
+  SUPERTOOL_NAME,
   "server_config",
   "codexpro_self_test",
   "open_current_workspace",
@@ -243,6 +280,7 @@ const STANDARD_TOOL_NAMES = [
 ] as const;
 
 const FULL_TOOL_NAMES = [
+  SUPERTOOL_NAME,
   "server_config",
   "codexpro_self_test",
   "codexpro_inventory",
@@ -328,11 +366,12 @@ function registerCodexTool(
   server: McpServer,
   name: string,
   options: Record<string, unknown>,
-  handler: (args: any) => Promise<any> | any
+  handler: CodexToolHandler
 ): void {
   if (!shouldRegisterTool(config, name)) return;
   registerToolCompat(server, name, descriptorOptionsForConfig(config, options), handler);
   rememberRegisteredTool(server, name);
+  rememberRegisteredToolHandler(server, name, handler);
 }
 
 function serverInstructions(config: CodexProConfig): string {
@@ -635,6 +674,83 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
   registerCodexTool(
     config,
     server,
+    SUPERTOOL_NAME,
+    {
+      title: "CodexPro Supertool",
+      description:
+        "Stable wrapper for advanced ChatGPT connector setups. Pass action plus args to call an already-registered CodexPro tool without changing the visible schema; it cannot call tools disabled by the current mode.",
+      inputSchema: {
+        action: z.string().optional().describe("Action or registered tool name. Use list_actions to see what this server mode allows."),
+        args: z.record(z.any()).optional().describe("Arguments for the selected action. Same shape as the wrapped CodexPro tool.")
+      },
+      annotations: BASH_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Running CodexPro supertool action...",
+        "openai/toolInvocation/invoked": "CodexPro supertool action complete"
+      }
+    },
+    async (args) => {
+      const action = normalizeSupertoolAction(args.action);
+      const names = registeredToolNames(server).filter((name) => name !== SUPERTOOL_NAME);
+      if (action === "list_actions" || action === "help") {
+        const text = [
+          "# CodexPro Supertool",
+          "",
+          "Use `codexpro` only when a stable wrapper is useful for ChatGPT connector caching or custom workflows. The explicit tools remain the preferred default because they give clearer descriptions and validation.",
+          "",
+          "## Available actions",
+          "",
+          names.length ? names.map((name) => `- ${name}`).join("\n") : "- none",
+          "",
+          "## Usage",
+          "",
+          "```json",
+          JSON.stringify({ action: "search", args: { workspace_id: "ws_...", query: "needle", path: "src" } }, null, 2),
+          "```"
+        ].join("\n");
+        return textResult(text, {
+          actions: names,
+          action_count: names.length,
+          aliases: SUPERTOOL_ACTION_ALIASES,
+          tool_mode: config.toolMode,
+          bash_mode: config.bashMode,
+          write_mode: config.writeMode
+        });
+      }
+
+      if (action === SUPERTOOL_NAME) {
+        throw new CodexProError("codexpro cannot call itself. Use action=list_actions to inspect available wrapped actions.");
+      }
+
+      const handler = registeredToolHandler(server, action);
+      if (!handler) {
+        throw new CodexProError(
+          `CodexPro action is not available in the current mode: ${action}. ` +
+            "Call codexpro with action=list_actions, or restart CodexPro with a broader tool mode if that action should be exposed."
+        );
+      }
+
+      const childArgs =
+        args.args && typeof args.args === "object" && !Array.isArray(args.args)
+          ? args.args
+          : {};
+      const result = await handler(childArgs);
+      if (result && typeof result === "object") {
+        const structured = result.structuredContent;
+        result.structuredContent = {
+          codexpro_super_action: action,
+          wrapped_tool: action,
+          ...(structured && typeof structured === "object" && !Array.isArray(structured) ? structured : {})
+        };
+      }
+      return result;
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
     "server_config",
     {
       title: "Server Config",
@@ -718,8 +834,12 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       check("bash mode", config.bashMode === "full" ? "warn" : "pass", config.bashMode);
       check(
         "http auth",
-        config.requireHttpToken && !config.authToken ? "fail" : "pass",
-        config.requireHttpToken ? "token required for public/non-loopback access" : "loopback token not required"
+        "pass",
+        config.authToken
+          ? "token configured"
+          : config.requireHttpToken
+            ? "token required when serving HTTP"
+            : "token auth explicitly disabled"
       );
       const expectedTools = toolNamesForMode(config).sort();
       const actualTools = registeredToolNames(server).sort();
@@ -956,7 +1076,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         name: z.string().describe("Exact skill name from skill_inventory or codexpro_inventory."),
         source: z.enum(["workspace", "user", "plugin", "other"]).optional().describe("Optional source when multiple skills share a name."),
         path: z.string().optional().describe("Exact sanitized path from skill_inventory when name/source are still ambiguous."),
-        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills. Default: true."),
+        include_global_skills: z.boolean().optional().describe("Also scan installed user/plugin skills. Default: false."),
         max_bytes: z.number().int().min(1000).max(100000).optional().describe("Maximum bytes to return from SKILL.md. Default: 40000.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
@@ -972,7 +1092,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         name: String(args.name ?? ""),
         source: args.source,
         path: typeof args.path === "string" ? args.path : undefined,
-        includeGlobal: parseBool(args.include_global_skills, true),
+        includeGlobal: parseBool(args.include_global_skills, false),
         maxBytes: limitInt(args.max_bytes, 40_000, 1_000, 100_000)
       });
       const truncated = loaded.truncated ? "\n\n[truncated: increase max_bytes if more context is required]" : "";
@@ -1208,7 +1328,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         query: z.string().describe("Text or regex to search for."),
-        regex: z.boolean().optional().describe("Treat query as a regular expression. Default: false."),
+        regex: z.boolean().optional().describe("Treat query as a regular expression. Requires ripgrep. Default: false."),
         path: z.string().optional().describe("Directory or file relative to workspace root. Default: ."),
         glob: z.string().optional().describe("Optional glob, for example src/**/*.ts."),
         include_hidden: z.boolean().optional().describe("Include hidden files that are not blocked. Default: false."),
@@ -1622,6 +1742,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           : undefined;
 
       const stateRel = `${config.contextDir}/handoff-run-state.json`;
+      const contextPrefix = `${config.contextDir.replace(/\/+$/, "")}/`;
       const terminalStates = new Set(["completed", "failed", "timed_out"]);
 
       const readState = async (): Promise<Record<string, any> | undefined> => {
@@ -1671,12 +1792,19 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           return undefined;
         }
       };
+      const bridgeArtifact = (value: unknown, fallback: string): string => {
+        const raw = typeof value === "string" && value.trim() ? value.trim() : fallback;
+        const normalized = path.posix.normalize(raw.split(path.sep).join("/")).replace(/^\.\//, "");
+        return normalized.startsWith(contextPrefix) ? normalized : fallback;
+      };
 
       const structured: Record<string, unknown> = {
         workspace_id: workspace.id,
         root: workspace.root,
         state: reportedState,
         awaited_completed: completed,
+        awaited_terminal: completed,
+        succeeded: completed && state?.state === "completed",
         state_file: stateRel,
         ...(state ? { run_state: state.state } : {}),
         ...(typeof state?.iteration === "number" ? { iteration: state.iteration } : {}),
@@ -1692,10 +1820,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       };
 
       if (completed) {
-        const statusFile = String(state?.status_file ?? `${config.contextDir}/agent-status.md`);
-        const diffFile = String(state?.diff_file ?? `${config.contextDir}/implementation-diff.patch`);
-        const logFile = String(state?.log_file ?? `${config.contextDir}/execution-log.jsonl`);
-        const testsFile = state?.tests_file ? String(state.tests_file) : `${config.contextDir}/loop-tests.txt`;
+        const statusFile = bridgeArtifact(state?.status_file, `${config.contextDir}/agent-status.md`);
+        const diffFile = bridgeArtifact(state?.diff_file, `${config.contextDir}/implementation-diff.patch`);
+        const logFile = bridgeArtifact(state?.log_file, `${config.contextDir}/execution-log.jsonl`);
+        const testsFile = bridgeArtifact(state?.tests_file, `${config.contextDir}/loop-tests.txt`);
         structured.status_file = statusFile;
         structured.diff_file = diffFile;
         structured.log_file = logFile;

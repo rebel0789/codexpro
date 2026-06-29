@@ -13,6 +13,14 @@ const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
 const UNTRACKED_SYMLINK_TARGET_BYTES = 512;
 
+function packageVersion() {
+  return JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')).version;
+}
+
+function isLoopbackHost(host) {
+  return host === '127.0.0.1' || host === 'localhost' || host === '::1';
+}
+
 function usage() {
   console.log(`CodexPro easy launcher
 
@@ -67,7 +75,7 @@ Options:
                              handoff = no generic write/edit tools; handoff tools write bounded .ai-bridge files.
   --tool-mode <minimal|standard|full>
                              Tool surface exposed to ChatGPT. Default: standard.
-                             minimal = open/read/write/edit/bash/show_changes only.
+                             minimal = config/self-test plus open/read/write/edit/bash/show_changes.
                              full = expose every compatibility and advanced tool.
   --widget-domain <origin>   Dedicated HTTPS origin for ChatGPT widget iframes.
                              Required for app submission. Default: https://rebel0789.github.io.
@@ -101,6 +109,7 @@ Options:
   --no-auth                 Disable bearer-token auth. Only allowed with --tunnel none.
   --log-requests            Print redacted HTTP request and tool-call logs from the local MCP server.
   --print-env               Print the environment used to launch the server.
+  --version, -v             Print the CodexPro version.
   --help                    Show this message.
 
 Execute handoff options:
@@ -1064,10 +1073,24 @@ function shellCommandPreview(parts) {
 function redactForLog(value) {
   return String(value)
     .replace(/\bsk-[A-Za-z0-9_-]{10,}\b/g, '[REDACTED_SECRET]')
-    .replace(/\b[A-Za-z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY)[A-Za-z0-9_]*\s*=\s*(?:"[^"\r\n]{12,}"|'[^'\r\n]{12,}'|`[^`\r\n]{12,}`|[A-Za-z0-9_./+=-]{20,})/gi, (match) => {
+    .replace(/\b(?:sk-ant-[A-Za-z0-9_-]{10,}|gh[opsru]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,}|npm_[A-Za-z0-9_-]{20,})\b/g, '[REDACTED_SECRET]')
+    .replace(/\b(Authorization\s*:\s*Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, '$1[REDACTED_SECRET]')
+    .replace(/([?&](?:codexpro_token|token|access_token|auth_token|api[_-]?key)=)[^&\s"'`<>]{8,}/gi, '$1[REDACTED_SECRET]')
+    .replace(/(["']?[A-Za-z0-9_]{0,64}(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY)[A-Za-z0-9_]{0,64}["']?\s*:\s*)(?:"[^"\r\n]{12,512}"|'[^'\r\n]{12,512}'|`[^`\r\n]{12,512}`|[A-Za-z0-9_./+=-]{20,512})/gi, '$1[REDACTED_SECRET]')
+    .replace(/\b[A-Za-z0-9_]{0,64}(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY)[A-Za-z0-9_]{0,64}\s*=\s*(?:"[^"\r\n]{12,512}"|'[^'\r\n]{12,512}'|`[^`\r\n]{12,512}`|[A-Za-z0-9_./+=-]{20,512})/gi, (match) => {
       const index = match.indexOf('=');
       return index < 0 ? '[REDACTED_SECRET]' : `${match.slice(0, index).trimEnd()}= [REDACTED_SECRET]`;
     });
+}
+
+function redactEnvObject(env) {
+  const out = {};
+  for (const [key, value] of Object.entries(env)) {
+    out[key] = /(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PRIVATE[_-]?KEY)/i.test(key)
+      ? '<redacted>'
+      : redactForLog(String(value));
+  }
+  return out;
 }
 
 function trimBytes(value, maxBytes) {
@@ -3204,6 +3227,10 @@ function runControlPanel(details) {
 
 async function main() {
   let argv = process.argv.slice(2);
+  if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
+    console.log(packageVersion());
+    return;
+  }
   let subcommand = argv[0];
   if (subcommand === 'stable-help') {
     printStableUrlHelp();
@@ -3264,6 +3291,10 @@ async function main() {
     argv.unshift('--tunnel', 'ngrok');
   }
   if (argv[0] === 'start' || argv[0] === 'connect') argv.shift();
+  if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
+    console.log(packageVersion());
+    return;
+  }
   if (argv[0] === 'help') argv[0] = '--help';
   const args = parseArgs(argv);
   if (args.help) {
@@ -3299,9 +3330,6 @@ async function main() {
   if (tunnel === 'ngrok' && !stableHostname) {
     throw new Error('--hostname is required with ngrok tunnel mode. Example: codexpro ngrok --hostname your-domain.ngrok-free.dev');
   }
-  if (args.noAuth && tunnel !== 'none') {
-    throw new Error('--no-auth is only allowed with --tunnel none. Public tunnels require CODEXPRO_HTTP_TOKEN.');
-  }
   const mode = optionValue(args, profile, 'mode', ['CODEXPRO_MODE'], 'agent');
   if (!['agent', 'handoff', 'pro'].includes(mode)) {
     throw new Error('--mode must be agent, handoff, or pro');
@@ -3309,6 +3337,9 @@ async function main() {
 
   const allowRoots = [root, ...(args.allowRoots ?? [])].map(realDir);
   const host = optionValue(args, profile, 'host', ['CODEXPRO_HOST'], '127.0.0.1');
+  if (args.noAuth && (tunnel !== 'none' || !isLoopbackHost(host))) {
+    throw new Error('--no-auth is only allowed with --tunnel none on a loopback host.');
+  }
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], '8787'));
   const bash = optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], 'safe');
   const bashTranscript = bashTranscriptOption(args, profile);
@@ -3324,7 +3355,7 @@ async function main() {
   if (!['minimal', 'standard', 'full'].includes(toolMode)) throw new Error('--tool-mode must be minimal, standard, or full');
 
   let token = args.noAuth ? '' : optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], '');
-  if (!token && tunnel !== 'none') token = stableToken();
+  if (!token && !args.noAuth) token = stableToken();
 
   const serverEnv = {
     ...process.env,
@@ -3342,7 +3373,8 @@ async function main() {
     CODEXPRO_WIDGET_DOMAIN: widgetDomain,
     CODEXPRO_TOOL_CARDS: toolCards ? '1' : '0',
     CODEXPRO_MODE: mode,
-    CODEXPRO_TUNNEL_MODE: tunnel === 'none' ? '0' : '1'
+    CODEXPRO_TUNNEL_MODE: tunnel === 'none' ? '0' : '1',
+    CODEXPRO_ALLOW_NO_HTTP_TOKEN: args.noAuth ? '1' : '0'
   };
   if (codexDir) serverEnv.CODEXPRO_CODEX_DIR = codexDir;
   if (args.logRequests || process.env.CODEXPRO_LOG_REQUESTS === '1') serverEnv.CODEXPRO_LOG_REQUESTS = '1';
@@ -3351,7 +3383,7 @@ async function main() {
   else delete serverEnv.CODEXPRO_HTTP_TOKEN;
 
   if (args.printEnv) {
-    console.log(JSON.stringify({ ...serverEnv, CODEXPRO_HTTP_TOKEN: token ? '<redacted>' : undefined }, null, 2));
+    console.log(JSON.stringify(redactEnvObject(serverEnv), null, 2));
   }
 
   const httpPath = path.join(projectRoot, 'dist', 'http.js');

@@ -181,9 +181,13 @@ export async function buildProContext(
   const changedFileCandidates = includeChangedFiles ? changedFiles : [];
   const selectedPaths = unique(options.selectedPaths ?? []);
   const extraGlobFiles = await filesForGlobs(guard, workspace, options.extraGlobs ?? [], maxFiles);
-  const candidates = unique([...importantFiles, ...changedFileCandidates, ...selectedPaths, ...extraGlobFiles])
+  const selectedSet = new Set(selectedPaths);
+  const candidates = unique([...selectedPaths, ...changedFileCandidates, ...importantFiles, ...extraGlobFiles])
     .filter((rel) => rel !== `${config.contextDir}/pro-context.md`)
     .sort((a, b) => {
+      const aSelected = selectedSet.has(a) ? 0 : 1;
+      const bSelected = selectedSet.has(b) ? 0 : 1;
+      if (aSelected !== bSelected) return aSelected - bSelected;
       const aImportant = isLikelyImportantConfig(a) ? 0 : 1;
       const bImportant = isLikelyImportantConfig(b) ? 0 : 1;
       if (aImportant !== bImportant) return aImportant - bImportant;

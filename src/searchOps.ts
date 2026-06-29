@@ -38,7 +38,7 @@ function truncateLine(line: string, max = 400): string {
 
 async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: Workspace, options: SearchOptions): Promise<SearchResult> {
   const target = guard.resolve(workspace, options.root ?? ".");
-  const args = ["--line-number", "--no-heading", "--color=never", "--max-columns", "500", "--max-count", "50"];
+  const args = ["--line-number", "--with-filename", "--no-heading", "--color=never", "--max-columns", "500", "--max-count", "50"];
   if (!options.regex) args.push("--fixed-strings");
   if (!options.includeHidden) args.push("--hidden", "-g", "!.*", "-g", "!**/.*");
   for (const glob of config.blockedGlobs) args.push("-g", `!${glob}`);
@@ -138,6 +138,9 @@ export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, 
 
   if (await commandExists("rg")) {
     return runRipgrep(config, guard, workspace, options);
+  }
+  if (options.regex) {
+    throw new CodexProError("regex search requires ripgrep. Install rg or retry with regex=false.");
   }
   return runNodeSearch(config, guard, workspace, options);
 }

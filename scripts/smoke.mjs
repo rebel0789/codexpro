@@ -186,6 +186,14 @@ const cardSearchMeta = cardTools.tools.find((tool) => tool.name === 'search')?._
 if (cardSearchMeta.ui?.resourceUri !== toolCardUri || cardSearchMeta['openai/outputTemplate'] !== toolCardUri) {
   throw new Error('CODEXPRO_TOOL_CARDS=1 did not opt search into widget metadata');
 }
+const cardOpened = await cardClient.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+const cardSearch = await cardClient.request('tools/call', {
+  name: 'search',
+  arguments: { workspace_id: cardOpened.structuredContent.workspace_id, query: 'read', path: 'demo.txt', max_results: 5 }
+});
+if (!cardSearch.structuredContent.text?.includes('read')) {
+  throw new Error(`CODEXPRO_TOOL_CARDS=1 search did not include structured text: ${JSON.stringify(cardSearch.structuredContent)}`);
+}
 await cardClient.close();
 const resources = await client.request('resources/list', {});
 const toolCard = resources.resources.find((resource) => resource.uri === toolCardUri);
@@ -275,12 +283,25 @@ if (openedByPath.structuredContent.workspace_id !== ws) {
   throw new Error(`open_workspace path alias returned ${openedByPath.structuredContent.workspace_id}, expected ${ws}`);
 }
 await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'demo.txt' } });
+await fs.writeFile(path.join(tmp, 'tokens.txt'), [
+  'Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456',
+  'https://example.test/mcp?codexpro_token=verysecretcodexprotoken123&x=1',
+  'ANTHROPIC_API_KEY=sk-ant-abcdefghijklmnopqrstuvwxyz123456',
+  '"api_key": "jsonsecretvalueabcdefghijklmnop"',
+  'service_token: yamlsecretvalueabcdefghijklmnop'
+].join('\n'), 'utf8');
 const secretRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'config.txt' } });
 const secretPayload = JSON.stringify(secretRead);
 if (secretPayload.includes('sk-realSecretValue123') || !secretPayload.includes('[REDACTED_SECRET]')) {
   throw new Error('read did not redact secret-looking content');
 }
+const tokenRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'tokens.txt' } });
+const tokenPayload = JSON.stringify(tokenRead);
+for (const leaked of ['ghp_abcdefghijklmnopqrstuvwxyz123456', 'verysecretcodexprotoken123', 'sk-ant-abcdefghijklmnopqrstuvwxyz123456', 'jsonsecretvalueabcdefghijklmnop', 'yamlsecretvalueabcdefghijklmnop']) {
+  if (tokenPayload.includes(leaked)) throw new Error(`read leaked token-like content: ${leaked}`);
+}
 await expectToolError('write', { workspace_id: ws, path: 'notes.md', content: 'OPENAI_API_KEY=sk-realSecretValue123\n' }, /Secret-looking content is blocked/);
+await expectToolError('write', { workspace_id: ws, path: 'notes.yaml', content: 'api_key: yamlsecretvalueabcdefghijklmnop\n' }, /Secret-looking content is blocked/);
 await client.request('tools/call', {
   name: 'write',
   arguments: {
@@ -341,7 +362,22 @@ if (!clientBuild.structuredContent.stdout?.includes('clients ok')) {
 }
 const exported = await client.request('tools/call', { name: 'export_pro_context', arguments: { workspace_id: ws, selected_paths: ['demo.txt'], max_files: 4, max_total_bytes: 80000 } });
 if (exported.structuredContent.path !== '.ai-bridge/pro-context.md') throw new Error('export_pro_context wrote an unexpected path');
+if (!exported.structuredContent.files_included?.includes('demo.txt')) {
+  throw new Error(`export_pro_context dropped an explicit selected path: ${JSON.stringify(exported.structuredContent.files_included)}`);
+}
 await fs.stat(path.join(tmp, '.ai-bridge', 'pro-context.md'));
+const oneFileExport = await client.request('tools/call', {
+  name: 'export_pro_context',
+  arguments: {
+    workspace_id: ws,
+    selected_paths: ['demo.txt'],
+    max_files: 1,
+    max_total_bytes: 80000
+  }
+});
+if (JSON.stringify(oneFileExport.structuredContent.files_included) !== JSON.stringify(['demo.txt'])) {
+  throw new Error(`export_pro_context did not prioritize selected path with max_files=1: ${JSON.stringify(oneFileExport.structuredContent.files_included)}`);
+}
 const exactExport = await client.request('tools/call', {
   name: 'export_pro_context',
   arguments: {
@@ -428,6 +464,9 @@ const waitCompleted = await client.request('tools/call', {
 if (waitCompleted.structuredContent.awaited_completed !== true || waitCompleted.structuredContent.state !== 'completed') {
   throw new Error(`wait_for_handoff did not report completion: ${JSON.stringify(waitCompleted.structuredContent)}`);
 }
+if (waitCompleted.structuredContent.awaited_terminal !== true || waitCompleted.structuredContent.succeeded !== true) {
+  throw new Error(`wait_for_handoff did not report terminal success fields: ${JSON.stringify(waitCompleted.structuredContent)}`);
+}
 if (waitCompleted.structuredContent.exit_code !== 0 || waitCompleted.structuredContent.status_file !== '.ai-bridge/agent-status.md') {
   throw new Error(`wait_for_handoff missing completion fields: ${JSON.stringify(waitCompleted.structuredContent)}`);
 }
@@ -437,6 +476,39 @@ const waitMismatch = await client.request('tools/call', {
 });
 if (waitMismatch.structuredContent.awaited_completed !== false || waitMismatch.structuredContent.state !== 'running' || waitMismatch.structuredContent.plan_hash_mismatch !== true) {
   throw new Error(`wait_for_handoff did not keep waiting on plan-hash mismatch: ${JSON.stringify(waitMismatch.structuredContent)}`);
+}
+await fs.writeFile(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify({
+  ...runStatePayload,
+  state: 'failed',
+  plan_hash: 'failed-plan',
+  exit_code: 2,
+  status_file: 'demo.txt',
+  diff_file: '../demo.txt',
+  log_file: '.ai-bridge/execution-log.jsonl'
+}, null, 2)}\n`, 'utf8');
+const waitFailed = await client.request('tools/call', {
+  name: 'wait_for_handoff',
+  arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'failed-plan' }
+});
+if (waitFailed.structuredContent.awaited_terminal !== true || waitFailed.structuredContent.succeeded !== false || waitFailed.structuredContent.state !== 'failed') {
+  throw new Error(`wait_for_handoff did not report failed terminal state: ${JSON.stringify(waitFailed.structuredContent)}`);
+}
+if (waitFailed.structuredContent.status_file !== '.ai-bridge/agent-status.md' || waitFailed.structuredContent.diff_file !== '.ai-bridge/implementation-diff.patch') {
+  throw new Error(`wait_for_handoff trusted forged artifact paths: ${JSON.stringify(waitFailed.structuredContent)}`);
+}
+await fs.writeFile(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify({
+  ...runStatePayload,
+  state: 'timed_out',
+  plan_hash: 'timed-out-plan',
+  exit_code: null,
+  timed_out: true
+}, null, 2)}\n`, 'utf8');
+const waitTimedOut = await client.request('tools/call', {
+  name: 'wait_for_handoff',
+  arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'timed-out-plan' }
+});
+if (waitTimedOut.structuredContent.awaited_terminal !== true || waitTimedOut.structuredContent.succeeded !== false || waitTimedOut.structuredContent.state !== 'timed_out') {
+  throw new Error(`wait_for_handoff did not report timed-out terminal state: ${JSON.stringify(waitTimedOut.structuredContent)}`);
 }
 await fs.rm(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), { force: true });
 await client.request('tools/call', { name: 'handoff_to_codex', arguments: { workspace_id: ws, title: 'Smoke Codex plan', plan: '- Verify demo.txt contains write.', append: true } });

@@ -132,6 +132,7 @@ function hasToolCardStatusMeta(tools, name) {
   return Boolean(meta['openai/toolInvocation/invoking'] || meta['openai/toolInvocation/invoked']);
 }
 
+await expectHttpTokenRequired('loopback-default');
 await expectHttpTokenRequired('non-loopback', { CODEXPRO_HOST: '0.0.0.0' });
 await expectHttpTokenRequired('tunnel-mode', { CODEXPRO_TUNNEL_MODE: '1' });
 
@@ -306,7 +307,7 @@ try {
 
   const queryTools = await listTools(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`);
   const queryToolNames = toolNames(queryTools);
-  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'load_skill', 'show_changes', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+  for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
     if (!queryToolNames.includes(expected)) {
       throw new Error(`URL-token MCP tools/list missing ${expected}; got ${queryToolNames.join(', ')}`);
     }
@@ -512,6 +513,30 @@ try {
 const cliRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-cli-http-smoke-'));
 await fs.mkdir(path.join(cliRoot, '.codex'), { recursive: true });
 const cliPort = await getFreePort();
+const badNoAuth = spawn(process.execPath, [
+  'scripts/codexpro.mjs',
+  'start',
+  '--root',
+  cliRoot,
+  '--tunnel',
+  'none',
+  '--no-auth',
+  '--host',
+  '0.0.0.0',
+  '--port',
+  String(cliPort)
+], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_HOME: await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-cli-http-bad-home-'))
+  },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+const badNoAuthExit = await waitForExit(badNoAuth);
+if (badNoAuthExit.code === 0 || !badNoAuthExit.stderr.includes('--no-auth is only allowed')) {
+  throw new Error(`non-loopback --no-auth was not rejected\n${badNoAuthExit.stderr}`);
+}
 const cliChild = spawn(process.execPath, [
   'scripts/codexpro.mjs',
   'start',

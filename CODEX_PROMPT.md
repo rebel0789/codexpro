@@ -1,6 +1,6 @@
 Read .ai-bridge/current-plan.md and execute it in small, reviewable steps.
 
-After each meaningful change, update .ai-bridge/codex-status.md with:
+After each meaningful change, update .ai-bridge/agent-status.md with:
 
 - what changed
 - files touched

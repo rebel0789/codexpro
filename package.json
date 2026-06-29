@@ -61,6 +61,7 @@
     "dev:stdio": "tsx src/stdio.ts",
     "dev:http": "tsx src/http.ts",
     "smoke": "node scripts/smoke.mjs && node scripts/http-smoke.mjs && node scripts/pro-smoke.mjs && node scripts/doctor-smoke.mjs && node scripts/settings-smoke.mjs && node scripts/execute-handoff-smoke.mjs",
+    "stress": "npm run build && node scripts/stress.mjs",
     "doctor": "node scripts/codexpro.mjs doctor",
     "connect": "node scripts/codexpro.mjs",
     "connect:setup": "node scripts/codexpro.mjs setup",

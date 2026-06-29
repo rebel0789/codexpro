@@ -19,6 +19,17 @@ async function getFreePort() {
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-doctor-smoke-'));
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-doctor-home-'));
 const port = await getFreePort();
+const packageJson = JSON.parse(await fs.readFile(path.resolve('package.json'), 'utf8'));
+for (const args of [['--version'], ['-v'], ['version'], ['start', '--version']]) {
+  const version = spawnSync(process.execPath, ['scripts/codexpro.mjs', ...args], {
+    cwd: path.resolve('.'),
+    env: { ...process.env, CODEXPRO_HOME: home },
+    encoding: 'utf8'
+  });
+  if (version.status !== 0 || version.stdout.trim() !== packageJson.version) {
+    throw new Error(`codexpro ${args.join(' ')} did not print version ${packageJson.version}\nstdout:\n${version.stdout}\nstderr:\n${version.stderr}`);
+  }
+}
 const result = spawnSync(process.execPath, [
   'scripts/codexpro.mjs',
   'doctor',
