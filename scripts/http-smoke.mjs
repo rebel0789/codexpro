@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
@@ -197,6 +198,18 @@ await fs.writeFile(path.join(root, '.codex', 'skills', 'http-smoke-skill', 'SKIL
 const port = await getFreePort();
 const genericPort = await getFreePort();
 const token = 'codexpro-http-smoke-token';
+const runtimeQuerySecret = 'runtimequerysecret1234567890';
+const runtimeAccessSecret = 'runtimeaccesssecret1234567890';
+const runtimeCloudflareSecret = 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJodHRwLXNtb2tlIn0.signature1234567890';
+const runtimeId = createHash('sha256').update(root).digest('hex').slice(0, 24);
+await fs.mkdir(path.join(profileHome, 'runtime'), { recursive: true });
+await fs.writeFile(path.join(profileHome, 'runtime', `${runtimeId}.json`), JSON.stringify({
+  version: 1,
+  root,
+  endpoint: `https://runtime.example/mcp?token=${runtimeQuerySecret}`,
+  localStatusUrl: `http://127.0.0.1:${port}/?codexpro_token=${token}&access_token=${runtimeAccessSecret}`,
+  note: `cloudflared tunnel run --token ${runtimeCloudflareSecret}`
+}, null, 2), 'utf8');
 const child = spawn('node', ['dist/http.js'], {
   cwd: path.resolve('.'),
   env: {
@@ -306,6 +319,9 @@ try {
   if (homeText.includes(token)) {
     throw new Error('onboarding page leaked the raw auth token');
   }
+  for (const leaked of [runtimeQuerySecret, runtimeAccessSecret, runtimeCloudflareSecret]) {
+    if (homeText.includes(leaked)) throw new Error(`onboarding page leaked runtime secret: ${leaked}`);
+  }
 
   const profileBefore = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`);
   const profileBeforeJson = await profileBefore.json();
@@ -314,6 +330,9 @@ try {
   }
   if (JSON.stringify(profileBeforeJson).includes(token)) {
     throw new Error('admin profile GET leaked the raw auth token');
+  }
+  for (const leaked of [runtimeQuerySecret, runtimeAccessSecret, runtimeCloudflareSecret]) {
+    if (JSON.stringify(profileBeforeJson).includes(leaked)) throw new Error(`admin profile GET leaked runtime secret: ${leaked}`);
   }
 
   const invalidProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
