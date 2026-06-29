@@ -308,9 +308,13 @@ export async function exportProContext(
   workspace: Workspace,
   options: ProContextOptions = {}
 ): Promise<ProContextResult> {
-  await ensureAiBridge(config, guard, workspace);
+  if (options.includeAiBridge !== false) {
+    await ensureAiBridge(config, guard, workspace);
+  }
   const built = await buildProContext(config, guard, workspace, options);
   built.markdown = redactSensitiveText(built.markdown);
+  const contextDir = guard.resolve(workspace, config.contextDir, { forWrite: true });
+  await fsp.mkdir(contextDir.absPath, { recursive: true, mode: 0o700 });
   const relPath = `${config.contextDir}/pro-context.md`;
   const write = await writeTextFile(config, guard, workspace, relPath, built.markdown, {
     createDirs: true,

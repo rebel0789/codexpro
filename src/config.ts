@@ -276,7 +276,7 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   const extraBlockedGlobs = splitList(process.env.CODEXPRO_BLOCKED_GLOBS, ",");
   const host = hostArg ?? process.env.CODEXPRO_HOST ?? process.env.HOST ?? "127.0.0.1";
   const authToken = process.env.CODEXPRO_HTTP_TOKEN ?? process.env.CODEBASE_BRIDGE_HTTP_TOKEN;
-  const allowNoToken = boolFrom(process.env.CODEXPRO_ALLOW_NO_HTTP_TOKEN, false);
+  const allowNoToken = boolFrom(process.env.CODEXPRO_ALLOW_NO_HTTP_TOKEN, false) && isLoopbackHost(host);
   const requireHttpToken =
     (!authToken && !allowNoToken) ||
     boolFrom(process.env.CODEXPRO_REQUIRE_HTTP_TOKEN, false) ||

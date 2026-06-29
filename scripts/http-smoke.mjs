@@ -71,7 +71,7 @@ async function waitForHealthJson(url, timeoutMs = 15000) {
   throw new Error(`timeout waiting for ${url}\n${lastError}`);
 }
 
-async function expectHttpTokenRequired(name, overrides = {}) {
+async function expectHttpTokenRequired(name, overrides = {}, options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), `codexpro-http-no-token-${name}-`));
   const port = await getFreePort();
   const env = {
@@ -86,7 +86,7 @@ async function expectHttpTokenRequired(name, overrides = {}) {
   };
   delete env.CODEXPRO_HTTP_TOKEN;
   delete env.CODEBASE_BRIDGE_HTTP_TOKEN;
-  delete env.CODEXPRO_ALLOW_NO_HTTP_TOKEN;
+  if (!options.keepAllowNoToken) delete env.CODEXPRO_ALLOW_NO_HTTP_TOKEN;
 
   const child = spawn('node', ['dist/http.js'], {
     cwd: path.resolve('.'),
@@ -134,6 +134,7 @@ function hasToolCardStatusMeta(tools, name) {
 
 await expectHttpTokenRequired('loopback-default');
 await expectHttpTokenRequired('non-loopback', { CODEXPRO_HOST: '0.0.0.0' });
+await expectHttpTokenRequired('non-loopback-allow-no-token', { CODEXPRO_HOST: '0.0.0.0', CODEXPRO_ALLOW_NO_HTTP_TOKEN: '1' }, { keepAllowNoToken: true });
 await expectHttpTokenRequired('tunnel-mode', { CODEXPRO_TUNNEL_MODE: '1' });
 
 async function withClient(url, fn) {
@@ -212,6 +213,36 @@ try {
   const queryAuthorized = await fetch(`${baseUrl}/healthz?codexpro_token=${encodeURIComponent(token)}`);
   if (queryAuthorized.status !== 200) {
     throw new Error(`expected URL-token healthz to return 200, got ${queryAuthorized.status}`);
+  }
+
+  const badAdminJson = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{"tunnel":'
+  });
+  const badAdminBody = await badAdminJson.json();
+  if (badAdminJson.status !== 400 || badAdminBody.error?.code !== 'invalid_json') {
+    throw new Error(`expected invalid admin JSON to return structured 400, got ${badAdminJson.status} ${JSON.stringify(badAdminBody)}`);
+  }
+
+  const badMcpJson = await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{"jsonrpc":'
+  });
+  const badMcpBody = await badMcpJson.json();
+  if (badMcpJson.status !== 400 || badMcpBody.error?.code !== -32700) {
+    throw new Error(`expected invalid MCP JSON to return JSON-RPC parse error, got ${badMcpJson.status} ${JSON.stringify(badMcpBody)}`);
+  }
+
+  const hugeMcpJson = await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: { filler: 'x'.repeat(21 * 1024 * 1024) } })
+  });
+  const hugeMcpBody = await hugeMcpJson.json();
+  if (hugeMcpJson.status !== 413 || hugeMcpBody.error?.code !== -32000) {
+    throw new Error(`expected oversized MCP body to return JSON-RPC payload error, got ${hugeMcpJson.status} ${JSON.stringify(hugeMcpBody)}`);
   }
 
   const favicon = await fetch(`${baseUrl}/favicon.ico`);

@@ -1675,6 +1675,40 @@ async function main(): Promise<void> {
   app.get("/mcp", handleSessionRequest);
   app.delete("/mcp", handleSessionRequest);
 
+  app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
+    if (!error || typeof error !== "object" || !("type" in error)) {
+      next(error);
+      return;
+    }
+    const type = String((error as { type?: unknown }).type ?? "");
+    if (type !== "entity.parse.failed" && type !== "entity.too.large") {
+      next(error);
+      return;
+    }
+    const status = type === "entity.too.large" ? 413 : 400;
+    if (req.path === "/mcp") {
+      res.status(status).json({
+        jsonrpc: "2.0",
+        error: {
+          code: type === "entity.too.large" ? -32000 : -32700,
+          message: type === "entity.too.large" ? "Payload too large." : "Parse error."
+        },
+        id: null
+      });
+      return;
+    }
+    if (req.path === "/admin/profile") {
+      jsonError(
+        res,
+        status,
+        type === "entity.too.large" ? "payload_too_large" : "invalid_json",
+        type === "entity.too.large" ? "Request body is too large." : "Request body must be valid JSON."
+      );
+      return;
+    }
+    next(error);
+  });
+
   app.listen(config.port, config.host, () => {
     console.error(`[CodexPro] HTTP MCP listening on http://${config.host}:${config.port}/mcp`);
     console.error(`[CodexPro] defaultRoot=${config.defaultRoot}`);

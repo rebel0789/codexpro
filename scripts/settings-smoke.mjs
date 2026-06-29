@@ -233,6 +233,28 @@ if (guardedProfile.bashSession !== 'guarded-main' || guardedProfile.requireBashS
   throw new Error(`settings profile did not persist bash session guard: ${JSON.stringify(guardedProfile)}`);
 }
 
+runFail([
+  'settings',
+  'set',
+  '--root',
+  policyRoot,
+  '--tunnel',
+  'none',
+  '--bash',
+  'banana'
+], env, /--bash must be off, safe, or full/i);
+
+runFail([
+  'settings',
+  'set',
+  '--root',
+  policyRoot,
+  '--tunnel',
+  'none',
+  '--tool-mode',
+  'banana'
+], env, /--tool-mode must be minimal, standard, or full/i);
+
 const runtimePort = await getFreePort();
 const runtimePath = await runtimeStatusPath(runtimeRoot, home);
 run([
@@ -254,6 +276,37 @@ await withStartedCodexPro([
   const runtime = await waitForJson(runtimePath, (data) => data.toolCards === true, 'tool-cards runtime status');
   if (runtime.toolCards !== true) {
     throw new Error(`runtime status did not persist toolCards: ${JSON.stringify(runtime)}`);
+  }
+});
+
+const cloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-'));
+const cloudflarePort = await getFreePort();
+const cloudflarePath = await runtimeStatusPath(cloudflareRoot, home);
+const fakeCloudflared = path.join(home, 'fake-cloudflared.mjs');
+await fs.writeFile(fakeCloudflared, [
+  '#!/usr/bin/env node',
+  "if (process.argv.includes('--version')) { console.log('cloudflared version 2026.6.0'); process.exit(0); }",
+  "console.error('https://api.trycloudflare.com/tunnel');",
+  "setTimeout(() => console.error('https://real-codexpro.trycloudflare.com'), 100);",
+  'setInterval(() => {}, 1000);',
+  ''
+].join('\n'), { mode: 0o700 });
+await withStartedCodexPro([
+  '--root',
+  cloudflareRoot,
+  '--tunnel',
+  'cloudflare',
+  '--cloudflared',
+  fakeCloudflared,
+  '--port',
+  String(cloudflarePort),
+  '--token',
+  'codexpro-cloudflare-token',
+  '--no-copy-url'
+], env, async () => {
+  const runtime = await waitForJson(cloudflarePath, (data) => data.endpoint?.includes('trycloudflare.com'), 'cloudflare runtime status');
+  if (runtime.endpoint.includes('api.trycloudflare.com') || !runtime.endpoint.startsWith('https://real-codexpro.trycloudflare.com/mcp')) {
+    throw new Error(`quick tunnel saved the wrong endpoint: ${JSON.stringify(runtime)}`);
   }
 });
 

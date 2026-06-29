@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
@@ -54,6 +55,35 @@ for (const expected of ['CodexPro doctor', 'Node', 'Build artifacts', 'Local por
   if (!output.includes(expected)) {
     throw new Error(`doctor output missing ${expected}\n${output}`);
   }
+}
+
+const invalidRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-doctor-invalid-'));
+const invalidRealRoot = await fs.realpath(invalidRoot);
+const invalidId = createHash('sha256').update(invalidRealRoot).digest('hex').slice(0, 24);
+await fs.mkdir(path.join(home, 'profiles'), { recursive: true });
+await fs.writeFile(path.join(home, 'profiles', `${invalidId}.json`), JSON.stringify({
+  version: 1,
+  root: invalidRealRoot,
+  updatedAt: new Date().toISOString(),
+  tunnel: 'none',
+  bash: 'banana',
+  toolMode: 'banana'
+}, null, 2), 'utf8');
+const invalidDoctor = spawnSync(process.execPath, [
+  'scripts/codexpro.mjs',
+  'doctor',
+  '--root',
+  invalidRoot,
+  '--port',
+  String(await getFreePort())
+], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_HOME: home },
+  encoding: 'utf8'
+});
+const invalidOutput = `${invalidDoctor.stdout}\n${invalidDoctor.stderr}`;
+if (invalidDoctor.status === 0 || !invalidOutput.includes('Bash mode') || !invalidOutput.includes('Tool mode')) {
+  throw new Error(`doctor did not reject invalid saved profile\nstdout:\n${invalidDoctor.stdout}\nstderr:\n${invalidDoctor.stderr}`);
 }
 
 console.log('✓ doctor smoke test passed');

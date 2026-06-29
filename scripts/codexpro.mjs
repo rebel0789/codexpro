@@ -388,6 +388,16 @@ function writeOption(args, profile, mode) {
   return effectiveWriteMode(mode, optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], mode === 'agent' ? 'workspace' : 'handoff'));
 }
 
+function validateChoice(flag, value, allowed) {
+  if (allowed.includes(value)) return value;
+  throw new Error(`--${flag} must be ${allowed.slice(0, -1).join(', ')}, or ${allowed.at(-1)}`);
+}
+
+function optionalChoice(flag, value, allowed) {
+  if (!value) return '';
+  return validateChoice(flag, value, allowed);
+}
+
 function optionalWriteOption(args, profile, mode) {
   const requested = optionValue(args, profile, 'write', ['CODEXPRO_WRITE_MODE'], '');
   return requested ? effectiveWriteMode(mode, requested) : '';
@@ -820,7 +830,7 @@ function runHelperScript(scriptName, args) {
   const scriptPath = path.join(projectRoot, 'scripts', scriptName);
   const result = spawnSync(process.execPath, [scriptPath, ...args], {
     cwd: projectRoot,
-    env: process.env,
+    env: { ...process.env, CODEXPRO_CALLER_CWD: process.cwd() },
     stdio: 'inherit'
   });
   if (result.error) throw result.error;
@@ -919,9 +929,16 @@ function waitForCloudflareUrl(child, timeoutMs = 45000) {
       const text = String(chunk);
       buffer += text;
       const match = buffer.match(re);
-      if (match?.[0]) {
+      const tunnelUrl = match?.find((url) => {
+        try {
+          return new URL(url).hostname !== 'api.trycloudflare.com';
+        } catch {
+          return false;
+        }
+      });
+      if (tunnelUrl) {
         clearTimeout(timer);
-        resolve(match[0]);
+        resolve(tunnelUrl);
       }
     };
     child.stdout.on('data', onData);
@@ -2538,6 +2555,10 @@ async function runDoctor(argv) {
   record(fs.existsSync(httpPath) && fs.existsSync(serverPath) ? 'ok' : 'fail', 'Build artifacts', fs.existsSync(httpPath) ? 'dist ready' : 'missing dist/http.js; run npm install && npm run build');
   record(fs.existsSync(path.join(projectRoot, 'package.json')) ? 'ok' : 'fail', 'Package root', projectRoot);
   record(profile.profilePath ? 'ok' : 'warn', 'Saved profile', profile.profilePath ? profileSummary(profile) || profile.profilePath : 'none for this workspace');
+  record(['agent', 'handoff', 'pro'].includes(mode) ? 'ok' : 'fail', 'Mode', ['agent', 'handoff', 'pro'].includes(mode) ? mode : '--mode must be agent, handoff, or pro');
+  record(['off', 'safe', 'full'].includes(bash) ? 'ok' : 'fail', 'Bash mode', ['off', 'safe', 'full'].includes(bash) ? bash : '--bash must be off, safe, or full');
+  record(['off', 'handoff', 'workspace'].includes(write) ? 'ok' : 'fail', 'Write mode', ['off', 'handoff', 'workspace'].includes(write) ? write : '--write must be off, handoff, or workspace');
+  record(['minimal', 'standard', 'full'].includes(toolMode) ? 'ok' : 'fail', 'Tool mode', ['minimal', 'standard', 'full'].includes(toolMode) ? toolMode : '--tool-mode must be minimal, standard, or full');
   record(clipboard ? 'ok' : 'warn', 'Clipboard', clipboard || 'not found; URL will be printed for manual copy');
   record(browser ? 'ok' : 'warn', 'Browser open', browser || 'not found; open ChatGPT manually');
 
@@ -2765,10 +2786,7 @@ async function maybeConfigureFirstRun(root, args, profile) {
 }
 
 function commandPreview(args) {
-  return ['codexpro', ...args].map((part) => {
-    if (/^[A-Za-z0-9_./:@=-]+$/.test(part)) return part;
-    return JSON.stringify(part);
-  }).join(' ');
+  return shellCommandPreview(['codexpro', ...args]);
 }
 
 async function runSetupWizard(argv) {
@@ -3006,7 +3024,7 @@ function saveSettingsFromArgs(root, args, profile) {
   if (!['agent', 'handoff', 'pro'].includes(mode)) {
     throw new Error('--mode must be agent, handoff, or pro');
   }
-  const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], profile.toolMode ?? '');
+  const toolMode = optionalChoice('tool-mode', optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], profile.toolMode ?? ''), ['minimal', 'standard', 'full']);
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], profile.widgetDomain ?? '');
   const port = String(optionValue(args, profile, 'port', ['CODEXPRO_PORT'], profile.port ?? '8787'));
   const bashTranscript = bashTranscriptOption(args, profile);
@@ -3014,6 +3032,7 @@ function saveSettingsFromArgs(root, args, profile) {
   const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], profile.codexDir ?? '');
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = writeOption(args, profile, mode);
+  const bash = optionalChoice('bash', optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], profile.bash ?? ''), ['off', 'safe', 'full']);
   const tunnelName = args.tunnelName ?? profile.tunnelName ?? '';
   const ngrokConfig = resolveConfigPath(root, args.ngrokConfig ?? profile.ngrokConfig ?? '');
   const cloudflareConfig = resolveConfigPath(root, args.cloudflareConfig ?? profile.cloudflareConfig ?? '');
@@ -3031,7 +3050,7 @@ function saveSettingsFromArgs(root, args, profile) {
     ...(cloudflareConfig ? { cloudflareConfig } : {}),
     ...(cloudflareTokenFile ? { cloudflareTokenFile } : {}),
     ...(token ? { token } : {}),
-    ...(args.bash ?? profile.bash ? { bash: args.bash ?? profile.bash } : {}),
+    ...(bash ? { bash } : {}),
     ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
     ...(codexSessions !== 'off' ? { codexSessions } : {}),
     ...(codexDir ? { codexDir } : {}),
@@ -3378,9 +3397,9 @@ async function main() {
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], 'https://rebel0789.github.io');
   const toolCards = optionBool(args, profile, 'toolCards', ['CODEXPRO_TOOL_CARDS'], false);
-  if (!['off', 'safe', 'full'].includes(bash)) throw new Error('--bash must be off, safe, or full');
-  if (!['off', 'handoff', 'workspace'].includes(write)) throw new Error('--write must be off, handoff, or workspace');
-  if (!['minimal', 'standard', 'full'].includes(toolMode)) throw new Error('--tool-mode must be minimal, standard, or full');
+  validateChoice('bash', bash, ['off', 'safe', 'full']);
+  validateChoice('write', write, ['off', 'handoff', 'workspace']);
+  validateChoice('tool-mode', toolMode, ['minimal', 'standard', 'full']);
 
   let token = args.noAuth ? '' : optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], '');
   if (!token && !args.noAuth) token = stableToken();

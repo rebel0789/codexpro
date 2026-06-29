@@ -33,7 +33,9 @@ function parseArgs(argv) {
   for (let i = 0; i < argv.length; i += 1) {
     const raw = argv[i];
     if (!raw.startsWith('--')) continue;
-    const key = raw.slice(2);
+    const eq = raw.indexOf('=');
+    const key = eq === -1 ? raw.slice(2) : raw.slice(2, eq);
+    const inlineValue = eq === -1 ? undefined : raw.slice(eq + 1);
     if (key === 'help') out.help = true;
     else if (key === 'copy') out.copy = true;
     else if (key === 'no-important-files') out.noImportantFiles = true;
@@ -41,9 +43,9 @@ function parseArgs(argv) {
     else if (key === 'no-diff') out.noDiff = true;
     else if (key === 'no-ai-bridge') out.noAiBridge = true;
     else {
-      const next = argv[i + 1];
+      const next = inlineValue ?? argv[i + 1];
       if (!next || next.startsWith('--')) throw new Error(`Missing value for --${key}`);
-      i += 1;
+      if (inlineValue === undefined) i += 1;
       if (key === 'path') out.paths.push(next);
       else if (key === 'glob') out.globs.push(next);
       else out[key.replace(/-([a-z])/g, (_, c) => c.toUpperCase())] = next;
