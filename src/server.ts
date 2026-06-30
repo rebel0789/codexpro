@@ -1,5 +1,7 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { CodexProConfig } from "./config.js";
@@ -7,13 +9,13 @@ import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./gu
 import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge } from "./fsOps.js";
 import { searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
-import { gitDiff, gitLog, gitStatus } from "./gitOps.js";
+import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
 import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
-import { redactSensitiveText, redactStructured } from "./redact.js";
+import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 
 function errorText(error: unknown): string {
   if (error instanceof Error) return redactSensitiveText(`${error.name}: ${error.message}`);
@@ -224,10 +226,10 @@ function assertWriteToolAllowed(config: CodexProConfig, relPath: string): void {
   if (config.writeMode === "handoff") {
     throw new CodexProError(
       `Source writes are disabled because CODEXPRO_WRITE_MODE=handoff. ` +
-        `Use handoff_to_agent or handoff_to_codex, or write/edit only inside ${config.contextDir}/.`
+        `Use handoff_to_agent or handoff_to_codex, or write/edit/apply_patch only inside ${config.contextDir}/.`
     );
   }
-  throw new CodexProError("write/edit tools are disabled because CODEXPRO_WRITE_MODE=off. handoff_to_agent and handoff_to_codex are still available for planning.");
+  throw new CodexProError("write/edit/apply_patch tools are disabled because CODEXPRO_WRITE_MODE=off. handoff_to_agent and handoff_to_codex are still available for planning.");
 }
 
 function registerToolCompat(
@@ -282,6 +284,7 @@ const MINIMAL_TOOL_NAMES = [
   "read",
   "write",
   "edit",
+  "apply_patch",
   "bash",
   "show_changes"
 ] as const;
@@ -312,6 +315,7 @@ const FULL_TOOL_NAMES = [
   "read",
   "write",
   "edit",
+  "apply_patch",
   "bash",
   "git_status",
   "git_diff",
@@ -343,7 +347,7 @@ function toolNamesForMode(config: CodexProConfig): string[] {
     if (bashIndex !== -1) names.splice(bashIndex, 1);
   }
   if (config.writeMode !== "workspace") {
-    for (const writeTool of ["write", "edit"]) {
+    for (const writeTool of ["write", "edit", "apply_patch"]) {
       const toolIndex = names.indexOf(writeTool);
       if (toolIndex !== -1) names.splice(toolIndex, 1);
     }
@@ -372,7 +376,7 @@ function registeredToolNames(server: McpServer): string[] {
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (name === "bash" && config.bashMode === "off") return false;
-  if ((name === "write" || name === "edit") && config.writeMode !== "workspace") return false;
+  if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
   if (name === "handoff_to_agent" && config.writeMode === "handoff") return true;
@@ -398,10 +402,10 @@ function registerCodexTool(
 function serverInstructions(config: CodexProConfig): string {
   const editInstruction =
     config.writeMode === "workspace"
-      ? "4. Edit source files with write/edit. After edits, call show_changes once for git status, diff stats, and review diff."
+      ? "4. Edit source files with write/edit/apply_patch. After edits, call show_changes once for git status, diff stats, and review diff."
       : config.writeMode === "handoff"
-        ? "4. Source writes are disabled and generic write/edit tools are unavailable. Use handoff_to_agent/handoff_to_codex for plans."
-        : "4. Write/edit tools are disabled. Do not attempt direct file writes; use handoff or context export workflows instead.";
+        ? "4. Source writes are disabled and generic write/edit/apply_patch tools are unavailable. Use handoff_to_agent/handoff_to_codex for plans."
+        : "4. Write/edit/apply_patch tools are disabled. Do not attempt direct file writes; use handoff or context export workflows instead.";
   const bashInstruction =
     config.bashMode === "off"
       ? "5. Bash is disabled and the bash tool is unavailable. Do not attempt shell commands."
@@ -456,8 +460,149 @@ function diffStats(diff: string): { additions: number; deletions: number; change
   return { additions, deletions, changed: Boolean(diff.trim()) };
 }
 
+const reviewCheckpoints = new Map<string, string>();
+
+function reviewCheckpointKey(workspace: Workspace, options: { path?: string; staged: boolean }): string {
+  return `${workspace.id}\0${options.path ?? ""}\0${options.staged ? "staged" : "unstaged"}`;
+}
+
+function reviewFingerprint(status: string, diff: string): string {
+  return createHash("sha256").update(status).update("\0").update(diff).digest("hex");
+}
+
+async function untrackedReviewFingerprint(config: CodexProConfig, guard: PathGuard, workspace: Workspace, changedFiles: string[]): Promise<string> {
+  const hash = createHash("sha256");
+  for (const line of changedFiles) {
+    const match = line.match(/^\?\?\s+(.+)$/);
+    if (!match) continue;
+    const relPath = match[1];
+    hash.update(relPath).update("\0");
+    try {
+      const resolved = guard.resolve(workspace, relPath);
+      const stat = await fsp.stat(resolved.absPath);
+      hash.update(String(stat.size)).update("\0").update(String(Math.floor(stat.mtimeMs))).update("\0");
+      if (stat.isFile() && stat.size <= config.maxReadBytes) {
+        hash.update(await fsp.readFile(resolved.absPath));
+      }
+    } catch (error) {
+      hash.update(errorText(error));
+    }
+    hash.update("\0");
+  }
+  return hash.digest("hex");
+}
+
 function normalizeGitOutput(output: string): string {
   return output.trim() === "(no output)" ? "" : output;
+}
+
+function decodeGitQuotedPath(pathText: string): string {
+  let decoded = "";
+  for (let i = 0; i < pathText.length; i += 1) {
+    const char = pathText[i];
+    if (char !== "\\") {
+      decoded += char;
+      continue;
+    }
+    i += 1;
+    const escaped = pathText[i];
+    if (escaped === undefined) throw new CodexProError(`Invalid quoted patch path: ${pathText}`);
+    if (/[0-7]/.test(escaped)) {
+      let octal = escaped;
+      for (let j = 0; j < 2 && i + 1 < pathText.length && /[0-7]/.test(pathText[i + 1]); j += 1) {
+        i += 1;
+        octal += pathText[i];
+      }
+      decoded += String.fromCharCode(Number.parseInt(octal, 8));
+    } else {
+      decoded += ({ a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" } as Record<string, string>)[escaped] ?? escaped;
+    }
+  }
+  return decoded;
+}
+
+function normalizePatchPath(rawPath: string): string | undefined {
+  const raw = rawPath.trim().split("\t")[0]?.trim();
+  if (!raw || raw === "/dev/null") return undefined;
+  const unquoted = raw.startsWith('"') && raw.endsWith('"') ? decodeGitQuotedPath(raw.slice(1, -1)) : raw;
+  return unquoted.replace(/^(?:a|b)\//, "");
+}
+
+function patchHasSymlinkMode(patch: string): boolean {
+  return patch.split(/\r?\n/).some((line) => /^(?:new|old|deleted) file mode 120000\s*$/.test(line) || /^new mode 120000\s*$/.test(line) || /^old mode 120000\s*$/.test(line));
+}
+
+function patchTouchedPaths(patch: string): string[] {
+  const paths = new Set<string>();
+  for (const line of patch.split(/\r?\n/)) {
+    if (line.startsWith("--- ") || line.startsWith("+++ ")) {
+      const normalized = normalizePatchPath(line.slice(4));
+      if (normalized) paths.add(normalized);
+    } else if (line.startsWith("rename from ") || line.startsWith("rename to ") || line.startsWith("copy from ") || line.startsWith("copy to ")) {
+      const normalized = normalizePatchPath(line.replace(/^(?:rename|copy) (?:from|to) /, ""));
+      if (normalized) paths.add(normalized);
+    }
+  }
+  return [...paths];
+}
+
+function applyWorkspacePatch(
+  config: CodexProConfig,
+  guard: PathGuard,
+  workspace: Workspace,
+  patch: string
+): { paths: string[]; stdout: string; stderr: string; diff: string; additions: number; deletions: number; changed: boolean } {
+  if (!patch.trim()) throw new CodexProError("patch is required.");
+  if (Buffer.byteLength(patch, "utf8") > config.maxWriteBytes) {
+    throw new CodexProError(`Patch is too large. Limit: ${config.maxWriteBytes} bytes.`);
+  }
+  if (hasSecretValue(patch)) {
+    throw new CodexProError("Secret-looking content is blocked from apply_patch. Use placeholders such as [REDACTED_SECRET].");
+  }
+  if (patchHasSymlinkMode(patch)) {
+    throw new CodexProError("Symlink patches are blocked from apply_patch.");
+  }
+
+  const paths = patchTouchedPaths(patch);
+  if (!paths.length) throw new CodexProError("Patch must include at least one file path.");
+  for (const touchedPath of paths) {
+    guard.resolve(workspace, touchedPath, { forWrite: true });
+    assertWriteToolAllowed(config, touchedPath);
+  }
+
+  const check = spawnSync("git", ["apply", "--check", "--whitespace=nowarn"], {
+    cwd: workspace.root,
+    input: patch,
+    encoding: "utf8",
+    maxBuffer: config.maxOutputBytes,
+    env: { ...process.env, NO_COLOR: "1" }
+  });
+  if (check.error || check.status !== 0) {
+    throw new CodexProError(redactSensitiveText(check.stderr?.trim() || check.stdout?.trim() || check.error?.message || "git apply --check failed"));
+  }
+
+  const applied = spawnSync("git", ["apply", "--whitespace=nowarn"], {
+    cwd: workspace.root,
+    input: patch,
+    encoding: "utf8",
+    maxBuffer: config.maxOutputBytes,
+    env: { ...process.env, NO_COLOR: "1" }
+  });
+  if (applied.error || applied.status !== 0) {
+    throw new CodexProError(redactSensitiveText(applied.stderr?.trim() || applied.stdout?.trim() || applied.error?.message || "git apply failed"));
+  }
+
+  const diff = redactSensitiveText(patch.trimEnd());
+  const stats = diffStats(diff);
+  return {
+    paths,
+    stdout: redactSensitiveText(applied.stdout?.trim() || ""),
+    stderr: redactSensitiveText(applied.stderr?.trim() || ""),
+    diff,
+    additions: stats.additions,
+    deletions: stats.deletions,
+    changed: true
+  };
 }
 
 function looksLikeGitError(output: string): boolean {
@@ -482,7 +627,7 @@ function changedStatusLines(status: string): string[] {
   return status
     .split("\n")
     .map((line) => line.trim())
-    .filter((line) => line && !line.startsWith("##"));
+    .filter((line) => line && line !== "(no output)" && !line.startsWith("##"));
 }
 
 function jsonlEvent(event: string, data: Record<string, unknown>): string {
@@ -829,7 +974,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     {
       title: "CodexPro Self Test",
       description:
-        "Run one controlled, local-only CodexPro diagnostic. It checks modes, expected tools, workspace access, skills, git, safe bash policy, selected-only Pro context, and optional .ai-bridge write/edit without touching source files.",
+        "Run one controlled, local-only CodexPro diagnostic. It checks modes, expected tools, workspace access, skills, git, safe bash policy, selected-only Pro context, and optional .ai-bridge write/edit probe without touching source files.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         write_probe: z.boolean().optional().describe("Create/edit only .ai-bridge/codexpro-self-test.md. Default: true."),
@@ -1407,7 +1552,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     "read",
     {
       title: "Read File",
-      description: "Read a specific text file with line numbers. Avoid rereading files after write/edit unless exact final content is needed.",
+      description: "Read a specific text file with line numbers. Avoid rereading files after write/edit/apply_patch unless exact final content is needed.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         path: z.string().describe("File path relative to workspace root."),
@@ -1519,6 +1664,50 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         additions: result.diff.additions,
         deletions: result.diff.deletions,
         diff: result.diff.diff
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "apply_patch",
+    {
+      title: "Apply Patch",
+      description:
+        "Apply one unified diff patch inside the workspace. Paths are validated before applying. Prefer edit for tiny replacements and apply_patch for multi-file diffs.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
+        patch: z.string().describe("Unified diff patch to apply. File paths must stay inside the workspace and avoid blocked paths.")
+      },
+      annotations: LOCAL_WRITE_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Applying patch...",
+        "openai/toolInvocation/invoked": "Patch applied"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const result = applyWorkspacePatch(config, guard, workspace, String(args.patch ?? ""));
+      const text = [
+        "# Apply Patch",
+        "",
+        `Paths: ${result.paths.join(", ")}`,
+        `Diff stats: +${result.additions} -${result.deletions}`,
+        result.stderr ? `stderr: ${result.stderr}` : "",
+        result.diff ? diffBlock(result.diff) : "No diff output."
+      ].filter(Boolean).join("\n");
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        paths: result.paths,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        additions: result.additions,
+        deletions: result.deletions,
+        changed: result.changed,
+        diff: result.diff
       });
     }
   );
@@ -1659,7 +1848,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
         path: z.string().optional().describe("Optional file path relative to workspace root."),
         staged: z.boolean().optional().describe("Show staged diff. Default: false."),
-        include_diff: z.boolean().optional().describe("Include the unified diff. Default: true.")
+        include_diff: z.boolean().optional().describe("Include the unified diff. Default: true."),
+        since: z.enum(["last_shown", "workspace"]).optional().describe("Use last_shown to suppress unchanged repeated reviews. Default: last_shown."),
+        mark_reviewed: z.boolean().optional().describe("Update the last-shown review checkpoint after this call. Default: true.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
@@ -1671,28 +1862,43 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
-      const status = gitStatus(config, workspace, guard, scopedPath);
+      const staged = parseBool(args.staged, false);
+      const normalizedScopedPath = scopedPath?.trim() ? guard.resolve(workspace, scopedPath).relPath : undefined;
+      const status = normalizeGitOutput(gitDiffStatus(config, guard, workspace, normalizedScopedPath, staged));
       const includeDiff = parseBool(args.include_diff, true);
-      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, scopedPath, parseBool(args.staged, false)));
+      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, normalizedScopedPath, staged));
       const statusError = looksLikeGitError(status) ? status : "";
       const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
       const diff = diffError ? "" : rawDiff;
-      const responseDiff = includeDiff ? diff : "";
       const stats = diffStats(diff);
       const changedFiles = statusError ? [] : changedStatusLines(status);
+      const untrackedFingerprint = statusError ? "" : await untrackedReviewFingerprint(config, guard, workspace, changedFiles);
+      const since = args.since === "workspace" ? "workspace" : "last_shown";
+      const markReviewed = parseBool(args.mark_reviewed, true);
+      const checkpointKey = reviewCheckpointKey(workspace, { path: normalizedScopedPath, staged });
+      const fingerprint = reviewFingerprint(status, `${diff}\0${untrackedFingerprint}`);
+      const checkpointHit = includeDiff && since === "last_shown" && reviewCheckpoints.get(checkpointKey) === fingerprint;
+      const checkpointWritten = markReviewed && includeDiff;
+      if (checkpointWritten) reviewCheckpoints.set(checkpointKey, fingerprint);
+      const responseDiff = checkpointHit ? "" : includeDiff ? diff : "";
+      const responseStats = checkpointHit ? { additions: 0, deletions: 0, changed: false } : stats;
       const changedText = statusError
         ? `- Git status unavailable: ${statusError}`
-        : changedFiles.length
+        : checkpointHit
+          ? "- No changes since last shown review."
+          : changedFiles.length
           ? changedFiles.map((line) => `- ${line}`).join("\n")
           : "- No changed files.";
-      const diffText = includeDiff
+      const diffText = checkpointHit
+        ? "\n\nNo new diff since last shown review."
+        : includeDiff
         ? diffError
           ? `\n\nGit diff unavailable: ${diffError}`
           : diff
           ? diffBlock(diff)
-          : "\n\nNo diff output."
+            : "\n\nNo diff output."
         : "\n\nDiff omitted by request.";
-      const text = `# Show Changes\n\nWorkspace: ${workspace.root}\n\n## Changed\n\n${changedText}\n\n## Diff stats\n\n+${stats.additions} -${stats.deletions}${diffText}`;
+      const text = `# Show Changes\n\nWorkspace: ${workspace.root}\n\n## Changed\n\n${changedText}\n\n## Diff stats\n\n+${responseStats.additions} -${responseStats.deletions}${diffText}`;
       return textResult(text, {
         workspace_id: workspace.id,
         root: workspace.root,
@@ -1700,13 +1906,16 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         status,
         status_error: statusError || undefined,
         diff_error: diffError || undefined,
-        changed_files: changedFiles,
-        staged: parseBool(args.staged, false),
+        changed_files: checkpointHit ? [] : changedFiles,
+        staged,
         include_diff: includeDiff,
-        additions: stats.additions,
-        deletions: stats.deletions,
-        changed: !statusError && (changedFiles.length > 0 || stats.changed),
-        diff: responseDiff
+        additions: responseStats.additions,
+        deletions: responseStats.deletions,
+        changed: !statusError && (checkpointHit ? false : changedFiles.length > 0 || responseStats.changed),
+        diff: responseDiff,
+        review_since: since,
+        review_marked: checkpointWritten,
+        review_checkpoint_hit: checkpointHit
       });
     }
   );

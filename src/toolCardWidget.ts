@@ -459,6 +459,7 @@ export const toolCardWidgetHtml = String.raw`
       tree: "File tree",
       write: "File write",
       edit: "Exact edit",
+      apply_patch: "Patch",
       git_status: "Git Status",
       git_diff: "Git Diff",
       show_changes: "Change review",
@@ -485,6 +486,7 @@ export const toolCardWidgetHtml = String.raw`
     if (tool === "tree") return "T";
     if (tool === "write") return "W";
     if (tool === "edit") return "E";
+    if (tool === "apply_patch") return "P";
     if (tool === "git_status" || tool === "git_diff") return "G";
     if (tool === "show_changes") return "D";
     if (tool === "read_handoff") return "H";
@@ -919,7 +921,7 @@ export const toolCardWidgetHtml = String.raw`
       root.innerHTML = renderChanges(data);
     } else if (tool === "handoff_to_agent" || tool === "handoff_to_codex") {
       root.innerHTML = renderHandoff(data);
-    } else if (tool === "write" || tool === "edit" || tool === "git_diff" || tool === "export_pro_context" || tool === "read") {
+    } else if (tool === "write" || tool === "edit" || tool === "apply_patch" || tool === "git_diff" || tool === "export_pro_context" || tool === "read") {
       root.innerHTML = renderFile(data);
     } else if (tool === "bash") {
       root.innerHTML = renderBash(data);

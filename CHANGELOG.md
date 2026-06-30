@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added a guarded `apply_patch` MCP tool for unified-diff edits inside workspace write mode, with blocked-path and secret-content checks before patches are applied.
+- Added last-shown review checkpoints to `show_changes`, so repeated unchanged reviews collapse while new workspace changes still produce a fresh diff.
+- Fixed checkpoint-hit `show_changes` responses so repeated unchanged reviews report zero new diff stats instead of carrying stale addition/deletion counts.
+- Scoped `apply_patch` result diffs to the applied patch, so unrelated dirty tracked files are not folded into the patch card.
 - Hardened safe bash filtering, path canonicalization, binary-file checks, ripgrep truncation reporting, and supertool argument validation around edge-case bypasses found by stress testing.
 - Redacted child tunnel process output before logging or surfacing startup failures so Cloudflare `TUNNEL_TOKEN` values cannot leak from failed named-tunnel launches.
 - Kept `codex_sessions` metadata mode from returning transcript-tail summaries, skipped unreadable stale history files, and accepted source paths under symlink-resolved Codex history roots.

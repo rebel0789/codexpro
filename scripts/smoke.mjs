@@ -78,6 +78,7 @@ assertCommand(['dist/http.js', '--help'], 'CodexPro MCP HTTP server');
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-'));
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
+await fs.writeFile(path.join(tmp, 'other.txt'), 'keep\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'config.txt'), 'OPENAI_API_KEY=sk-realSecretValue123\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'AGENTS.md'), '# Smoke Agents\n\n- Preserve demo.txt.\n', 'utf8');
 const codexHistoryDir = path.join(tmp, 'codex-history');
@@ -171,7 +172,7 @@ try {
   symlinkEscapePath = 'secret-link-dir/secret.txt';
   await fs.symlink(outside, path.join(tmp, 'secret-link-dir'), 'junction');
 }
-for (const args of [['init'], ['add', 'demo.txt', 'AGENTS.md', 'package.json']]) {
+for (const args of [['init'], ['add', 'demo.txt', 'other.txt', 'AGENTS.md', 'package.json']]) {
   const result = spawnSync('git', args, { cwd: tmp, encoding: 'utf8' });
   if (result.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
@@ -195,7 +196,7 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'apply_patch', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
 const toolCardUri = 'ui://widget/codexpro-tool-card-v9.html';
@@ -397,12 +398,119 @@ const changes = await client.request('tools/call', { name: 'show_changes', argum
 if (!changes.structuredContent.changed || !changes.structuredContent.diff.includes('demo.txt')) {
   throw new Error('show_changes did not report the edited demo.txt diff');
 }
+const repeatedChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws } });
+if (repeatedChanges.structuredContent.changed || repeatedChanges.structuredContent.diff || repeatedChanges.structuredContent.review_checkpoint_hit !== true || repeatedChanges.structuredContent.additions !== 0 || repeatedChanges.structuredContent.deletions !== 0) {
+  throw new Error(`show_changes repeated the same review instead of using the last-shown checkpoint: ${JSON.stringify(repeatedChanges.structuredContent)}`);
+}
+await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'other.txt', old_text: 'keep', new_text: 'unrelated dirty file' } });
+const patchResult = await client.request('tools/call', {
+  name: 'apply_patch',
+  arguments: {
+    workspace_id: ws,
+    patch: [
+      'diff --git a/demo.txt b/demo.txt',
+      'index f41f61c..be6d0ff 100644',
+      '--- a/demo.txt',
+      '+++ b/demo.txt',
+      '@@ -1,4 +1,4 @@',
+      ' alpha',
+      ' read',
+      ' write',
+      '-omega',
+      '+omega patched'
+    ].join('\n') + '\n'
+  }
+});
+if (!patchResult.structuredContent.changed || !patchResult.structuredContent.paths?.includes?.('demo.txt')) {
+  throw new Error(`apply_patch did not report the patched file: ${JSON.stringify(patchResult.structuredContent)}`);
+}
+if (patchResult.structuredContent.diff?.includes?.('other.txt')) {
+  throw new Error(`apply_patch leaked unrelated workspace diff: ${patchResult.structuredContent.diff}`);
+}
+const patchedRead = await client.request('tools/call', { name: 'read', arguments: { workspace_id: ws, path: 'demo.txt' } });
+if (!patchedRead.content?.[0]?.text?.includes('omega patched')) {
+  throw new Error(`apply_patch did not update demo.txt: ${patchedRead.content?.[0]?.text}`);
+}
+await expectToolError('apply_patch', {
+  workspace_id: ws,
+  patch: [
+    'diff --git a/.env b/.env',
+    'new file mode 100644',
+    'index 0000000..e69de29',
+    '--- /dev/null',
+    '+++ b/.env',
+    '@@ -0,0 +1 @@',
+    '+SAFE_PLACEHOLDER=1'
+  ].join('\n') + '\n'
+}, /blocked/i);
+await expectToolError('apply_patch', {
+  workspace_id: ws,
+  patch: [
+    'diff --git "a/foo\\057.env" "b/foo\\057.env"',
+    'new file mode 100644',
+    'index 0000000..e69de29',
+    '--- /dev/null',
+    '+++ "b/foo\\057.env"',
+    '@@ -0,0 +1 @@',
+    '+SAFE_PLACEHOLDER=1'
+  ].join('\n') + '\n'
+}, /blocked/i);
+await expectToolError('apply_patch', {
+  workspace_id: ws,
+  patch: [
+    'diff --git a/demo.txt b/demo.txt',
+    'index be6d0ff..f4aa735 100644',
+    '--- a/demo.txt',
+    '+++ b/demo.txt',
+    '@@ -1,4 +1,4 @@',
+    ' alpha',
+    ' read',
+    ' write',
+    '-omega patched',
+    '+omega copied',
+    'diff --git a/demo.txt b/.env',
+    'similarity index 100%',
+    'copy from demo.txt',
+    'copy to .env'
+  ].join('\n') + '\n'
+}, /blocked/i);
+await expectToolError('apply_patch', {
+  workspace_id: ws,
+  patch: [
+    'diff --git a/link-outside b/link-outside',
+    'new file mode 120000 ',
+    'index 0000000..2e65efe',
+    '--- /dev/null',
+    '+++ b/link-outside',
+    '@@ -0,0 +1 @@',
+    '+/tmp/outside-target'
+  ].join('\n') + '\n'
+}, /symlink/i);
+const postPatchChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws } });
+if (!postPatchChanges.structuredContent.changed || !postPatchChanges.structuredContent.diff.includes('omega patched')) {
+  throw new Error(`show_changes did not report new patch changes after checkpoint: ${JSON.stringify(postPatchChanges.structuredContent)}`);
+}
 const statsOnlyDiff = await client.request('tools/call', { name: 'git_diff', arguments: { workspace_id: ws, include_diff: false } });
 if (statsOnlyDiff.structuredContent.include_diff !== false || statsOnlyDiff.structuredContent.diff !== '') {
   throw new Error(`git_diff include_diff=false returned raw diff: ${JSON.stringify(statsOnlyDiff.structuredContent)}`);
 }
 if (!statsOnlyDiff.content?.[0]?.text?.includes('Raw diff omitted by include_diff=false')) {
   throw new Error('git_diff include_diff=false did not report omitted diff in text output');
+}
+const statsOnlyChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'other.txt', include_diff: false } });
+if (!statsOnlyChanges.structuredContent.changed || statsOnlyChanges.structuredContent.diff !== '') {
+  throw new Error(`show_changes include_diff=false should keep stats and omit diff: ${JSON.stringify(statsOnlyChanges.structuredContent)}`);
+}
+const fullChangesAfterStatsOnly = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: './other.txt' } });
+if (!fullChangesAfterStatsOnly.structuredContent.changed || fullChangesAfterStatsOnly.structuredContent.review_checkpoint_hit || !fullChangesAfterStatsOnly.structuredContent.diff.includes('other.txt')) {
+  throw new Error(`show_changes include_diff=false consumed the next full diff: ${JSON.stringify(fullChangesAfterStatsOnly.structuredContent)}`);
+}
+const statsOnlyAfterCheckpoint = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'other.txt', include_diff: false } });
+if (!statsOnlyAfterCheckpoint.structuredContent.changed || statsOnlyAfterCheckpoint.structuredContent.diff !== '' || statsOnlyAfterCheckpoint.structuredContent.additions !== 1) {
+  throw new Error(`show_changes include_diff=false lost stats after checkpoint: ${JSON.stringify(statsOnlyAfterCheckpoint.structuredContent)}`);
+}
+if (statsOnlyAfterCheckpoint.structuredContent.review_marked) {
+  throw new Error(`show_changes include_diff=false claimed it updated the review checkpoint: ${JSON.stringify(statsOnlyAfterCheckpoint.structuredContent)}`);
 }
 const demoChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'demo.txt' } });
 if (!demoChanges.structuredContent.changed || !demoChanges.structuredContent.changed_files?.some?.((line) => line.includes('demo.txt'))) {
@@ -414,6 +522,28 @@ if (demoChanges.structuredContent.changed_files?.some?.((line) => line.includes(
 const cleanPathChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'package.json' } });
 if (cleanPathChanges.structuredContent.changed || cleanPathChanges.structuredContent.changed_files?.length || cleanPathChanges.structuredContent.diff.includes('demo.txt')) {
   throw new Error(`path-scoped show_changes leaked unrelated changes: ${JSON.stringify(cleanPathChanges.structuredContent)}`);
+}
+await fs.writeFile(path.join(tmp, 'staged-only.txt'), 'ready\n', 'utf8');
+const stageOnlyResult = spawnSync('git', ['add', 'staged-only.txt'], { cwd: tmp, encoding: 'utf8' });
+if (stageOnlyResult.status !== 0) throw new Error(`git add staged-only.txt failed: ${stageOnlyResult.stderr || stageOnlyResult.stdout}`);
+await fs.writeFile(path.join(tmp, 'unstaged-only.txt'), 'dirty\n', 'utf8');
+const defaultStagedPathChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'staged-only.txt' } });
+if (defaultStagedPathChanges.structuredContent.changed || defaultStagedPathChanges.structuredContent.diff || defaultStagedPathChanges.structuredContent.additions !== 0) {
+  throw new Error(`default show_changes reported staged-only changes as unstaged: ${JSON.stringify(defaultStagedPathChanges.structuredContent)}`);
+}
+const stagedChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, staged: true } });
+if (!stagedChanges.structuredContent.changed || !stagedChanges.structuredContent.diff.includes('staged-only.txt') || stagedChanges.structuredContent.diff.includes('unstaged-only.txt')) {
+  throw new Error(`staged show_changes mixed staged and unstaged files: ${JSON.stringify(stagedChanges.structuredContent)}`);
+}
+await client.request('tools/call', { name: 'write', arguments: { workspace_id: ws, path: 'new-review.txt', content: 'new file\n' } });
+const untrackedChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'new-review.txt' } });
+if (!untrackedChanges.structuredContent.changed || !untrackedChanges.structuredContent.changed_files?.some?.((line) => line.includes('new-review.txt'))) {
+  throw new Error(`show_changes did not report untracked new file: ${JSON.stringify(untrackedChanges.structuredContent)}`);
+}
+await fs.writeFile(path.join(tmp, 'new-review.txt'), 'new file changed\n', 'utf8');
+const changedUntrackedChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'new-review.txt' } });
+if (!changedUntrackedChanges.structuredContent.changed || changedUntrackedChanges.structuredContent.review_checkpoint_hit) {
+  throw new Error(`show_changes checkpoint hid changed untracked file content: ${JSON.stringify(changedUntrackedChanges.structuredContent)}`);
 }
 const codexContext = await client.request('tools/call', { name: 'codex_context', arguments: { workspace_id: ws, target_path: 'demo.txt' } });
 if (!codexContext.structuredContent.agents_files.includes('AGENTS.md')) throw new Error('codex_context did not include AGENTS.md');
@@ -626,8 +756,8 @@ async function assertToolMode(mode, expected, hidden) {
   modeClient.close();
 }
 
-await assertToolMode('', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'bash', 'show_changes', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
-await assertToolMode('minimal', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
+await assertToolMode('', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'apply_patch', 'bash', 'show_changes', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent'], ['codexpro_inventory', 'workspace_snapshot', 'git_status', 'git_diff', 'codex_context', 'handoff_to_codex']);
+await assertToolMode('minimal', ['codexpro', 'server_config', 'codexpro_self_test', 'open_current_workspace', 'open_workspace', 'read', 'write', 'edit', 'apply_patch', 'bash', 'show_changes'], ['tree', 'search', 'load_skill', 'read_handoff', 'wait_for_handoff', 'export_pro_context', 'handoff_to_agent', 'codex_context']);
 
 const handoffWriteClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--write', 'handoff'], {
   cwd: path.resolve('.'),
@@ -641,14 +771,23 @@ await handoffWriteClient.request('initialize', {
 handoffWriteClient.notify('notifications/initialized');
 const handoffWriteTools = await handoffWriteClient.request('tools/list', {});
 const handoffWriteToolNames = handoffWriteTools.tools.map((tool) => tool.name);
-for (const hiddenWriteTool of ['write', 'edit']) {
+for (const hiddenWriteTool of ['write', 'edit', 'apply_patch']) {
   if (handoffWriteToolNames.includes(hiddenWriteTool)) {
     throw new Error(`--write handoff should not advertise ${hiddenWriteTool} tool; got ${handoffWriteToolNames.join(', ')}`);
   }
 }
 const handoffWriteConfig = await handoffWriteClient.request('tools/call', { name: 'server_config', arguments: {} });
-if (handoffWriteConfig.structuredContent.writeMode !== 'handoff' || handoffWriteConfig.structuredContent.registeredTools?.includes?.('write') || handoffWriteConfig.structuredContent.registeredTools?.includes?.('edit')) {
+if (handoffWriteConfig.structuredContent.writeMode !== 'handoff' || handoffWriteConfig.structuredContent.registeredTools?.includes?.('write') || handoffWriteConfig.structuredContent.registeredTools?.includes?.('edit') || handoffWriteConfig.structuredContent.registeredTools?.includes?.('apply_patch')) {
   throw new Error(`server_config did not report write handoff with hidden edit tools: ${JSON.stringify(handoffWriteConfig.structuredContent)}`);
+}
+const handoffSelfTest = await handoffWriteClient.request('tools/call', { name: 'codexpro_self_test', arguments: { write_probe: false, bash_probe: false, pro_context_probe: false } });
+if (handoffSelfTest.structuredContent.status === 'fail') {
+  throw new Error(`codexpro_self_test failed under --write handoff: ${JSON.stringify(handoffSelfTest.structuredContent)}`);
+}
+for (const hiddenWriteTool of ['write', 'edit', 'apply_patch']) {
+  if (handoffSelfTest.structuredContent.expected_tools?.includes?.(hiddenWriteTool) || handoffSelfTest.structuredContent.registered_tools?.includes?.(hiddenWriteTool)) {
+    throw new Error(`codexpro_self_test exposed ${hiddenWriteTool} under --write handoff: ${JSON.stringify(handoffSelfTest.structuredContent)}`);
+  }
 }
 handoffWriteClient.close();
 
@@ -685,7 +824,7 @@ await disabledWriteClient.request('initialize', {
 disabledWriteClient.notify('notifications/initialized');
 const disabledWriteTools = await disabledWriteClient.request('tools/list', {});
 const disabledWriteToolNames = disabledWriteTools.tools.map((tool) => tool.name);
-for (const hiddenWriteTool of ['write', 'edit']) {
+for (const hiddenWriteTool of ['write', 'edit', 'apply_patch']) {
   if (disabledWriteToolNames.includes(hiddenWriteTool)) {
     throw new Error(`--write off should not advertise ${hiddenWriteTool} tool; got ${disabledWriteToolNames.join(', ')}`);
   }
@@ -693,6 +832,15 @@ for (const hiddenWriteTool of ['write', 'edit']) {
 const disabledWriteConfig = await disabledWriteClient.request('tools/call', { name: 'server_config', arguments: {} });
 if (disabledWriteConfig.structuredContent.writeMode !== 'off') {
   throw new Error(`server_config did not report write off: ${JSON.stringify(disabledWriteConfig.structuredContent)}`);
+}
+const disabledSelfTest = await disabledWriteClient.request('tools/call', { name: 'codexpro_self_test', arguments: { write_probe: false, bash_probe: false, pro_context_probe: false } });
+if (disabledSelfTest.structuredContent.status === 'fail') {
+  throw new Error(`codexpro_self_test failed under --write off: ${JSON.stringify(disabledSelfTest.structuredContent)}`);
+}
+for (const hiddenWriteTool of ['write', 'edit', 'apply_patch']) {
+  if (disabledSelfTest.structuredContent.expected_tools?.includes?.(hiddenWriteTool) || disabledSelfTest.structuredContent.registered_tools?.includes?.(hiddenWriteTool)) {
+    throw new Error(`codexpro_self_test exposed ${hiddenWriteTool} under --write off: ${JSON.stringify(disabledSelfTest.structuredContent)}`);
+  }
 }
 disabledWriteClient.close();
 

@@ -673,11 +673,44 @@ async function runShowChangesStatsStress() {
       arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'demo.txt', include_diff: false }
     });
     assert(changes.structuredContent.additions === 1 && changes.structuredContent.deletions === 0 && changes.structuredContent.diff === '', `show_changes include_diff=false lost stats: ${JSON.stringify(changes.structuredContent)}`);
+    const fullChanges = await client.request('tools/call', {
+      name: 'show_changes',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, path: './demo.txt' }
+    });
+    assert(fullChanges.structuredContent.changed && fullChanges.structuredContent.diff.includes('demo.txt') && fullChanges.structuredContent.review_checkpoint_hit !== true, `show_changes include_diff=false consumed full diff: ${JSON.stringify(fullChanges.structuredContent)}`);
+    const statsOnlyAfterCheckpoint = await client.request('tools/call', {
+      name: 'show_changes',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'demo.txt', include_diff: false }
+    });
+    assert(statsOnlyAfterCheckpoint.structuredContent.changed && statsOnlyAfterCheckpoint.structuredContent.additions === 1 && statsOnlyAfterCheckpoint.structuredContent.diff === '', `show_changes include_diff=false lost stats after checkpoint: ${JSON.stringify(statsOnlyAfterCheckpoint.structuredContent)}`);
+    assert(statsOnlyAfterCheckpoint.structuredContent.review_marked === false, `show_changes include_diff=false claimed checkpoint was marked: ${JSON.stringify(statsOnlyAfterCheckpoint.structuredContent)}`);
     const stagedDiff = await client.request('tools/call', {
       name: 'git_diff',
       arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'staged file.txt', staged: true, include_diff: false }
     });
     assert(stagedDiff.structuredContent.additions === 1 && stagedDiff.structuredContent.deletions === 0 && stagedDiff.structuredContent.diff === '', `git_diff staged path stats failed: ${JSON.stringify(stagedDiff.structuredContent)}`);
+    const stagedChanges = await client.request('tools/call', {
+      name: 'show_changes',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, staged: true }
+    });
+    assert(stagedChanges.structuredContent.changed && stagedChanges.structuredContent.diff.includes('staged file.txt') && !stagedChanges.structuredContent.diff.includes('demo.txt'), `show_changes staged review mixed unstaged files: ${JSON.stringify(stagedChanges.structuredContent)}`);
+    const defaultStagedPathChanges = await client.request('tools/call', {
+      name: 'show_changes',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'staged file.txt' }
+    });
+    assert(!defaultStagedPathChanges.structuredContent.changed && defaultStagedPathChanges.structuredContent.additions === 0 && defaultStagedPathChanges.structuredContent.diff === '', `default show_changes reported staged-only changes: ${JSON.stringify(defaultStagedPathChanges.structuredContent)}`);
+    await fs.writeFile(path.join(root, 'new-review.txt'), 'new file\n', 'utf8');
+    const untrackedChanges = await client.request('tools/call', {
+      name: 'show_changes',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'new-review.txt' }
+    });
+    assert(untrackedChanges.structuredContent.changed && untrackedChanges.structuredContent.changed_files.some((line) => line.includes('new-review.txt')), `show_changes did not report untracked new file: ${JSON.stringify(untrackedChanges.structuredContent)}`);
+    await fs.writeFile(path.join(root, 'new-review.txt'), 'new file changed\n', 'utf8');
+    const changedUntrackedChanges = await client.request('tools/call', {
+      name: 'show_changes',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, path: 'new-review.txt' }
+    });
+    assert(changedUntrackedChanges.structuredContent.changed && changedUntrackedChanges.structuredContent.review_checkpoint_hit !== true, `show_changes checkpoint hid changed untracked file content: ${JSON.stringify(changedUntrackedChanges.structuredContent)}`);
   } finally {
     client.close();
   }
@@ -693,10 +726,10 @@ async function runMinimalHandoffStress(root) {
     const tools = await client.request('tools/list', {});
     const names = tools.tools.map((tool) => tool.name);
     assert(names.includes('handoff_to_agent'), 'minimal handoff mode missing handoff_to_agent');
-    assert(!names.includes('write') && !names.includes('edit'), 'minimal handoff mode exposed write/edit');
+    assert(!names.includes('write') && !names.includes('edit') && !names.includes('apply_patch'), 'minimal handoff mode exposed write/edit/apply_patch');
     const actions = await client.request('tools/call', { name: 'codexpro', arguments: { action: 'list_actions' } });
     assert(actions.structuredContent.actions.includes('handoff_to_agent'), 'minimal handoff supertool actions missing handoff_to_agent');
-    assert(!actions.structuredContent.actions.includes('write') && !actions.structuredContent.actions.includes('edit'), 'minimal handoff supertool actions exposed write/edit');
+    assert(!actions.structuredContent.actions.includes('write') && !actions.structuredContent.actions.includes('edit') && !actions.structuredContent.actions.includes('apply_patch'), 'minimal handoff supertool actions exposed write/edit/apply_patch');
     const handoff = await client.request('tools/call', {
       name: 'codexpro',
       arguments: { action: 'agent_handoff', args: { title: 'Stress Plan', plan: '- keep it narrow' } }

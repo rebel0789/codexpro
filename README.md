@@ -91,7 +91,7 @@ The GitHub `main` README can describe changes before they reach npm. Check the n
 | ChatGPT gets | CodexPro provides |
 | --- | --- |
 | Repo context | `AGENTS.md`, `.ai-bridge`, git status, git diff, selected source files |
-| Coding actions | `read`, `write`, `edit`, `search`, `show_changes` |
+| Coding actions | `read`, `write`, `edit`, `apply_patch`, `search`, `show_changes` |
 | Verification | safe `bash` for focused test, lint, build, and git commands |
 | Handoff | `.ai-bridge/current-plan.md` for Codex, OpenCode, Pi, or a custom local agent |
 | Fallback planning | `.ai-bridge/pro-context.md` for model surfaces that cannot call MCP tools |
@@ -107,7 +107,7 @@ The high-level shape can look similar because both use a local MCP bridge, a tun
 | CodexPro focuses on | Why it matters |
 | --- | --- |
 | ChatGPT-first coding loop | The first-run path is install, setup in a repo, paste one Server URL, then let ChatGPT inspect, edit, verify, and review that workspace. |
-| Explicit safety modes | Bash, write/edit, tool catalog size, Codex session reads, and handoff execution are separate controls instead of one broad remote-control switch. |
+| Explicit safety modes | Bash, write/edit/apply_patch, tool catalog size, Codex session reads, and handoff execution are separate controls instead of one broad remote-control switch. |
 | Repo-backed continuity | `AGENTS.md` and `.ai-bridge/*` keep durable project context in the repo, not hidden in a chat transcript or one machine-local UI state. |
 | Reviewable outputs | Tool cards, diffs, `show_changes`, smoke tests, and handoff status files are designed so users can see what changed before trusting it. |
 | TOS-safe product boundary | CodexPro does not proxy models, pool accounts, scrape third-party Pro sites, bypass quotas, or pretend to be an OS sandbox. |
@@ -188,8 +188,9 @@ Standard mode exposes:
 - `read` — read text files with line numbers.
 - `write` — create/overwrite files and return a diff. Advertised only when `CODEXPRO_WRITE_MODE=workspace`.
 - `edit` — exact text replacement and return a diff. Advertised only when `CODEXPRO_WRITE_MODE=workspace`.
+- `apply_patch` — apply a guarded unified diff inside the workspace. Advertised only when `CODEXPRO_WRITE_MODE=workspace`.
 - `bash` — run allowlisted shell commands in the workspace. Hidden when `CODEXPRO_BASH_MODE=off`.
-- `show_changes` — one review-oriented summary with git status, diff stats, and optional diff.
+- `show_changes` — one review-oriented summary with git status, diff stats, optional diff, and a last-shown checkpoint to suppress repeated unchanged reviews.
 - `read_handoff` — read `.ai-bridge` files.
 - `wait_for_handoff` — read-only polling of `.ai-bridge/handoff-run-state.json` after a local executor run.
 - `export_pro_context` — write `.ai-bridge/pro-context.md` for models that cannot call MCP tools directly.
@@ -202,7 +203,7 @@ codexpro
 server_config
 codexpro_self_test
 open_current_workspace / open_workspace
-read / write / edit
+read / write / edit / apply_patch
 bash
 show_changes
 ```
@@ -320,7 +321,7 @@ server_config and codexpro_self_test
 open_current_workspace / open_workspace project summaries
 codexpro_inventory, list_workspaces, workspace_snapshot
 tree, search, load_skill, read
-write/edit diffs
+write/edit/apply_patch diffs
 bash verification commands
 git_status, git_diff, show_changes review summaries
 read_handoff, codex_context
@@ -569,7 +570,7 @@ Advanced controls such as `u` for printing the full URL, `p` for Create App fiel
 Startup modes:
 
 ```bash
-codexpro start                 # normal coding mode: read/write/edit/search/bash
+codexpro start                 # normal coding mode: read/write/edit/apply_patch/search/bash
 codexpro start --no-bash       # normal coding mode without ChatGPT-triggered shell commands
 codexpro start --bash-transcript full  # print raw stdout/stderr in chat instead of compact cards
 codexpro start --bash-session main --require-bash-session
@@ -1113,9 +1114,9 @@ Example MCP config:
 `CODEXPRO_WRITE_MODE=workspace` is the default normal coding mode. Use `handoff` when you want planning-only behavior and do not want ChatGPT to edit source files directly.
 
 ```text
-off        write/edit tools are disabled and not advertised; handoff_to_agent and handoff_to_codex still write .ai-bridge/current-plan.md
-handoff    generic write/edit tools are disabled and not advertised; handoff tools write only bounded .ai-bridge plan/context files
-workspace  write/edit can write workspace files, except blocked paths
+off        write/edit/apply_patch tools are disabled and not advertised; handoff_to_agent and handoff_to_codex still write .ai-bridge/current-plan.md
+handoff    generic write/edit/apply_patch tools are disabled and not advertised; handoff tools write only bounded .ai-bridge plan/context files
+workspace  write/edit/apply_patch can write workspace files, except blocked paths
 ```
 
 The launcher defaults to `workspace` in normal coding mode and `handoff` in handoff/pro planning modes.
@@ -1127,8 +1128,8 @@ The launcher defaults to `workspace` in normal coding mode and `handoff` in hand
 `CODEXPRO_TOOL_MODE=standard` is the default. It exposes the normal coding loop plus `show_changes`, Pro context export, and generic agent handoff.
 
 ```text
-minimal   codexpro supertool plus config/self-test/open/read/write/edit/bash/show_changes, with write/bash removed when disabled
-standard  default surface for normal coding plus handoff/export, with write/edit only in workspace write mode
+minimal   codexpro supertool plus config/self-test/open/read/write/edit/apply_patch/bash/show_changes, with write/edit/apply_patch/bash removed when disabled
+standard  default surface for normal coding plus handoff/export, with write/edit/apply_patch only in workspace write mode
 full      all tools, including inventory, workspace snapshots, raw git tools, codex_context, and compatibility wrappers
 ```
 
@@ -1242,7 +1243,7 @@ Call server_config first, then codexpro_self_test.
 If self-test fails, stop and report the failed checks.
 Then call open_current_workspace with include_tree=false.
 
-Act as a coding agent. Inspect the relevant files, make the requested source edits with write/edit, then verify with search/read/bash and show_changes when useful. Use bash only for focused verification commands such as build, test, lint, or typecheck.
+Act as a coding agent. Inspect the relevant files, make the requested source edits with write/edit/apply_patch, then verify with search/read/bash and show_changes when useful. Use bash only for focused verification commands such as build, test, lint, or typecheck.
 
 Keep changes scoped to the request. Do not use handoff_to_agent unless I explicitly ask for planning-only handoff.
 ```

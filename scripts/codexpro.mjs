@@ -50,7 +50,7 @@ Options:
   --allow-home              Allow opening any workspace under your home directory.
   --mode <agent|handoff|pro>
                              Default: agent.
-                             agent = ChatGPT can read, write/edit files, search, and run safe bash.
+                             agent = ChatGPT can read, write/edit/apply_patch files, search, and run safe bash.
                              handoff = ChatGPT writes .ai-bridge plans for a local implementation agent.
                              pro = export context for models that cannot call MCP tools.
   --agent                   Shortcut for --mode agent.
@@ -72,10 +72,10 @@ Options:
   --codex-dir <dir>          Codex config/session directory. Default: ~/.codex.
   --write <off|handoff|workspace>
                              Write mode. Default: workspace in agent mode, handoff otherwise.
-                             handoff = no generic write/edit tools; handoff tools write bounded .ai-bridge files.
+                             handoff = no generic write/edit/apply_patch tools; handoff tools write bounded .ai-bridge files.
   --tool-mode <minimal|standard|full>
                              Tool surface exposed to ChatGPT. Default: standard.
-                             minimal = config/self-test plus open/read/write/edit/bash/show_changes.
+                             minimal = config/self-test plus open/read/write/edit/apply_patch/bash/show_changes.
                              full = expose every compatibility and advanced tool.
   --widget-domain <origin>   Dedicated HTTPS origin for ChatGPT widget iframes.
                              Required for app submission. Default: https://rebel0789.github.io.
@@ -2453,7 +2453,7 @@ function printControlHelp() {
 function printModeHelp() {
   console.log('');
   console.log('Modes');
-  console.log('  codexpro start                 agent mode: read/write/edit/search/bash');
+  console.log('  codexpro start                 agent mode: read/write/edit/apply_patch/search/bash');
   console.log('  codexpro start --no-bash       agent mode without ChatGPT-triggered shell commands');
   console.log('  codexpro start --bash-session main --require-bash-session');
   console.log('  codexpro start --mode handoff  planning-only .ai-bridge handoff');
