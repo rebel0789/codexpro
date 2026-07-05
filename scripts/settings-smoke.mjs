@@ -563,6 +563,39 @@ try {
   if (error?.code !== 'ENOENT') throw error;
 }
 
+const proxyCloudflareFailRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-proxy-fail-'));
+const proxyCloudflareFailPort = await getFreePort();
+const fakeFailingProxyCloudflared = path.join(home, 'fake-cloudflared-proxy-fail.mjs');
+await fs.writeFile(fakeFailingProxyCloudflared, [
+  '#!/usr/bin/env node',
+  "if (process.argv.includes('--version')) { console.log('cloudflared version 2026.6.0'); process.exit(0); }",
+  "console.error('proxy tunnel startup failed');",
+  'process.exit(7);',
+  ''
+].join('\n'), { mode: 0o700 });
+const proxyFailure = runFail([
+  'start',
+  '--root',
+  proxyCloudflareFailRoot,
+  '--tunnel',
+  'cloudflare',
+  '--cloudflared',
+  fakeFailingProxyCloudflared,
+  '--port',
+  String(proxyCloudflareFailPort),
+  '--token',
+  'codexpro-cloudflare-proxy-token',
+  '--no-copy-url'
+], {
+  ...env,
+  PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}`,
+  HTTPS_PROXY: 'http://proxy.example.test:8080',
+  CODEXPRO_FAKE_CURL_ARGS: path.join(home, 'fake-curl-fail-args.json')
+}, /exited before startup completed/);
+if (!proxyFailure.includes('proxy tunnel startup failed')) {
+  throw new Error(`proxy quick tunnel did not include cloudflared startup failure output\n${proxyFailure}`);
+}
+
 const namedCloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-named-'));
 const namedCloudflarePort = await getFreePort();
 const fakeNamedCloudflared = path.join(home, 'fake-cloudflared-named.mjs');
@@ -666,6 +699,27 @@ const tailscaleFailure = runFail([
 ], env, /Recent tailscale output/);
 if (!tailscaleFailure.includes(`funnel|http://127.0.0.1:${tailscalePort}`)) {
   throw new Error(`tailscale start did not invoke Funnel against the local server\n${tailscaleFailure}`);
+}
+const tailscalePortRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-tailscale-port-'));
+const tailscalePort8443 = await getFreePort();
+const tailscalePortFailure = runFail([
+  'start',
+  '--root',
+  tailscalePortRoot,
+  '--tunnel',
+  'tailscale',
+  '--hostname',
+  'codexpro-env.tailnet.ts.net:8443',
+  '--tailscale',
+  fakeTailscale,
+  '--port',
+  String(tailscalePort8443),
+  '--token',
+  'codexpro-tailscale-token',
+  '--no-copy-url'
+], env, /Recent tailscale output/);
+if (!tailscalePortFailure.includes(`funnel|--https=8443|http://127.0.0.1:${tailscalePort8443}`)) {
+  throw new Error(`tailscale start did not map hostname port to Funnel HTTPS port\n${tailscalePortFailure}`);
 }
 
 const listed = run(['settings', 'list'], env);

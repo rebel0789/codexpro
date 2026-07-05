@@ -541,11 +541,22 @@ function decodeGitQuotedPath(pathText: string): string {
   return decoded;
 }
 
-function normalizePatchPath(rawPath: string): string | undefined {
+function stripPatchPathComponents(filePath: string, stripComponents: number): string {
+  if (path.isAbsolute(filePath) || path.win32.isAbsolute(filePath)) return filePath;
+  let stripped = filePath;
+  for (let i = 0; i < stripComponents; i += 1) {
+    const slash = stripped.indexOf("/");
+    if (slash < 0) return stripped;
+    stripped = stripped.slice(slash + 1);
+  }
+  return stripped;
+}
+
+function normalizePatchPath(rawPath: string, stripComponents = 1): string | undefined {
   const raw = rawPath.trim().split("\t")[0]?.trim();
   if (!raw || raw === "/dev/null") return undefined;
   const unquoted = raw.startsWith('"') && raw.endsWith('"') ? decodeGitQuotedPath(raw.slice(1, -1)) : raw;
-  return unquoted.replace(/^(?:a|b)\//, "");
+  return stripPatchPathComponents(unquoted, stripComponents);
 }
 
 function patchHasSymlinkMode(patch: string): boolean {
@@ -559,7 +570,7 @@ function patchTouchedPaths(patch: string): string[] {
       const normalized = normalizePatchPath(line.slice(4));
       if (normalized) paths.add(normalized);
     } else if (line.startsWith("rename from ") || line.startsWith("rename to ") || line.startsWith("copy from ") || line.startsWith("copy to ")) {
-      const normalized = normalizePatchPath(line.replace(/^(?:rename|copy) (?:from|to) /, ""));
+      const normalized = normalizePatchPath(line.replace(/^(?:rename|copy) (?:from|to) /, ""), 0);
       if (normalized) paths.add(normalized);
     }
   }

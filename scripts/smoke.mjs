@@ -446,6 +446,18 @@ await expectToolError('apply_patch', {
 await expectToolError('apply_patch', {
   workspace_id: ws,
   patch: [
+    'diff --git old/.env new/.env',
+    'new file mode 100644',
+    'index 0000000..e69de29',
+    '--- /dev/null',
+    '+++ new/.env',
+    '@@ -0,0 +1 @@',
+    '+SAFE_PLACEHOLDER=1'
+  ].join('\n') + '\n'
+}, /blocked/i);
+await expectToolError('apply_patch', {
+  workspace_id: ws,
+  patch: [
     'diff --git "a/foo\\057.env" "b/foo\\057.env"',
     'new file mode 100644',
     'index 0000000..e69de29',

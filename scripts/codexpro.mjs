@@ -1032,6 +1032,38 @@ function waitForCloudflareUrl(child, timeoutMs = 45000) {
   });
 }
 
+function waitForTunnelStartup(child, label, timeoutMs = 1000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.off('exit', onExit);
+      child.off('error', onError);
+    };
+    const settle = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      fn(value);
+    };
+    const outputTail = () => {
+      const tail = typeof child.codexproLogTail === 'function' ? child.codexproLogTail() : '';
+      return tail ? `\n\nRecent ${label} output:\n${tail}` : '';
+    };
+    const onExit = (code, signal) => {
+      settle(reject, new Error(`${label} exited before startup completed, code=${code} signal=${signal}${outputTail()}`));
+    };
+    const onError = (error) => {
+      settle(reject, new Error(`${label} failed before startup completed: ${error instanceof Error ? error.message : String(error)}${outputTail()}`));
+    };
+    timer = setTimeout(() => settle(resolve), timeoutMs);
+    timer.unref();
+    child.once('exit', onExit);
+    child.once('error', onError);
+  });
+}
+
 function outboundProxyFromEnv(env = process.env) {
   return env.HTTPS_PROXY || env.https_proxy || env.ALL_PROXY || env.all_proxy || env.HTTP_PROXY || env.http_proxy || '';
 }
@@ -1114,6 +1146,14 @@ function normalizePublicHostname(value) {
 
 function publicBaseFromHostname(hostname) {
   return `https://${normalizePublicHostname(hostname)}`;
+}
+
+function tailscaleFunnelHttpsPort(publicBase) {
+  const port = new URL(publicBase).port || '443';
+  if (!['443', '8443', '10000'].includes(port)) {
+    throw new Error('Tailscale Funnel HTTPS port must be 443, 8443, or 10000.');
+  }
+  return port;
 }
 
 function readTokenFile(filePath) {
@@ -3812,8 +3852,12 @@ async function main() {
   if (tunnel === 'tailscale') {
     const tailscalePath = resolveTailscale(effectiveArgs);
     const publicBase = publicBaseFromHostname(stableHostname);
+    const httpsPort = tailscaleFunnelHttpsPort(publicBase);
+    const tailscaleArgs = ['funnel'];
+    if (httpsPort !== '443') tailscaleArgs.push(`--https=${httpsPort}`);
+    tailscaleArgs.push(localBase);
     statusLine('wait', `Opening Tailscale Funnel for ${publicBase}`);
-    cloudflared = spawnLogged('tailscale', tailscalePath, ['funnel', localBase], { cwd: root, env: process.env, verbose: verboseLogs });
+    cloudflared = spawnLogged('tailscale', tailscalePath, tailscaleArgs, { cwd: root, env: process.env, verbose: verboseLogs });
     try {
       await waitForPublicHealth(publicBase, token, cloudflared, 'Tailscale Funnel');
     } catch (error) {
@@ -3890,6 +3934,7 @@ async function main() {
       }
       cloudflared.once('exit', removeCredentials);
       cloudflared.once('error', removeCredentials);
+      await waitForTunnelStartup(cloudflared, 'cloudflared');
       publicBase = `https://${quickTunnel.hostname}`;
     } else {
       cloudflared = spawnLogged('cloudflared', cloudflaredPath, ['tunnel', '--url', localBase], { cwd: root, env: process.env, verbose: verboseLogs });
