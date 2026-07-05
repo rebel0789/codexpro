@@ -190,6 +190,11 @@ const staleRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-sta
 const ngrokRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-ngrok-'));
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-home-'));
 const env = { ...process.env, CODEXPRO_HOME: home };
+function withoutProxyEnv(input) {
+  const next = { ...input };
+  for (const key of ['HTTPS_PROXY', 'https_proxy', 'ALL_PROXY', 'all_proxy', 'HTTP_PROXY', 'http_proxy']) delete next[key];
+  return next;
+}
 
 const empty = run(['settings', 'show', '--root', root], env);
 if (!empty.includes('No saved settings')) {
@@ -484,12 +489,79 @@ await withStartedCodexPro([
   '--token',
   'codexpro-cloudflare-token',
   '--no-copy-url'
-], env, async () => {
+], withoutProxyEnv(env), async () => {
   const runtime = await waitForJson(cloudflarePath, (data) => data.endpoint?.includes('trycloudflare.com'), 'cloudflare runtime status');
   if (runtime.endpoint.includes('api.trycloudflare.com') || !runtime.endpoint.startsWith('https://real-codexpro.trycloudflare.com/mcp')) {
     throw new Error(`quick tunnel saved the wrong endpoint: ${JSON.stringify(runtime)}`);
-	}
+  }
 });
+
+const proxyCloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-proxy-'));
+const proxyCloudflarePort = await getFreePort();
+const proxyCloudflarePath = await runtimeStatusPath(proxyCloudflareRoot, home);
+const fakeBin = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-fake-bin-'));
+const fakeCurl = path.join(fakeBin, 'curl');
+const curlArgsPath = path.join(home, 'fake-curl-args.json');
+const cloudflaredArgsPath = path.join(home, 'fake-cloudflared-proxy-args.json');
+const fakeProxyCloudflared = path.join(home, 'fake-cloudflared-proxy.mjs');
+await fs.writeFile(fakeCurl, [
+  '#!/usr/bin/env node',
+  "const fs = require('node:fs');",
+  "fs.writeFileSync(process.env.CODEXPRO_FAKE_CURL_ARGS, JSON.stringify(process.argv.slice(2)));",
+  "console.log(JSON.stringify({ success: true, result: { id: 'proxy-tunnel-id', hostname: 'proxy-codexpro.trycloudflare.com', account_tag: 'account-tag', secret: 'proxy-secret-1234567890' } }));",
+  ''
+].join('\n'), { mode: 0o700 });
+await fs.writeFile(fakeProxyCloudflared, [
+  '#!/usr/bin/env node',
+  "import fs from 'node:fs';",
+  "if (process.argv.includes('--version')) { console.log('cloudflared version 2026.6.0'); process.exit(0); }",
+  "const args = process.argv.slice(2);",
+  "fs.writeFileSync(process.env.CODEXPRO_FAKE_CLOUDFLARED_ARGS, JSON.stringify(args));",
+  "const credentialsPath = args[args.indexOf('--credentials-file') + 1];",
+  "const credentials = JSON.parse(fs.readFileSync(credentialsPath, 'utf8'));",
+  "if (credentials.TunnelID !== 'proxy-tunnel-id' || credentials.AccountTag !== 'account-tag' || credentials.TunnelSecret !== 'proxy-secret-1234567890') process.exit(4);",
+  "setInterval(() => {}, 1000);",
+  ''
+].join('\n'), { mode: 0o700 });
+await withStartedCodexPro([
+  '--root',
+  proxyCloudflareRoot,
+  '--tunnel',
+  'cloudflare',
+  '--cloudflared',
+  fakeProxyCloudflared,
+  '--port',
+  String(proxyCloudflarePort),
+  '--token',
+  'codexpro-cloudflare-proxy-token',
+  '--no-copy-url'
+], {
+  ...env,
+  PATH: `${fakeBin}${path.delimiter}${process.env.PATH ?? ''}`,
+  HTTPS_PROXY: 'http://proxy.example.test:8080',
+  CODEXPRO_FAKE_CURL_ARGS: curlArgsPath,
+  CODEXPRO_FAKE_CLOUDFLARED_ARGS: cloudflaredArgsPath
+}, async () => {
+  const runtime = await waitForJson(proxyCloudflarePath, (data) => data.endpoint?.includes('proxy-codexpro.trycloudflare.com'), 'proxy cloudflare runtime status');
+  if (!runtime.endpoint.startsWith('https://proxy-codexpro.trycloudflare.com/mcp')) {
+    throw new Error(`proxy quick tunnel saved the wrong endpoint: ${JSON.stringify(runtime)}`);
+  }
+});
+const curlArgs = JSON.parse(await fs.readFile(curlArgsPath, 'utf8'));
+if (!curlArgs.includes('--proxy') || !curlArgs.includes('http://proxy.example.test:8080') || !curlArgs.includes('https://api.trycloudflare.com/tunnel')) {
+  throw new Error(`proxy quick tunnel did not call curl through proxy: ${JSON.stringify(curlArgs)}`);
+}
+const cloudflaredArgs = JSON.parse(await fs.readFile(cloudflaredArgsPath, 'utf8'));
+if (!cloudflaredArgs.includes('--credentials-file') || !cloudflaredArgs.includes('run') || !cloudflaredArgs.includes('proxy-tunnel-id')) {
+  throw new Error(`proxy quick tunnel did not run cloudflared with credentials: ${JSON.stringify(cloudflaredArgs)}`);
+}
+const credentialsPath = cloudflaredArgs[cloudflaredArgs.indexOf('--credentials-file') + 1];
+try {
+  await fs.access(credentialsPath);
+  throw new Error(`proxy quick tunnel credentials were not cleaned up: ${credentialsPath}`);
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
 
 const namedCloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-named-'));
 const namedCloudflarePort = await getFreePort();

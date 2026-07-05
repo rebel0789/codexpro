@@ -102,6 +102,8 @@ ChatGPT web needs a public HTTPS Server URL. CodexPro supports:
 - Tailscale Funnel: `codexpro tailscale --hostname your-device.your-tailnet.ts.net`
 - Local only: `codexpro start --tunnel none`
 
+Cloudflare quick tunnels honor `HTTPS_PROXY`, `ALL_PROXY`, or `HTTP_PROXY` when those env vars are set.
+
 Stable modes should use a stable CodexPro token:
 
 ```bash

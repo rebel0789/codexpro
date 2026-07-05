@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added Tailscale Funnel as a saved tunnel/profile option, including `codexpro tailscale --hostname ...`, launcher support, admin profile support, and settings smoke coverage.
+- Added proxy-aware Cloudflare quick tunnels: when proxy env vars are set, CodexPro requests quick-tunnel credentials through `curl --proxy`, runs `cloudflared` with a temporary credentials file, ignores Cloudflare API URLs, and cleans the credentials file after shutdown.
 - Bounded browser-facing tool-card structured payloads and binary-file text checks so CodexPro emits less data without reducing normal tool-result or binary-detection quality.
 - Replaced the overlong README with a shorter install, tunnel, safety, RAM-boundary, and development guide.
 - Added a guarded `apply_patch` MCP tool for unified-diff edits inside workspace write mode, with blocked-path and secret-content checks before patches are applied.
