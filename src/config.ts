@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DEFAULT_ANALYSIS_LIMITS, type AnalysisLimits } from "./analysis/types.js";
 
 export type BashMode = "off" | "safe" | "full";
 export type BashTranscriptMode = "compact" | "full";
@@ -34,6 +35,9 @@ export interface CodexProConfig {
   blockedGlobs: string[];
   contextDir: string;
   toolCards: boolean;
+  connectionTest: boolean;
+  analysisEnabled: boolean;
+  analysisLimits: AnalysisLimits;
 }
 
 const DEFAULT_BLOCKED_GLOBS = [
@@ -317,6 +321,15 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     httpSessionTtlMs: numberFrom(process.env.CODEXPRO_HTTP_SESSION_TTL_MS, 30 * 60_000, 60_000, 24 * 60 * 60_000),
     blockedGlobs: [...DEFAULT_BLOCKED_GLOBS, ...extraBlockedGlobs],
     contextDir: contextDirFrom(process.env.CODEXPRO_CONTEXT_DIR),
-    toolCards: boolFrom(toolCardsArg ?? process.env.CODEXPRO_TOOL_CARDS, false)
+    toolCards: boolFrom(toolCardsArg ?? process.env.CODEXPRO_TOOL_CARDS, false),
+    connectionTest: boolFrom(process.env.CODEXPRO_CONNECTION_TEST, false),
+    analysisEnabled: boolFrom(process.env.CODEXPRO_ANALYSIS, true),
+    analysisLimits: {
+      maxInventoryFiles: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_INVENTORY_FILES, DEFAULT_ANALYSIS_LIMITS.maxInventoryFiles, 100, 100_000),
+      maxAnalyzedFiles: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_ANALYZED_FILES, DEFAULT_ANALYSIS_LIMITS.maxAnalyzedFiles, 10, 50_000),
+      maxScannedBytes: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_SCANNED_BYTES, DEFAULT_ANALYSIS_LIMITS.maxScannedBytes, 1_000_000, 512 * 1024 * 1024),
+      maxSymbols: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_SYMBOLS, DEFAULT_ANALYSIS_LIMITS.maxSymbols, 100, 1_000_000),
+      maxRelationships: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_RELATIONSHIPS, DEFAULT_ANALYSIS_LIMITS.maxRelationships, 100, 2_000_000)
+    }
   };
 }

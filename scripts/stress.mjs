@@ -774,8 +774,48 @@ async function runCardStress(root) {
     });
     assert(typeof search.structuredContent.text === 'string' && search.structuredContent.text.includes('--flag'), 'tool-card search did not include structured text');
     assert(search.structuredContent.text.includes('[structured field truncated to 30000 chars]'), 'tool-card search text was not capped');
+    const structured = await client.request('tools/call', {
+      name: 'search',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, query: '--flag', path: 'many', intent: 'text', max_results: 2000 }
+    });
+    assert(structured.structuredContent.analysis.groups.references.length <= 24, `structured card references were not compacted: ${structured.structuredContent.analysis.groups.references.length}`);
+    assert(structured.structuredContent.analysis.matches.length <= 80, `structured card match summary was not compacted: ${structured.structuredContent.analysis.matches.length}`);
+    const inspected = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: opened.structuredContent.workspace_id } });
+    assert(inspected.structuredContent.files.length <= 120, `workspace card file inventory was not compacted: ${inspected.structuredContent.files.length}`);
   } finally {
     client.close();
+  }
+}
+
+async function runAnalysisBudgetStress() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-analysis-'));
+  await fs.mkdir(path.join(root, 'src'), { recursive: true });
+  for (let index = 0; index < 105; index += 1) {
+    await fs.writeFile(path.join(root, 'src', `module-${String(index).padStart(3, '0')}.ts`), `export function module${index}() { return ${index}; }\n`, 'utf8');
+  }
+  await fs.writeFile(path.join(root, '.env'), 'PRIVATE_TOKEN=never-visible\n', 'utf8');
+  const client = await initClient(root, {
+    CODEXPRO_ANALYSIS_MAX_INVENTORY_FILES: '100',
+    CODEXPRO_ANALYSIS_MAX_ANALYZED_FILES: '100'
+  });
+  try {
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const inspected = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: opened.structuredContent.workspace_id } });
+    assert(inspected.structuredContent.coverage.truncated === true, `analysis inventory did not report truncation: ${JSON.stringify(inspected.structuredContent.coverage)}`);
+    assert(inspected.structuredContent.files.length === 100, `expected 100 bounded inventory files, got ${inspected.structuredContent.files.length}`);
+    assert(!inspected.structuredContent.files.some((file) => file.path === '.env'), 'analysis inventory exposed blocked .env');
+    const limitedOutput = await client.request('tools/call', {
+      name: 'inspect_workspace',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, max_files: 25, max_symbols: 10, max_relationships: 5 }
+    });
+    assert(limitedOutput.structuredContent.files.length === 25, `inspect max_files returned ${limitedOutput.structuredContent.files.length} records`);
+    assert(limitedOutput.structuredContent.symbols.length === 10, `inspect max_symbols returned ${limitedOutput.structuredContent.symbols.length} records`);
+    assert(limitedOutput.structuredContent.returned.files === 25 && limitedOutput.structuredContent.returned.symbols === 10, `inspect returned counts were incorrect: ${JSON.stringify(limitedOutput.structuredContent.returned)}`);
+    assert(limitedOutput.structuredContent.output_limited === true, 'inspect output limit was not exposed in structured content');
+    assert(limitedOutput.structuredContent.warnings.some((warning) => warning.includes('Structured output was limited')), 'inspect output limit did not report a warning');
+  } finally {
+    client.close();
+    await fs.rm(root, { recursive: true, force: true });
   }
 }
 
@@ -791,4 +831,5 @@ await runSupertoolModeStress(root);
 await runShowChangesStatsStress();
 await runMinimalHandoffStress(root);
 await runCardStress(root);
+await runAnalysisBudgetStress();
 console.log(`✓ stress test passed (${root})`);

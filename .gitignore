@@ -7,6 +7,7 @@ dist/
 .ai-bridge/
 .hallmark/
 .playwright-cli/
+.worktrees/
 output/
 CODEXPRO_MCP_REPORT.md
 *.local.md

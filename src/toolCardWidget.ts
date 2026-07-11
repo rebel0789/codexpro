@@ -3,6 +3,7 @@ export const TOOL_CARD_LEGACY_URIS = ["ui://widget/codexpro-tool-card-v8.html"];
 export const TOOL_CARD_MIME_TYPE = "text/html;profile=mcp-app";
 
 export const toolCardWidgetHtml = String.raw`
+<meta charset="utf-8">
 <div id="root" class="wrap">
   <article class="card pending">
     <div class="rail"></div>
@@ -456,6 +457,7 @@ export const toolCardWidgetHtml = String.raw`
       open_current_workspace: "Workspace",
       open_workspace: "Workspace",
       workspace_snapshot: "Workspace snapshot",
+      inspect_workspace: "Workspace analysis",
       tree: "File tree",
       write: "File write",
       edit: "Exact edit",
@@ -483,6 +485,7 @@ export const toolCardWidgetHtml = String.raw`
     if (tool === "list_workspaces") return "W";
     if (tool === "open_current_workspace" || tool === "open_workspace") return "W";
     if (tool === "workspace_snapshot") return "W";
+    if (tool === "inspect_workspace") return "I";
     if (tool === "tree") return "T";
     if (tool === "write") return "W";
     if (tool === "edit") return "E";
@@ -518,6 +521,10 @@ export const toolCardWidgetHtml = String.raw`
       return "tools " + (data?.toolMode || data?.tool_mode || "-") + ", bash " + (data?.bashMode || data?.bash_mode || "-") + (session ? ", session " + session : "");
     }
     if (data?.codexpro_tool === "workspace_snapshot") return data?.root || "Workspace snapshot";
+    if (data?.codexpro_tool === "inspect_workspace") {
+      const coverage = data?.coverage || {};
+      return (coverage.analyzedFiles ?? coverage.analyzed_files ?? 0) + " files analyzed, " + (coverage.symbolCount ?? coverage.symbol_count ?? 0) + " symbols";
+    }
     if (data?.codexpro_tool === "git_status") {
       const count = Array.isArray(data?.changed_files) ? data.changed_files.length : 0;
       return count ? count + " changed entries" : "Working tree clean";
@@ -625,6 +632,97 @@ export const toolCardWidgetHtml = String.raw`
       '</div>' +
       state +
       diff +
+      '</div></article>';
+  }
+
+  function compactRows(values, code, max = 8) {
+    const items = Array.isArray(values) ? values : [];
+    const rows = items.slice(0, max).map((value) => {
+      const label = typeof value === "string" ? value : (value?.path || value?.label || value?.name || "item");
+      const detail = typeof value === "object" && value ? (value?.reasons || []).join(", ") : "";
+      return '<div class="file-row"><span class="file-code">' + esc(code) + '</span><span class="file-name">' + esc(label + (detail ? ": " + detail : "")) + '</span></div>';
+    }).join("");
+    const more = items.length > max ? '<div class="empty">+' + esc(items.length - max) + ' more</div>' : "";
+    return '<div class="file-list">' + (rows || '<div class="empty">None.</div>') + more + '</div>';
+  }
+
+  function renderWorkspaceAnalysis(data) {
+    const coverage = data.coverage || {};
+    const languages = Array.isArray(data.languages) ? data.languages : [];
+    const projects = Array.isArray(data.project_types) ? data.project_types : [];
+    const entrypoints = Array.isArray(data.entrypoints) ? data.entrypoints : [];
+    const areas = Array.isArray(data.areas) ? data.areas : [];
+    const symbols = Array.isArray(data.symbols) ? data.symbols : [];
+    const relationships = Array.isArray(data.relationships) ? data.relationships : [];
+    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
+    const partial = Boolean(coverage.truncated || data.output_limited);
+    const pills = [
+      pill(projects.join(", ") || "project", "info"),
+      pill(languages.length + " languages"),
+      partial ? pill("limited", "warn") : pill("complete", "good")
+    ].join("");
+    const relationshipRows = relationships.slice(0, 8).map((edge) =>
+      '<div class="file-row"><span class="file-code">' + esc(edge?.kind || "edge") + '</span><span class="file-name">' + esc((edge?.from || "?") + " → " + (edge?.to || "?")) + '</span></div>'
+    ).join("");
+    return '<article class="card">' + header(data, pills) + '<div class="body">' +
+      '<div class="summary">' +
+      summaryItem("Files", coverage.inventoryFiles ?? coverage.inventory_files ?? 0) +
+      summaryItem("Analyzed", coverage.analyzedFiles ?? coverage.analyzed_files ?? 0) +
+      summaryItem("Symbols", coverage.symbolCount ?? coverage.symbol_count ?? symbols.length) +
+      '</div>' +
+      '<div class="section-label">Entrypoints</div>' + compactRows(entrypoints, "entry") +
+      fold("Areas", areas.length + " areas", compactRows(areas, "area"), false) +
+      fold("Symbols", symbols.length + " symbols", compactRows(symbols, "sym"), false) +
+      fold("Relationships", relationships.length + " edges", '<div class="file-list">' + (relationshipRows || '<div class="empty">None.</div>') + '</div>', false) +
+      (warnings.length ? fold("Warnings", warnings.length + " warnings", compactRows(warnings, "warn"), false) : "") +
+      '</div></article>';
+  }
+
+  function renderStructuredSearch(data) {
+    const analysis = data.analysis || {};
+    const groups = analysis.groups || {};
+    const order = ["definitions", "references", "tests", "configuration", "documentation", "other"];
+    const count = order.reduce((sum, name) => sum + (Array.isArray(groups[name]) ? groups[name].length : 0), 0);
+    const sections = order.map((name) => {
+      const matches = Array.isArray(groups[name]) ? groups[name] : [];
+      if (!matches.length) return "";
+      const rows = matches.slice(0, 8).map((match) =>
+        '<div class="hit"><div class="hit-file">' + esc((match.path || "match") + ":" + (match.line || 0)) + '</div><div class="hit-text">' + esc((match.text || "") + (match.reasons?.length ? ": " + match.reasons.join(", ") : "")) + '</div></div>'
+      ).join("");
+      const more = matches.length > 8 ? '<div class="empty">+' + esc(matches.length - 8) + ' more</div>' : "";
+      return fold(name, matches.length + " matches", '<div class="search">' + rows + more + '</div>', name === "definitions");
+    }).join("");
+    const coverage = analysis.coverage || {};
+    const pills = [pill(count + " grouped matches", "info"), pill(analysis.intent || "structured"), coverage.truncated ? pill("partial", "warn") : ""].join("");
+    return '<article class="card">' + header(data, pills) + '<div class="body">' +
+      '<div class="summary">' + summaryItem("Definitions", groups.definitions?.length ?? 0) + summaryItem("References", groups.references?.length ?? 0) + summaryItem("Tests", groups.tests?.length ?? 0) + '</div>' +
+      (sections || '<div class="empty">No grouped matches.</div>') +
+      '</div></article>';
+  }
+
+  function renderChangeAnalysis(data) {
+    const analysis = data.analysis || {};
+    const files = Array.isArray(data.changed_files) ? data.changed_files : [];
+    const risks = Array.isArray(analysis.risk_signals) ? analysis.risk_signals : [];
+    const tests = Array.isArray(analysis.related_tests) ? analysis.related_tests : [];
+    const commands = Array.isArray(analysis.recommended_commands) ? analysis.recommended_commands : [];
+    const affected = Array.isArray(analysis.affected_areas) ? analysis.affected_areas : [];
+    const pills = [
+      pill(data.changed ? "changed" : "clean", data.changed ? "info" : "good"),
+      risks.length ? pill(risks.length + " risks", "warn") : pill("no risks", "good"),
+      pill("+" + (data.additions ?? 0), "good"),
+      pill("-" + (data.deletions ?? 0), "bad")
+    ].join("");
+    const commandRows = commands.slice(0, 8).map((item) =>
+      '<div class="file-row"><span class="file-code">run</span><span class="file-name">' + esc(item?.command || "") + '</span></div>'
+    ).join("");
+    return '<article class="card">' + header(data, pills) + '<div class="body">' +
+      '<div class="summary">' + summaryItem("Files", files.length) + summaryItem("Areas", affected.length) + summaryItem("Tests", tests.length) + '</div>' +
+      '<div class="section-label">Affected areas</div>' + compactRows(affected, "area") +
+      fold("Risk signals", risks.length + " signals", compactRows(risks, "risk"), risks.length > 0) +
+      fold("Related tests", tests.length + " tests", compactRows(tests, "test"), false) +
+      fold("Verification", commands.length + " commands", '<div class="file-list">' + (commandRows || '<div class="empty">None.</div>') + '</div>', false) +
+      (data.diff ? fold("Diff", "+" + (data.additions ?? 0) + " -" + (data.deletions ?? 0), codebox("diff", renderDiff(data.diff), ""), false) : "") +
       '</div></article>';
   }
 
@@ -915,10 +1013,12 @@ export const toolCardWidgetHtml = String.raw`
       root.innerHTML = renderWorkspaces(data);
     } else if (tool === "open_current_workspace" || tool === "open_workspace" || tool === "workspace_snapshot") {
       root.innerHTML = renderWorkspace(data);
+    } else if (tool === "inspect_workspace") {
+      root.innerHTML = renderWorkspaceAnalysis(data);
     } else if (tool === "git_status") {
       root.innerHTML = renderStatus(data);
     } else if (tool === "show_changes") {
-      root.innerHTML = renderChanges(data);
+      root.innerHTML = data.analysis ? renderChangeAnalysis(data) : renderChanges(data);
     } else if (tool === "handoff_to_agent" || tool === "handoff_to_codex") {
       root.innerHTML = renderHandoff(data);
     } else if (tool === "write" || tool === "edit" || tool === "apply_patch" || tool === "git_diff" || tool === "export_pro_context" || tool === "read") {
@@ -926,7 +1026,7 @@ export const toolCardWidgetHtml = String.raw`
     } else if (tool === "bash") {
       root.innerHTML = renderBash(data);
     } else if (tool === "search") {
-      root.innerHTML = renderSearch(data);
+      root.innerHTML = data.analysis ? renderStructuredSearch(data) : renderSearch(data);
     } else if (tool === "read_handoff") {
       root.innerHTML = renderTextSummary(data, "handoff");
     } else if (tool === "codex_context") {

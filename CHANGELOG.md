@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added bounded multi-language repository analysis, grouped search results, change-impact and test recommendations, `codexpro inspect` / `codexpro review` CLI commands, and compact opt-in tool cards.
+- Added `codexpro connection-test`, a read-only connector profile with no bash or tool cards, plus request-arrival logging and current ChatGPT Plugins troubleshooting.
 - Added Tailscale Funnel as a saved tunnel/profile option, including `codexpro tailscale --hostname ...`, launcher support, admin profile support, and settings smoke coverage.
 - Added proxy-aware Cloudflare quick tunnels: when proxy env vars are set, CodexPro requests quick-tunnel credentials through `curl --proxy`, runs `cloudflared` with a temporary credentials file, ignores Cloudflare API URLs, and cleans the credentials file after shutdown.
 - Hardened Codex handoff execution on Windows by resolving spawnable Codex shims, asking Codex to read the plan file instead of argv-passing the whole plan, and recording git status in handoff artifacts.

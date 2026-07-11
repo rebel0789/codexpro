@@ -16,6 +16,7 @@ import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
 import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
+import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -148,6 +149,7 @@ function logToolCall(name: string, status: "ok" | "error", started: number): voi
 }
 
 function registerToolCardResource(server: McpServer, config: CodexProConfig): void {
+  if (config.connectionTest) return;
   const s = server as any;
   if (typeof s.registerResource !== "function") {
     throw new Error("Unsupported MCP SDK: CodexPro widgets require registerResource.");
@@ -311,6 +313,7 @@ const MINIMAL_TOOL_NAMES = [
 
 const STANDARD_TOOL_NAMES = [
   ...MINIMAL_TOOL_NAMES,
+  "inspect_workspace",
   "tree",
   "search",
   "load_skill",
@@ -330,6 +333,7 @@ const FULL_TOOL_NAMES = [
   "open_current_workspace",
   "open_workspace",
   "workspace_snapshot",
+  "inspect_workspace",
   "tree",
   "search",
   "read",
@@ -347,6 +351,18 @@ const FULL_TOOL_NAMES = [
   "handoff_to_agent",
   "handoff_to_codex"
 ] as const;
+
+const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
+  SUPERTOOL_NAME,
+  "codexpro_self_test",
+  "write",
+  "edit",
+  "apply_patch",
+  "bash",
+  "export_pro_context",
+  "handoff_to_agent",
+  "handoff_to_codex"
+]);
 
 function codexSessionToolNames(config: CodexProConfig): string[] {
   if (config.codexSessions === "off") return [];
@@ -373,6 +389,16 @@ function toolNamesForMode(config: CodexProConfig): string[] {
     }
   }
   if (config.writeMode === "handoff" && !names.includes("handoff_to_agent")) names.push("handoff_to_agent");
+  if (!config.analysisEnabled) {
+    const analysisIndex = names.indexOf("inspect_workspace");
+    if (analysisIndex !== -1) names.splice(analysisIndex, 1);
+  }
+  if (config.connectionTest) {
+    for (const hiddenTool of CONNECTION_TEST_HIDDEN_TOOLS) {
+      const toolIndex = names.indexOf(hiddenTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
+  }
   for (const name of codexSessionToolNames(config)) {
     if (!names.includes(name)) names.push(name);
   }
@@ -395,10 +421,12 @@ function registeredToolNames(server: McpServer): string[] {
 }
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
+  if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
   if (name === "bash" && config.bashMode === "off") return false;
   if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
+  if (name === "inspect_workspace" && !config.analysisEnabled) return false;
   if (name === "handoff_to_agent" && config.writeMode === "handoff") return true;
   if (config.toolMode === "full") return true;
   if (config.toolMode === "minimal") return MINIMAL_TOOLS.has(name);
@@ -421,7 +449,9 @@ function registerCodexTool(
 
 function serverInstructions(config: CodexProConfig): string {
   const editInstruction =
-    config.writeMode === "workspace"
+    config.connectionTest
+      ? "4. Connection test mode is read-only. Write, patch, export, and handoff-writing tools are unavailable."
+      : config.writeMode === "workspace"
       ? "4. Edit source files with write/edit/apply_patch. After edits, call show_changes once for git status, diff stats, and review diff."
       : config.writeMode === "handoff"
         ? "4. Source writes are disabled and generic write/edit/apply_patch tools are unavailable. Use handoff_to_agent/handoff_to_codex for plans."
@@ -517,27 +547,37 @@ function normalizeGitOutput(output: string): string {
 }
 
 function decodeGitQuotedPath(pathText: string): string {
+  const input = pathText.startsWith('"') && pathText.endsWith('"') ? pathText.slice(1, -1) : pathText;
   let decoded = "";
-  for (let i = 0; i < pathText.length; i += 1) {
-    const char = pathText[i];
+  let escapedBytes: number[] = [];
+  const flushEscapedBytes = () => {
+    if (!escapedBytes.length) return;
+    decoded += Buffer.from(escapedBytes).toString("utf8");
+    escapedBytes = [];
+  };
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
     if (char !== "\\") {
+      flushEscapedBytes();
       decoded += char;
       continue;
     }
     i += 1;
-    const escaped = pathText[i];
-    if (escaped === undefined) throw new CodexProError(`Invalid quoted patch path: ${pathText}`);
+    const escaped = input[i];
+    if (escaped === undefined) throw new CodexProError(`Invalid quoted Git path: ${pathText}`);
     if (/[0-7]/.test(escaped)) {
       let octal = escaped;
-      for (let j = 0; j < 2 && i + 1 < pathText.length && /[0-7]/.test(pathText[i + 1]); j += 1) {
+      for (let j = 0; j < 2 && i + 1 < input.length && /[0-7]/.test(input[i + 1]); j += 1) {
         i += 1;
-        octal += pathText[i];
+        octal += input[i];
       }
-      decoded += String.fromCharCode(Number.parseInt(octal, 8));
+      escapedBytes.push(Number.parseInt(octal, 8));
     } else {
+      flushEscapedBytes();
       decoded += ({ a: "\x07", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t", v: "\v" } as Record<string, string>)[escaped] ?? escaped;
     }
   }
+  flushEscapedBytes();
   return decoded;
 }
 
@@ -659,6 +699,21 @@ function changedStatusLines(status: string): string[] {
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line && line !== "(no output)" && !line.startsWith("##"));
+}
+
+function changedPathsFromStatus(lines: string[]): string[] {
+  const paths: string[] = [];
+  for (const line of lines) {
+    let raw: string;
+    if (line.startsWith("?? ")) raw = line.slice(3).trim();
+    else if (line.includes("\t")) raw = line.split("\t").pop()?.trim() ?? "";
+    else if (/^.{2}\s/.test(line)) raw = line.slice(3).trim();
+    else continue;
+    if (raw.includes(" -> ")) raw = raw.split(" -> ").pop() ?? raw;
+    const decoded = decodeGitQuotedPath(raw);
+    if (decoded && !paths.includes(decoded)) paths.push(decoded);
+  }
+  return paths;
 }
 
 function jsonlEvent(event: string, data: Record<string, unknown>): string {
@@ -984,6 +1039,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         writeMode: config.writeMode,
         toolMode: config.toolMode,
         toolCards: config.toolCards,
+        connectionTest: config.connectionTest,
+        analysisEnabled: config.analysisEnabled,
+        analysisLimits: config.analysisLimits,
         inheritEnv: config.inheritEnv,
         contextDir: config.contextDir,
         maxReadBytes: config.maxReadBytes,
@@ -1499,6 +1557,91 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
   registerCodexTool(
     config,
     server,
+    "inspect_workspace",
+    {
+      title: "Inspect Workspace",
+      description: "Build a bounded repository map with languages, project types, entrypoints, areas, symbols, relationships, and coverage warnings.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use default workspace."),
+        path: z.string().optional().describe("Optional workspace-relative area to emphasize. Default: entire workspace."),
+        max_files: z.number().int().min(1).max(100000).optional().describe("Maximum returned file records. Default: 300."),
+        include_symbols: z.boolean().optional().describe("Include symbols in structured output. Default: true."),
+        include_relationships: z.boolean().optional().describe("Include relationships in structured output. Default: true."),
+        max_symbols: z.number().int().min(1).max(100000).optional().describe("Maximum returned symbols. Analysis remains bounded by server config."),
+        max_relationships: z.number().int().min(1).max(250000).optional().describe("Maximum returned relationships. Analysis remains bounded by server config.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Inspecting workspace analysis...",
+        "openai/toolInvocation/invoked": "Workspace analysis ready"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      if (args.path) guard.resolve(workspace, args.path);
+      const result = await inspectWorkspace(config, guard, workspace);
+      const prefix = typeof args.path === "string" && args.path.trim()
+        ? guard.resolve(workspace, args.path).relPath.replace(/^\.\/?$/, "")
+        : "";
+      const inScope = (filePath: string) => !prefix || filePath === prefix || filePath.startsWith(`${prefix}/`);
+      const areaInScope = (areaPath: string) => !prefix || areaPath === "." || inScope(areaPath) || prefix.startsWith(`${areaPath}/`);
+      const fileLimit = config.toolCards ? 120 : limitInt(args.max_files, 300, 1, config.analysisLimits.maxInventoryFiles);
+      const symbolLimit = config.toolCards ? 80 : limitInt(args.max_symbols, 500, 1, config.analysisLimits.maxSymbols);
+      const relationshipLimit = config.toolCards ? 120 : limitInt(args.max_relationships, 800, 1, config.analysisLimits.maxRelationships);
+      const scopedFiles = result.files.filter((file) => inScope(file.path));
+      const scopedSymbols = result.symbols.filter((symbol) => inScope(symbol.path));
+      const scopedRelationships = result.relationships.filter((relationship) => inScope(relationship.from) || inScope(relationship.to));
+      const files = scopedFiles.slice(0, fileLimit);
+      const symbols = args.include_symbols === false
+        ? []
+        : scopedSymbols.slice(0, symbolLimit);
+      const relationships = args.include_relationships === false
+        ? []
+        : scopedRelationships.slice(0, relationshipLimit);
+      const outputLimited = files.length < scopedFiles.length ||
+        (args.include_symbols !== false && symbols.length < scopedSymbols.length) ||
+        (args.include_relationships !== false && relationships.length < scopedRelationships.length);
+      const outputWarnings = [
+        ...result.warnings,
+        ...(outputLimited ? ["Structured output was limited. Use path or max_* arguments to request a narrower or larger result."] : [])
+      ];
+      const text = [
+        "# Workspace Analysis",
+        "",
+        `Workspace: ${workspace.root}`,
+        `Projects: ${result.projectTypes.join(", ") || "unknown"}`,
+        `Languages: ${result.languages.join(", ") || "unknown"}`,
+        `Entrypoints: ${result.entrypoints.filter(inScope).join(", ") || "none detected"}`,
+        `Coverage: ${result.coverage.analyzedFiles}/${result.coverage.inventoryFiles} files analyzed, ${result.coverage.symbolCount} symbols, ${result.coverage.relationshipCount} relationships${result.coverage.truncated ? " (partial)" : ""}`,
+        `Returned: ${files.length} files, ${symbols.length} symbols, ${relationships.length} relationships`,
+        ...(outputWarnings.length ? ["", "## Warnings", "", ...outputWarnings.map((warning) => `- ${warning}`)] : [])
+      ].join("\n");
+      return textResult(text, {
+        schema_version: 1,
+        workspace_id: workspace.id,
+        root: workspace.root,
+        path: args.path ?? ".",
+        languages: result.languages,
+        project_types: result.projectTypes,
+        entrypoints: result.entrypoints.filter(inScope),
+        important_files: result.importantFiles.filter(inScope),
+        areas: result.areas.filter((area) => areaInScope(area.path)),
+        files,
+        symbols,
+        relationships,
+        coverage: result.coverage,
+        warnings: outputWarnings,
+        output_limited: outputLimited,
+        returned: { files: files.length, symbols: symbols.length, relationships: relationships.length },
+        cache: result.cache
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
     "tree",
     {
       title: "File Tree",
@@ -1543,7 +1686,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         path: z.string().optional().describe("Directory or file relative to workspace root. Default: ."),
         glob: z.string().optional().describe("Optional glob, for example src/**/*.ts."),
         include_hidden: z.boolean().optional().describe("Include hidden files that are not blocked. Default: false."),
-        max_results: z.number().int().min(1).max(2000).optional().describe("Maximum results. Default from config.")
+        max_results: z.number().int().min(1).max(2000).optional().describe("Maximum results. Default from config."),
+        intent: z.enum(["auto", "text", "symbol", "references", "impact"]).optional().describe("Optional structured search intent. Omit for legacy lexical behavior."),
+        symbol: z.string().optional().describe("Optional symbol query. Uses repository analysis and overrides query text."),
+        include_tests: z.boolean().optional().describe("Include related tests in structured results. Default: false.")
       },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: {
@@ -1560,7 +1706,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         root: args.path ?? ".",
         glob: args.glob,
         includeHidden: parseBool(args.include_hidden, false),
-        maxResults: limitInt(args.max_results, config.maxSearchResults, 1, config.maxSearchResults)
+        maxResults: limitInt(args.max_results, config.maxSearchResults, 1, config.maxSearchResults),
+        intent: args.intent,
+        symbol: args.symbol,
+        includeTests: args.include_tests === undefined ? undefined : parseBool(args.include_tests, false)
       });
       const structured: Record<string, unknown> = {
         workspace_id: workspace.id,
@@ -1569,6 +1718,15 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         truncated: result.truncated,
         used: result.used
       };
+      if (result.analysis) {
+        structured.analysis = config.toolCards
+          ? {
+              ...result.analysis,
+              groups: Object.fromEntries(Object.entries(result.analysis.groups).map(([name, matches]) => [name, matches.slice(0, 24)])),
+              matches: result.analysis.matches.slice(0, 80)
+            }
+          : result.analysis;
+      }
       // The tool card widget renders search hits from structuredContent.text.
       // When cards are disabled (the default), including it would only duplicate
       // the human-readable content payload, so omit the large blob in that case.
@@ -1639,6 +1797,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         createDirs: args.create_dirs !== false,
         overwrite: args.overwrite !== false
       });
+      if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
       const text = `# Write File\n\nPath: ${result.path}\nExisted before: ${result.existed}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
       return textResult(text, {
         workspace_id: workspace.id,
@@ -1684,6 +1843,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         replaceAll: parseBool(args.replace_all, false),
         expectedReplacements: args.expected_replacements
       });
+      if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
       const text = `# Edit File\n\nPath: ${result.path}\nReplacements: ${result.replacements}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
       return textResult(text, {
         workspace_id: workspace.id,
@@ -1721,6 +1881,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const result = applyWorkspacePatch(config, guard, workspace, String(args.patch ?? ""));
+      if (result.changed) invalidateWorkspaceAnalysis(workspace.id);
       const text = [
         "# Apply Patch",
         "",
@@ -1913,6 +2074,36 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       if (checkpointWritten) reviewCheckpoints.set(checkpointKey, fingerprint);
       const responseDiff = checkpointHit ? "" : includeDiff ? diff : "";
       const responseStats = checkpointHit ? { additions: 0, deletions: 0, changed: false } : stats;
+      const changedPaths = statusError ? [] : changedPathsFromStatus(changedFiles);
+      let analysis: Record<string, unknown> | undefined;
+      if (config.analysisEnabled && changedPaths.length && !checkpointHit) {
+        try {
+          const impact = await reviewWorkspaceChanges(config, guard, workspace, { changedPaths });
+          analysis = {
+            schema_version: impact.schemaVersion,
+            changed_paths: impact.changedPaths,
+            affected_areas: impact.affectedAreas,
+            dependent_files: impact.dependentFiles,
+            related_tests: impact.relatedTests,
+            risk_signals: impact.riskSignals,
+            recommended_commands: impact.recommendedCommands,
+            coverage: impact.coverage,
+            warnings: impact.warnings,
+            cache: impact.cache
+          };
+        } catch (error) {
+          analysis = {
+            schema_version: 1,
+            changed_paths: changedPaths,
+            affected_areas: [],
+            dependent_files: [],
+            related_tests: [],
+            risk_signals: [],
+            recommended_commands: [],
+            warnings: [`Change analysis unavailable: ${errorText(error)}`]
+          };
+        }
+      }
       const changedText = statusError
         ? `- Git status unavailable: ${statusError}`
         : checkpointHit
@@ -1929,7 +2120,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           ? diffBlock(diff)
             : "\n\nNo diff output."
         : "\n\nDiff omitted by request.";
-      const text = `# Show Changes\n\nWorkspace: ${workspace.root}\n\n## Changed\n\n${changedText}\n\n## Diff stats\n\n+${responseStats.additions} -${responseStats.deletions}${diffText}`;
+      const analysisText = analysis
+        ? `\n\n## Analysis\n\nAffected areas: ${(analysis.affected_areas as string[]).join(", ") || "none"}\nRisks: ${((analysis.risk_signals as Array<{ label?: string }>) ?? []).map((risk) => risk.label).filter(Boolean).join(", ") || "none"}\nRelated tests: ${((analysis.related_tests as Array<{ path?: string }>) ?? []).map((file) => file.path).filter(Boolean).join(", ") || "none"}`
+        : "";
+      const text = `# Show Changes\n\nWorkspace: ${workspace.root}\n\n## Changed\n\n${changedText}\n\n## Diff stats\n\n+${responseStats.additions} -${responseStats.deletions}${diffText}${analysisText}`;
       return textResult(text, {
         workspace_id: workspace.id,
         root: workspace.root,
@@ -1946,7 +2140,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         diff: responseDiff,
         review_since: since,
         review_marked: checkpointWritten,
-        review_checkpoint_hit: checkpointHit
+        review_checkpoint_hit: checkpointHit,
+        ...(analysis ? { analysis } : {})
       });
     }
   );
