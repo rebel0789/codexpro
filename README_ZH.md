@@ -50,7 +50,7 @@ cd /path/to/your/repo
 codexpro setup
 ```
 
-CodexPro 会自动复制 ChatGPT Server URL。到 ChatGPT 打开 `Settings -> Apps -> Advanced settings -> Create app`，粘贴这个 URL，并选择 `Authentication: No Authentication / None`。
+CodexPro 会自动复制 ChatGPT Server URL。先到 `Settings -> Security and login` 打开 Developer mode，再到 `Settings -> Plugins` 创建连接，粘贴这个 URL，并选择 `Authentication: No Authentication / None`。
 
 以后同一个仓库日常启动只需要：
 
@@ -122,16 +122,18 @@ npx codexpro@latest start --root /absolute/path/to/your/repo
 
 ```text
 ChatGPT Settings
--> Apps
--> Advanced settings
+-> Security and login
 -> Developer mode: on
 -> Enforce CSP in developer mode: on
--> Create app
+
+ChatGPT Settings
+-> Plugins
+-> Create
 ```
 
 保留 CSP 开启。CodexPro 的卡片和小组件就是按 CSP 开启的路径设计的，不需要远程脚本、外部字体、iframe 或第三方图片。
 
-在 Create App 页面填写：
+在创建 Plugin 页面填写：
 
 ```text
 Name: CodexPro

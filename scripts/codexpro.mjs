@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { createInterface } from 'node:readline/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
@@ -31,6 +31,9 @@ Usage:
   codexpro start --root /path/to/repo
   codexpro settings
   codexpro doctor
+  codexpro connection-test --root /path/to/repo
+  codexpro inspect --root /path/to/repo [--json]
+  codexpro review --root /path/to/repo [--staged] [--path src/file.ts] [--json]
   codexpro execute-handoff --agent opencode --model provider/model
   codexpro watch-handoff --agent opencode --model provider/model
   codexpro loop-handoff --agent opencode --model provider/model --review-command "node ./reviewer.js --status {{status_file}} --diff {{diff_file}} --plan-file {{plan_file}}"
@@ -111,6 +114,7 @@ Options:
   --open-chatgpt            Open ChatGPT connector settings after the URL is ready.
   --no-auth                 Disable bearer-token auth. Only allowed with --tunnel none.
   --log-requests            Print redacted HTTP request and tool-call logs from the local MCP server.
+  connection-test           Start a read-only connector with request logging and no bash or tool cards.
   --print-env               Print the environment used to launch the server.
   --version, -v             Print the CodexPro version.
   --help                    Show this message.
@@ -314,6 +318,8 @@ function parseArgs(argv) {
     else if (key === 'copy-url') out.copyUrl = true;
     else if (key === 'no-copy-url') out.noCopyUrl = true;
     else if (key === 'dry-run') out.dryRun = true;
+    else if (key === 'json') out.json = true;
+    else if (key === 'staged') out.staged = true;
     else if (key === 'once') out.once = true;
     else if (key === 'confirm') out.confirm = true;
     else if (key === 'no-confirm') out.noConfirm = true;
@@ -360,6 +366,120 @@ function expandHome(input) {
   if (!input || input === '~') return os.homedir();
   if (input.startsWith('~/')) return path.join(os.homedir(), input.slice(2));
   return input;
+}
+
+function analysisChangedPaths(status) {
+  if (!status || status === '(no output)') return [];
+  const paths = [];
+  for (const rawLine of String(status).split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || /^(fatal:|error:|git unavailable)/i.test(line)) continue;
+    let filePath = '';
+    if (line.startsWith('?? ')) filePath = line.slice(3).trim();
+    else if (line.includes('\t')) filePath = line.split('\t').pop()?.trim() ?? '';
+    else if (/^.{2}\s/.test(line)) filePath = line.slice(3).trim();
+    if (filePath.includes(' -> ')) filePath = filePath.split(' -> ').pop() ?? filePath;
+    if (filePath.startsWith('"') && filePath.endsWith('"')) {
+      try { filePath = JSON.parse(filePath); } catch { filePath = filePath.slice(1, -1); }
+    }
+    if (filePath && !paths.includes(filePath)) paths.push(filePath);
+  }
+  return paths;
+}
+
+function assertGitStatusAvailable(status) {
+  const value = String(status || '').trim();
+  if (/^(fatal:|error:|git unavailable or failed:|git exited with status|usage: git )/i.test(value) || /not a git repository/i.test(value)) {
+    throw new Error(`Unable to read Git changes: ${value}`);
+  }
+}
+
+function printWorkspaceInspection(result, json) {
+  const payload = {
+    schema_version: result.schemaVersion,
+    workspace_id: result.workspaceId,
+    root: result.root,
+    languages: result.languages,
+    project_types: result.projectTypes,
+    entrypoints: result.entrypoints,
+    important_files: result.importantFiles,
+    areas: result.areas,
+    files: result.files,
+    symbols: result.symbols,
+    relationships: result.relationships,
+    coverage: result.coverage,
+    warnings: result.warnings,
+    cache: result.cache
+  };
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log([
+    'CodexPro Repository Analysis',
+    '',
+    `Workspace: ${result.root}`,
+    `Projects: ${result.projectTypes.join(', ') || 'unknown'}`,
+    `Languages: ${result.languages.join(', ') || 'unknown'}`,
+    `Entrypoints: ${result.entrypoints.join(', ') || 'none detected'}`,
+    `Important areas: ${result.areas.slice(0, 8).map((area) => `${area.path} (${area.files})`).join(', ') || 'none'}`,
+    `Coverage: ${result.coverage.analyzedFiles}/${result.coverage.inventoryFiles} files, ${result.coverage.symbolCount} symbols, ${result.coverage.relationshipCount} relationships${result.coverage.truncated ? ' (partial)' : ''}`,
+    ...(result.warnings.length ? ['', 'Warnings:', ...result.warnings.map((warning) => `- ${warning}`)] : [])
+  ].join('\n'));
+}
+
+function printChangeReview(result, json) {
+  const payload = {
+    schema_version: result.schemaVersion,
+    changed_files: result.changedPaths,
+    affected_areas: result.affectedAreas,
+    dependent_files: result.dependentFiles,
+    related_tests: result.relatedTests,
+    risk_signals: result.riskSignals,
+    recommended_commands: result.recommendedCommands,
+    coverage: result.coverage,
+    warnings: result.warnings,
+    cache: result.cache
+  };
+  if (json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  console.log([
+    'CodexPro Change Review',
+    '',
+    `Changed files: ${result.changedPaths.join(', ') || 'none'}`,
+    `Affected areas: ${result.affectedAreas.join(', ') || 'none'}`,
+    `Risk: ${result.riskSignals.map((risk) => risk.label).join(', ') || 'none detected'}`,
+    `Related tests: ${result.relatedTests.map((file) => file.path).join(', ') || 'none detected'}`,
+    `Recommended verification: ${result.recommendedCommands.map((item) => item.command).join(', ') || 'none detected'}`,
+    `Coverage: ${result.coverage.analyzedFiles}/${result.coverage.inventoryFiles} files${result.coverage.truncated ? ' (partial)' : ''}`,
+    ...(result.warnings.length ? ['', 'Warnings:', ...result.warnings.map((warning) => `- ${warning}`)] : [])
+  ].join('\n'));
+}
+
+async function runAnalysisCli(command, argv) {
+  const args = parseArgs(argv);
+  const root = realDir(args.root ?? process.cwd());
+  const [{ loadConfig }, { PathGuard, WorkspaceManager }, analysis, git] = await Promise.all([
+    import(pathToFileURL(path.join(projectRoot, 'dist', 'config.js')).href),
+    import(pathToFileURL(path.join(projectRoot, 'dist', 'guard.js')).href),
+    import(pathToFileURL(path.join(projectRoot, 'dist', 'analysis', 'index.js')).href),
+    import(pathToFileURL(path.join(projectRoot, 'dist', 'gitOps.js')).href)
+  ]);
+  const config = loadConfig(['--root', root, '--bash', 'off', '--write', 'off']);
+  const guard = new PathGuard(config);
+  const workspace = new WorkspaceManager(config).defaultWorkspace();
+  if (args.path) guard.resolve(workspace, args.path);
+  if (command === 'inspect') {
+    printWorkspaceInspection(await analysis.inspectWorkspace(config, guard, workspace), Boolean(args.json));
+    return;
+  }
+  const status = git.gitDiffStatus(config, guard, workspace, args.path, Boolean(args.staged));
+  assertGitStatusAvailable(status);
+  const changedPaths = analysisChangedPaths(status);
+  const review = await analysis.reviewWorkspaceChanges(config, guard, workspace, { changedPaths });
+  printChangeReview(review, Boolean(args.json));
 }
 
 function realDir(input) {
@@ -2657,6 +2777,17 @@ function printConnectorBlock(endpoint, token, options = {}) {
     statusLine(opened ? 'ok' : 'warn', opened ? 'Opened ChatGPT connector settings' : 'Could not open ChatGPT automatically');
   }
   console.log('');
+  if (options.connectionTest) {
+    console.log(paint('bold', 'Connection test'));
+    console.log('  1. In ChatGPT, open Settings -> Plugins and create a development plugin.');
+    console.log('  2. Paste the Server URL above and choose Authentication: No Authentication.');
+    console.log('  3. Watch this terminal for: [CodexPro] POST /mcp received');
+    console.log('');
+    console.log('  No POST /mcp     ChatGPT or the tunnel did not reach CodexPro.');
+    console.log('  POST /mcp -> 401 The full Server URL, including codexpro_token, was not used.');
+    console.log('  POST /mcp -> 2xx The MCP connection reached CodexPro successfully.');
+    console.log('');
+  }
   console.log('Next: press Enter to open ChatGPT, paste the copied Server URL, choose Authentication: None.');
   console.log('Keys: Enter open | c copy | o status | h help | q quit');
   return { ...details, copied, opened, mode, toolMode: options.toolMode ?? 'standard' };
@@ -3558,11 +3689,16 @@ function runControlPanel(details, cleanup = cleanupChildren) {
 
 async function main() {
   let argv = process.argv.slice(2);
+  let connectionTest = false;
   if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
     console.log(packageVersion());
     return;
   }
   let subcommand = argv[0];
+  if (subcommand === 'inspect' || subcommand === 'review') {
+    await runAnalysisCli(subcommand, argv.slice(1));
+    return;
+  }
   if (subcommand === 'stable-help') {
     printStableUrlHelp();
     return;
@@ -3625,6 +3761,10 @@ async function main() {
     argv.shift();
     argv.unshift('--tunnel', 'tailscale');
   }
+  if (argv[0] === 'connection-test') {
+    connectionTest = true;
+    argv.shift();
+  }
   if (argv[0] === 'start' || argv[0] === 'connect') argv.shift();
   if (argv[0] === '--version' || argv[0] === '-v' || argv[0] === 'version') {
     console.log(packageVersion());
@@ -3632,6 +3772,14 @@ async function main() {
   }
   if (argv[0] === 'help') argv[0] = '--help';
   const args = parseArgs(argv);
+  if (connectionTest) {
+    args.mode = 'agent';
+    args.toolMode = 'standard';
+    args.write = 'off';
+    args.bash = 'off';
+    args.toolCards = 'off';
+    args.logRequests = true;
+  }
   if (args.help) {
     usage();
     return;
@@ -3710,6 +3858,7 @@ async function main() {
     CODEXPRO_TOOL_MODE: toolMode,
     CODEXPRO_WIDGET_DOMAIN: widgetDomain,
     CODEXPRO_TOOL_CARDS: toolCards ? '1' : '0',
+    CODEXPRO_CONNECTION_TEST: connectionTest ? '1' : '0',
     CODEXPRO_MODE: mode,
     CODEXPRO_TUNNEL_MODE: tunnel === 'none' ? '0' : '1',
     CODEXPRO_ALLOW_NO_HTTP_TOKEN: args.noAuth ? '1' : '0'
@@ -3779,7 +3928,8 @@ async function main() {
     codexSessions,
     bashSession,
     requireBashSession,
-    toolCards
+    toolCards,
+    connectionTest
   };
 
   if (tunnel === 'none') {
@@ -3799,7 +3949,8 @@ async function main() {
       bashTranscript,
       codexSessions,
       bashSession,
-      requireBashSession
+      requireBashSession,
+      connectionTest
     });
     saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details, cleanup);
@@ -3842,7 +3993,8 @@ async function main() {
       bashTranscript,
       codexSessions,
       bashSession,
-      requireBashSession
+      requireBashSession,
+      connectionTest
     });
     saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details, cleanup);
@@ -3886,7 +4038,8 @@ async function main() {
       bashTranscript,
       codexSessions,
       bashSession,
-      requireBashSession
+      requireBashSession,
+      connectionTest
     });
     saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details, cleanup);
@@ -3910,7 +4063,8 @@ async function main() {
       bashTranscript,
       codexSessions,
       bashSession,
-      requireBashSession
+      requireBashSession,
+      connectionTest
     });
     saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details, cleanup);
@@ -3952,7 +4106,8 @@ async function main() {
       bashTranscript,
       codexSessions,
       bashSession,
-      requireBashSession
+      requireBashSession,
+      connectionTest
     });
     saveRuntimeConnection(root, details, runtimeOptions);
     await runControlPanel(details, cleanup);
@@ -4020,7 +4175,8 @@ async function main() {
     bashTranscript,
     codexSessions,
     bashSession,
-    requireBashSession
+    requireBashSession,
+    connectionTest
   });
   saveRuntimeConnection(root, details, runtimeOptions);
   await runControlPanel(details, cleanup);

@@ -6,6 +6,7 @@ import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { listFiles, textScanByteLimit } from "./fsOps.js";
 import { redactSensitiveText } from "./redact.js";
+import { searchWorkspaceStructured, type AnalysisSearchIntent, type StructuredSearchResult } from "./analysis/index.js";
 
 export interface SearchOptions {
   query: string;
@@ -14,6 +15,9 @@ export interface SearchOptions {
   glob?: string;
   includeHidden: boolean;
   maxResults: number;
+  intent?: AnalysisSearchIntent;
+  symbol?: string;
+  includeTests?: boolean;
 }
 
 export interface SearchResult {
@@ -21,6 +25,7 @@ export interface SearchResult {
   matches: Array<{ path: string; line: number; text: string }>;
   truncated: boolean;
   used: "ripgrep" | "node";
+  analysis?: StructuredSearchResult;
 }
 
 function commandExists(command: string): Promise<boolean> {
@@ -127,7 +132,7 @@ async function runNodeSearch(config: CodexProConfig, guard: PathGuard, workspace
 }
 
 export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, workspace: Workspace, rawOptions: Partial<SearchOptions>): Promise<SearchResult> {
-  const query = rawOptions.query?.toString() ?? "";
+  const query = rawOptions.symbol?.toString() || rawOptions.query?.toString() || "";
   if (!query) throw new CodexProError("query is required.");
   const options: SearchOptions = {
     query,
@@ -135,13 +140,54 @@ export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, 
     root: rawOptions.root,
     glob: rawOptions.glob,
     includeHidden: Boolean(rawOptions.includeHidden),
-    maxResults: Math.max(1, Math.min(rawOptions.maxResults ?? config.maxSearchResults, config.maxSearchResults))
+    maxResults: Math.max(1, Math.min(rawOptions.maxResults ?? config.maxSearchResults, config.maxSearchResults)),
+    intent: rawOptions.intent,
+    symbol: rawOptions.symbol,
+    includeTests: rawOptions.includeTests
   };
+  let lexical: SearchResult;
   if (await commandExists("rg")) {
-    return runRipgrep(config, guard, workspace, options);
-  }
-  if (options.regex) {
+    lexical = await runRipgrep(config, guard, workspace, options);
+  } else if (options.regex) {
     throw new CodexProError("regex search requires ripgrep. Install rg or retry with regex=false.");
+  } else {
+    lexical = await runNodeSearch(config, guard, workspace, options);
   }
-  return runNodeSearch(config, guard, workspace, options);
+  const structuredRequested = rawOptions.intent !== undefined || rawOptions.symbol !== undefined || rawOptions.includeTests !== undefined;
+  if (!structuredRequested) return lexical;
+  if (!config.analysisEnabled) {
+    lexical.analysis = {
+      schemaVersion: 1,
+      query,
+      intent: rawOptions.intent && rawOptions.intent !== "auto" ? rawOptions.intent : "text",
+      groups: { definitions: [], references: [], tests: [], configuration: [], documentation: [], other: [] },
+      matches: [],
+      coverage: { inventoryFiles: 0, analyzedFiles: 0, scannedBytes: 0, symbolCount: 0, relationshipCount: 0, truncated: true, warnings: ["Repository analysis is disabled by configuration."] },
+      warnings: ["Repository analysis is disabled by configuration."],
+      cache: { hit: false, key: "disabled" }
+    };
+    return lexical;
+  }
+  try {
+    lexical.analysis = await searchWorkspaceStructured(config, guard, workspace, {
+      query,
+      intent: rawOptions.intent ?? "auto",
+      includeTests: Boolean(rawOptions.includeTests),
+      regex: Boolean(rawOptions.regex),
+      root: options.root,
+      maxResults: options.maxResults
+    });
+  } catch (error) {
+    lexical.analysis = {
+      schemaVersion: 1,
+      query,
+      intent: rawOptions.intent && rawOptions.intent !== "auto" ? rawOptions.intent : "text",
+      groups: { definitions: [], references: [], tests: [], configuration: [], documentation: [], other: [] },
+      matches: [],
+      coverage: { inventoryFiles: 0, analyzedFiles: 0, scannedBytes: 0, symbolCount: 0, relationshipCount: 0, truncated: true, warnings: [] },
+      warnings: [`Repository analysis unavailable: ${redactSensitiveText(error instanceof Error ? error.message : String(error))}`],
+      cache: { hit: false, key: "unavailable" }
+    };
+  }
+  return lexical;
 }

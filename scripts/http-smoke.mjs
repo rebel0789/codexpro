@@ -718,4 +718,59 @@ try {
   await waitForExit(cliChild).catch(() => {});
 }
 
+const connectionTestPort = await getFreePort();
+let connectionTestStderr = '';
+const connectionTestChild = spawn(process.execPath, [
+  'scripts/codexpro.mjs',
+  'connection-test',
+  '--root',
+  cliRoot,
+  '--tunnel',
+  'none',
+  '--no-auth',
+  '--no-profile',
+  '--port',
+  String(connectionTestPort)
+], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_HOME: await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-connection-test-home-'))
+  },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+connectionTestChild.stderr.on('data', (chunk) => {
+  connectionTestStderr += String(chunk);
+});
+try {
+  await waitForHealthJson(`http://127.0.0.1:${connectionTestPort}/healthz`);
+  const tools = await listTools(`http://127.0.0.1:${connectionTestPort}/mcp`);
+  const names = toolNames(tools);
+  for (const expected of ['read', 'tree', 'search', 'load_skill']) {
+    if (!names.includes(expected)) throw new Error(`connection-test missing ${expected}; got ${names.join(', ')}`);
+  }
+  for (const hidden of ['codexpro', 'codexpro_self_test', 'write', 'edit', 'apply_patch', 'bash', 'export_pro_context', 'handoff_to_agent', 'handoff_to_codex']) {
+    if (names.includes(hidden)) throw new Error(`connection-test exposed ${hidden}; got ${names.join(', ')}`);
+  }
+  for (const tool of tools) {
+    const annotations = tool.annotations ?? {};
+    if (annotations.readOnlyHint !== true || annotations.openWorldHint !== false || annotations.destructiveHint !== false) {
+      throw new Error(`connection-test exposed non-read-only annotations for ${tool.name}: ${JSON.stringify(annotations)}`);
+    }
+  }
+  await withClient(`http://127.0.0.1:${connectionTestPort}/mcp`, async (client) => {
+    const config = await callTool(client, 'server_config');
+    if (config.structuredContent.connectionTest !== true || config.structuredContent.toolCards !== false) {
+      throw new Error(`unexpected connection-test config: ${JSON.stringify(config.structuredContent)}`);
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (!connectionTestStderr.includes('[CodexPro] POST /mcp received')) {
+    throw new Error(`connection-test did not print request-arrival logs\n${connectionTestStderr}`);
+  }
+} finally {
+  connectionTestChild.kill('SIGTERM');
+  await waitForExit(connectionTestChild).catch(() => {});
+}
+
 console.log('✓ http smoke test passed');

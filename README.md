@@ -39,7 +39,8 @@ codexpro setup
 CodexPro prints and copies the Server URL. In ChatGPT, open:
 
 ```text
-Settings -> Apps -> Advanced settings -> Create app
+Settings -> Security and login -> Developer mode: on
+Settings -> Plugins -> Create
 ```
 
 Paste the Server URL and choose `Authentication: No Authentication / None`.
@@ -66,6 +67,25 @@ CodexPro starts a local MCP server for the current workspace. ChatGPT can then:
 CodexPro is not a hosted service, model proxy, quota bypass, account pool, or OS sandbox.
 It connects your own ChatGPT session to your own local repo through the official Developer Mode / MCP app path.
 
+## Repository Analysis
+
+CodexPro builds a bounded repository map from local manifests, source declarations, imports, tests, and Git state. It provides:
+
+- `inspect_workspace` for languages, project types, entrypoints, areas, symbols, and relationships
+- optional structured `search` intents: `text`, `symbol`, `references`, and `impact`
+- affected-area, risk, related-test, and focused-command recommendations in `show_changes`
+- matching read-only terminal views:
+
+```bash
+codexpro inspect --root /path/to/repo
+codexpro review --root /path/to/repo
+codexpro inspect --root /path/to/repo --json
+```
+
+The analysis is deterministic and local. It uses confidence labels instead of claiming compiler precision, stays within configured file/byte/symbol limits, and falls back to normal lexical search and Git review when analysis is incomplete.
+
+Set `CODEXPRO_ANALYSIS=0` to disable repository analysis without changing the rest of the connector.
+
 ## Normal Commands
 
 ```bash
@@ -73,7 +93,10 @@ codexpro setup
 codexpro start
 codexpro start --root /path/to/repo
 codexpro doctor
+codexpro connection-test --root /path/to/repo
 codexpro settings
+codexpro inspect
+codexpro review
 ```
 
 Useful modes:
@@ -85,6 +108,10 @@ codexpro start --tool-mode full
 codexpro start --mode handoff
 codexpro start --mode pro
 ```
+
+If ChatGPT cannot create the plugin, run `codexpro connection-test`. It keeps
+the normal read, tree, search, and skill tools, disables writes, bash, and tool
+cards, and logs whether a request reached the local MCP endpoint.
 
 Tool cards are opt in:
 

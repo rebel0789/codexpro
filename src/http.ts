@@ -1492,6 +1492,7 @@ async function main(): Promise<void> {
       return;
     }
     const started = Date.now();
+    console.error(`[CodexPro] ${req.method} ${req.path} received`);
     res.on("finish", () => {
       console.error(`[CodexPro] ${req.method} ${req.path} -> ${res.statusCode} ${Date.now() - started}ms`);
     });

@@ -28,7 +28,31 @@ The main differences are:
 - The normal workflow emphasizes compact cards, diffs, `show_changes`, smoke tests, and handoff status files.
 - CodexPro keeps a strict boundary: no model proxying, account pooling, third-party Pro site scraping, quota bypassing, or OS sandbox claims.
 
-Short version: other tools may share the bridge idea; CodexPro is the cleaner ChatGPT-to-local-repo coding agent workflow with stricter defaults and clearer review surfaces.
+CodexPro connects ChatGPT to a user-approved local repository over MCP. Repository access, command permissions, and change review remain explicit.
+
+## What does Repository Analysis understand?
+
+Repository Analysis builds a local repository map from bounded, inspectable evidence:
+
+- project and package manifests
+- source/test/config/documentation paths
+- common declarations, imports, includes, and internal module relationships
+- Git changes and existing project verification scripts
+
+It supports TypeScript/JavaScript, Python, Go, Rust, Swift, Java, C#, C, and C++ declaration patterns. Unsupported languages still participate in safe inventory and lexical search.
+
+Relationships are labeled `exact`, `strong`, or `inferred`. The repository map does not replace a compiler or language server. CodexPro does not require a language server, daemon, embedding service, or vector database.
+
+Analysis is process-local and cached by a bounded workspace fingerprint. Direct CodexPro writes, edits, and patches invalidate that cache. If limits are reached, results say `partial` and retain normal tree/search/read/review fallback behavior.
+
+Set `CODEXPRO_ANALYSIS=0` to disable this layer while keeping the standard file, search, Git, and review tools available.
+
+Terminal users can inspect the same facts without ChatGPT:
+
+```bash
+codexpro inspect --json
+codexpro review --json
+```
 
 ## What is the `codexpro` supertool?
 
@@ -72,14 +96,16 @@ Open ChatGPT and go to:
 
 ```text
 Settings
--> Apps
--> Advanced settings
+-> Security and login
 -> Developer mode: on
 -> Enforce CSP in developer mode: on
--> Create app
+
+Settings
+-> Plugins
+-> Create
 ```
 
-In Create App:
+When creating the plugin:
 
 ```text
 Name: CodexPro
@@ -206,16 +232,38 @@ If you own a domain, use Cloudflare named tunnels and route DNS to a hostname li
 
 Usually ChatGPT could not reach the public MCP URL. A generated `trycloudflare.com` URL is not proof that `cloudflared` stayed connected.
 
-Run with tunnel logs:
+Run the connection test:
 
 ```bash
-codexpro start --log-requests
+codexpro connection-test --root /path/to/repo
 ```
 
-Keep `codexpro start` running, wait for the tunnel to register, then paste the current Server URL into ChatGPT. If Cloudflare returns `530` / `Error 1033`, check DNS or proxy-client DNS handling for the machine running `cloudflared`.
+This keeps `read`, `tree`, `search`, and `load_skill`, but disables file writes,
+bash, and tool cards. In ChatGPT, create the development plugin under
+`Settings -> Plugins`, paste the complete Server URL, and choose
+`No Authentication`.
+
+The terminal output separates the failure boundary:
+
+- No `POST /mcp received`: the request did not reach CodexPro. Check the ChatGPT
+  Plugins page and the tunnel.
+- `POST /mcp -> 401`: paste the complete URL, including `codexpro_token`.
+- `POST /mcp -> 2xx`: ChatGPT reached CodexPro and the MCP endpoint responded.
+
+Keep CodexPro running while testing. A Cloudflare quick-tunnel URL changes on
+every restart. If Cloudflare returns `530` / `Error 1033`, check DNS or
+proxy-client DNS handling on the machine running `cloudflared`.
+
+ChatGPT now manages development apps under Plugins. The browser error
+`Failed to execute 'removeChild' on 'Node'` occurs in the ChatGPT page, before
+CodexPro can handle an MCP request. Remove or recreate the stale plugin entry
+from the Plugins page, then retry with the current URL. CodexPro cannot repair
+that browser-side entry.
 
 Official references:
 
+- OpenAI: connect an MCP server to ChatGPT: https://developers.openai.com/apps-sdk/deploy/connect-chatgpt
+- OpenAI: MCP server authentication: https://developers.openai.com/apps-sdk/build/auth
 - ngrok dev domains: https://ngrok.com/docs/universal-gateway/domains
 - Cloudflare Tunnel routing: https://developers.cloudflare.com/tunnel/routing/
 - Cloudflare Tunnel DNS records: https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/routing-to-tunnel/dns/

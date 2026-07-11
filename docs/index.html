@@ -117,7 +117,7 @@ codexpro setup</code>
         <div>
           <span>03</span>
           <strong>Paste</strong>
-          <p>Paste the copied Server URL into ChatGPT Create app.</p>
+          <p>Paste the copied Server URL when creating the ChatGPT plugin.</p>
         </div>
       </section>
 
@@ -246,13 +246,13 @@ codexpro setup</code>
             <span>3</span>
             <div>
               <strong>Turn on Developer Mode</strong>
-              <p>In ChatGPT, open Settings -> Apps -> Advanced settings. Turn on Developer mode and keep Enforce CSP in developer mode enabled, then click Create app.</p>
+              <p>In ChatGPT, open Settings -> Security and login. Turn on Developer mode and keep Enforce CSP in developer mode enabled, then go to Settings -> Plugins and create the connection.</p>
             </div>
           </div>
           <div class="step">
             <span>4</span>
             <div>
-              <strong>Create a ChatGPT app</strong>
+              <strong>Create a ChatGPT plugin</strong>
               <p>Name it CodexPro. Use Connection: Server URL. Paste the copied URL. Set Authentication to No Authentication / None.</p>
             </div>
           </div>
@@ -406,18 +406,18 @@ cloudflared tunnel route dns codexpro codexpro.example.com</code></pre>
           </article>
           <article>
             <small>ChatGPT settings path</small>
-            <h3>Enable apps once</h3>
+            <h3>Enable plugins once</h3>
             <dl>
               <div><dt>Open</dt><dd>ChatGPT Settings</dd></div>
-              <div><dt>Go to</dt><dd>Apps -> Advanced settings</dd></div>
+              <div><dt>Go to</dt><dd>Security and login</dd></div>
               <div><dt>Enable</dt><dd>Developer mode</dd></div>
               <div><dt>Keep on</dt><dd>Enforce CSP in developer mode</dd></div>
-              <div><dt>Then</dt><dd>Create app</dd></div>
+              <div><dt>Then</dt><dd>Plugins -> Create</dd></div>
             </dl>
             <p>This is a one-time ChatGPT setting. CodexPro widgets work with CSP enabled.</p>
           </article>
           <article>
-            <small>Create App fields</small>
+            <small>Create Plugin fields</small>
             <h3>Paste the copied URL</h3>
             <dl>
               <div><dt>Name</dt><dd>CodexPro</dd></div>
@@ -565,7 +565,7 @@ codexpro settings delete --yes</code></pre>
           </article>
           <article>
             <h3>Should CSP stay enabled?</h3>
-            <p>Yes. In Settings -> Apps -> Advanced settings, turn on Developer mode and keep Enforce CSP in developer mode enabled. CodexPro widgets are built for that path.</p>
+            <p>Yes. In Settings -> Security and login, turn on Developer mode and keep Enforce CSP in developer mode enabled. Create and manage the connection under Settings -> Plugins.</p>
           </article>
         </div>
       </section>
