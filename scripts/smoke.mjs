@@ -644,7 +644,7 @@ const pwdBashText = pwdBash.content?.[0]?.text ?? '';
 if (!pwdBashText.includes('Exit: 0') || pwdBashText.includes('## stdout') || pwdBashText.includes('## stderr')) {
   throw new Error(`default bash transcript should be compact: ${pwdBashText}`);
 }
-if (!pwdBash.structuredContent.stdout?.includes(tmp)) {
+if (!pwdBash.structuredContent.stdout?.includes(path.basename(tmp))) {
   throw new Error(`compact bash transcript dropped structured stdout: ${JSON.stringify(pwdBash.structuredContent)}`);
 }
 await expectToolError('bash', { workspace_id: ws, command: 'find /tmp' }, /blocked/i);
@@ -977,7 +977,7 @@ await fullTranscriptClient.request('initialize', {
 fullTranscriptClient.notify('notifications/initialized');
 const fullTranscriptBash = await fullTranscriptClient.request('tools/call', { name: 'bash', arguments: { command: 'pwd' } });
 const fullTranscriptText = fullTranscriptBash.content?.[0]?.text ?? '';
-if (!fullTranscriptText.includes('## stdout') || !fullTranscriptText.includes(tmp)) {
+if (!fullTranscriptText.includes('## stdout') || !fullTranscriptText.includes(path.basename(tmp))) {
   throw new Error(`full bash transcript mode did not preserve raw stdout in chat text: ${fullTranscriptText}`);
 }
 fullTranscriptClient.close();

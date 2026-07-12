@@ -8,7 +8,14 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - name: Checkout
@@ -28,6 +35,9 @@ jobs:
 
       - name: Smoke Test
         run: npm run smoke
+
+      - name: Stress Test
+        run: npm run stress
 
       - name: Check Package Contents
         run: npm pack --dry-run
