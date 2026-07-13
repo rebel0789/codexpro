@@ -125,6 +125,18 @@ function toolCardMeta(): Record<string, unknown> {
   };
 }
 
+const TOOL_CARD_RENDER_TOOL_NAMES = new Set<string>([
+  "open_current_workspace",
+  "open_workspace",
+  "workspace_snapshot",
+  "inspect_workspace",
+  "show_changes",
+  "git_status",
+  "handoff_to_agent",
+  "handoff_to_codex",
+  "bash"
+]);
+
 const OPTIONAL_TOOL_CARD_META = [
   "ui",
   "openai/outputTemplate",
@@ -132,8 +144,12 @@ const OPTIONAL_TOOL_CARD_META = [
   "openai/toolInvocation/invoked"
 ] as const;
 
-function descriptorOptionsForConfig(config: CodexProConfig, options: Record<string, unknown>): Record<string, unknown> {
-  if (config.toolCards) return options;
+function usesToolCard(config: CodexProConfig, name: string): boolean {
+  return config.toolCards && TOOL_CARD_RENDER_TOOL_NAMES.has(name);
+}
+
+function descriptorOptionsForConfig(config: CodexProConfig, name: string, options: Record<string, unknown>): Record<string, unknown> {
+  if (usesToolCard(config, name)) return options;
   const meta = { ...((options._meta as Record<string, unknown> | undefined) ?? {}) };
   for (const key of OPTIONAL_TOOL_CARD_META) delete meta[key];
   return { ...options, _meta: meta };
@@ -442,7 +458,7 @@ function registerCodexTool(
 ): void {
   if (!shouldRegisterTool(config, name)) return;
   const validatedHandler: CodexToolHandler = (args) => handler(validateToolArgs(name, options, args));
-  registerToolCompat(server, name, descriptorOptionsForConfig(config, options), validatedHandler);
+  registerToolCompat(server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
   rememberRegisteredTool(server, name);
   rememberRegisteredToolHandler(server, name, validatedHandler);
 }
@@ -1586,9 +1602,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         : "";
       const inScope = (filePath: string) => !prefix || filePath === prefix || filePath.startsWith(`${prefix}/`);
       const areaInScope = (areaPath: string) => !prefix || areaPath === "." || inScope(areaPath) || prefix.startsWith(`${areaPath}/`);
-      const fileLimit = config.toolCards ? 120 : limitInt(args.max_files, 300, 1, config.analysisLimits.maxInventoryFiles);
-      const symbolLimit = config.toolCards ? 80 : limitInt(args.max_symbols, 500, 1, config.analysisLimits.maxSymbols);
-      const relationshipLimit = config.toolCards ? 120 : limitInt(args.max_relationships, 800, 1, config.analysisLimits.maxRelationships);
+      const cardWorkspaceAnalysis = usesToolCard(config, "inspect_workspace");
+      const fileLimit = cardWorkspaceAnalysis ? 120 : limitInt(args.max_files, 300, 1, config.analysisLimits.maxInventoryFiles);
+      const symbolLimit = cardWorkspaceAnalysis ? 80 : limitInt(args.max_symbols, 500, 1, config.analysisLimits.maxSymbols);
+      const relationshipLimit = cardWorkspaceAnalysis ? 120 : limitInt(args.max_relationships, 800, 1, config.analysisLimits.maxRelationships);
       const scopedFiles = result.files.filter((file) => inScope(file.path));
       const scopedSymbols = result.symbols.filter((symbol) => inScope(symbol.path));
       const scopedRelationships = result.relationships.filter((relationship) => inScope(relationship.from) || inScope(relationship.to));
@@ -1718,19 +1735,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         truncated: result.truncated,
         used: result.used
       };
-      if (result.analysis) {
-        structured.analysis = config.toolCards
-          ? {
-              ...result.analysis,
-              groups: Object.fromEntries(Object.entries(result.analysis.groups).map(([name, matches]) => [name, matches.slice(0, 24)])),
-              matches: result.analysis.matches.slice(0, 80)
-            }
-          : result.analysis;
-      }
-      // The tool card widget renders search hits from structuredContent.text.
-      // When cards are disabled (the default), including it would only duplicate
-      // the human-readable content payload, so omit the large blob in that case.
-      if (config.toolCards) structured.text = result.text;
+      if (result.analysis) structured.analysis = result.analysis;
       return textResult(result.text, structured);
     }
   );

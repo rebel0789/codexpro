@@ -240,17 +240,33 @@ await cardClient.request('initialize', {
 });
 cardClient.notify('notifications/initialized');
 const cardTools = await cardClient.request('tools/list', {});
-const cardSearchMeta = cardTools.tools.find((tool) => tool.name === 'search')?._meta ?? {};
-if (cardSearchMeta.ui?.resourceUri !== toolCardUri || cardSearchMeta['openai/outputTemplate'] !== toolCardUri) {
-  throw new Error('CODEXPRO_TOOL_CARDS=1 did not opt search into widget metadata');
+const cardRenderToolNames = new Set([
+  'open_current_workspace',
+  'open_workspace',
+  'workspace_snapshot',
+  'inspect_workspace',
+  'show_changes',
+  'git_status',
+  'handoff_to_agent',
+  'handoff_to_codex',
+  'bash'
+]);
+for (const tool of cardTools.tools) {
+  const meta = tool._meta ?? {};
+  const hasCard = meta.ui?.resourceUri === toolCardUri && meta['openai/outputTemplate'] === toolCardUri;
+  const hasStatus = Boolean(meta['openai/toolInvocation/invoking'] || meta['openai/toolInvocation/invoked']);
+  const shouldRenderCard = cardRenderToolNames.has(tool.name);
+  if (hasCard !== shouldRenderCard || hasStatus !== shouldRenderCard) {
+    throw new Error(`unexpected tool-card metadata for ${tool.name}: ${JSON.stringify(meta)}`);
+  }
 }
 const cardOpened = await cardClient.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
 const cardSearch = await cardClient.request('tools/call', {
   name: 'search',
   arguments: { workspace_id: cardOpened.structuredContent.workspace_id, query: 'read', path: 'demo.txt', max_results: 5 }
 });
-if (!cardSearch.structuredContent.text?.includes('read')) {
-  throw new Error(`CODEXPRO_TOOL_CARDS=1 search did not include structured text: ${JSON.stringify(cardSearch.structuredContent)}`);
+if ('text' in cardSearch.structuredContent) {
+  throw new Error(`raw search unexpectedly included card-only structured text: ${JSON.stringify(cardSearch.structuredContent)}`);
 }
 const cardInspect = await cardClient.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: cardOpened.structuredContent.workspace_id } });
 if (cardInspect.structuredContent.codexpro_tool !== 'inspect_workspace' || !cardInspect.structuredContent.coverage) {

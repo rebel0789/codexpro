@@ -772,14 +772,13 @@ async function runCardStress(root) {
       name: 'search',
       arguments: { workspace_id: opened.structuredContent.workspace_id, query: '--flag', path: 'many', max_results: 2000 }
     });
-    assert(typeof search.structuredContent.text === 'string' && search.structuredContent.text.includes('--flag'), 'tool-card search did not include structured text');
-    assert(search.structuredContent.text.includes('[structured field truncated to 30000 chars]'), 'tool-card search text was not capped');
+    assert(!('text' in search.structuredContent), 'raw search unexpectedly included card-only structured text');
     const structured = await client.request('tools/call', {
       name: 'search',
       arguments: { workspace_id: opened.structuredContent.workspace_id, query: '--flag', path: 'many', intent: 'text', max_results: 2000 }
     });
-    assert(structured.structuredContent.analysis.groups.references.length <= 24, `structured card references were not compacted: ${structured.structuredContent.analysis.groups.references.length}`);
-    assert(structured.structuredContent.analysis.matches.length <= 80, `structured card match summary was not compacted: ${structured.structuredContent.analysis.matches.length}`);
+    assert(structured.structuredContent.analysis.groups.references.length > 0, 'raw structured search omitted reference groups');
+    assert(structured.structuredContent.analysis.matches.length > 0, 'raw structured search omitted analysis matches');
     const inspected = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: opened.structuredContent.workspace_id } });
     assert(inspected.structuredContent.files.length <= 120, `workspace card file inventory was not compacted: ${inspected.structuredContent.files.length}`);
   } finally {
