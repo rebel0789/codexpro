@@ -110,7 +110,7 @@ ChatGPT Web 可以操作：
 
 默认工具数量较少是故意的：ChatGPT 面对少量高信号工具时更稳定。workspace open 默认不做 skill discovery；需要 repo-local skills 时传 `include_skills=true`，需要 user/plugin skills 时再加 `include_global_skills=true`。然后用 `load_skill` 按名称、source 和显示出的 path 加载需要的 `SKILL.md`；如果仍有重名匹配，CodexPro 会报歧义错误，不会随便选一个，也不会把几十个 skill 变成单独 action。
 
-CodexPro 默认给 ChatGPT 暴露纯 MCP 工具描述，不附带 widget/card metadata。需要紧凑 v9 卡片时用 `CODEXPRO_TOOL_CARDS=1` 启动；server config、自测、workspace 摘要、读写 diff、bash 验证、git/tree/search/context 和 handoff/export 都有结构化视图。git、skills、tree、terminal 输出、context 和 raw diff 会折叠或截断，避免在聊天里刷出大段原始数据。`CODEXPRO_WIDGET_DOMAIN` 用于设置 ChatGPT widget iframe 的专用 HTTPS origin，正式提交 app 前应换成你控制的独立域名。
+CodexPro 默认给 ChatGPT 暴露纯 MCP 工具描述，不附带 widget/card metadata。需要紧凑 v10 卡片时用 `CODEXPRO_TOOL_CARDS=1` 启动；workspace、分析、改动、Git、handoff 和 bash 验证会使用结构化卡片，read/search 保持为普通聊天输出。终端输出和 raw diff 会折叠或截断，避免在聊天里刷出大段原始数据。更新 connector 后，刷新一次 ChatGPT plugin connection 以加载新的 widget resource。`CODEXPRO_WIDGET_DOMAIN` 用于设置 ChatGPT widget iframe 的专用 HTTPS origin，正式提交 app 前应换成你控制的独立域名。
 
 ## 其他启动方式
 

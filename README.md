@@ -124,6 +124,11 @@ Tool cards are opt in:
 CODEXPRO_TOOL_CARDS=1 codexpro start
 ```
 
+The v10 cards cover selected workspace, analysis, change, Git, handoff, and
+terminal results. Reads and searches stay in normal chat output. After updating
+the connector, refresh its ChatGPT plugin connection once so it loads the new
+widget resource.
+
 ## Public URL Options
 
 ChatGPT web needs a public HTTPS Server URL. CodexPro supports:

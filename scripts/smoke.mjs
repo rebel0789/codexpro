@@ -206,7 +206,7 @@ const toolNames = tools.tools.map((tool) => tool.name);
 for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'write', 'edit', 'apply_patch', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
-const toolCardUri = 'ui://widget/codexpro-tool-card-v9.html';
+const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
@@ -293,13 +293,21 @@ const resources = await client.request('resources/list', {});
 const toolCard = resources.resources.find((resource) => resource.uri === toolCardUri);
 if (!toolCard) throw new Error(`missing tool-card resource: ${toolCardUri}`);
 if (toolCard.mimeType !== 'text/html;profile=mcp-app') throw new Error(`unexpected tool-card mime type: ${toolCard.mimeType}`);
-const legacyToolCardUri = 'ui://widget/codexpro-tool-card-v8.html';
-const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
-if (!legacyToolCard) throw new Error(`missing legacy tool-card resource: ${legacyToolCardUri}`);
+const legacyToolCardUris = ['ui://widget/codexpro-tool-card-v9.html', 'ui://widget/codexpro-tool-card-v8.html'];
+for (const legacyToolCardUri of legacyToolCardUris) {
+  const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
+  if (!legacyToolCard) throw new Error(`missing legacy tool-card resource: ${legacyToolCardUri}`);
+}
 const widget = await client.request('resources/read', { uri: toolCardUri });
 const widgetText = widget.contents?.[0]?.text ?? '';
 const widgetMeta = widget.contents?.[0]?._meta ?? {};
-if (!widgetText.includes('<meta charset="utf-8">') || !widgetText.includes('Waiting for tool result') || !widgetText.includes('renderWorkspace') || !widgetText.includes('renderSelfTest') || !widgetText.includes('renderWorkspaceAnalysis') || !widgetText.includes('renderStructuredSearch') || !widgetText.includes('renderChangeAnalysis') || !widgetText.includes('details class="fold"') || !widgetText.includes('ui/notifications/tool-result')) {
+for (const required of ['<meta charset="utf-8">', 'extractStructuredContent', 'renderWorkspace', 'renderWorkspaceAnalysis', 'renderChangeAnalysis', 'details class="fold"', 'ui/notifications/tool-result', 'copy-card-output', 'applyHostTheme', 'Result unavailable', 'Connected workspace', 'Verification completed']) {
+  if (!widgetText.includes(required)) throw new Error(`tool-card widget resource missing ${required}`);
+}
+if (widgetText.includes('Waiting for tool result') || widgetText.includes('codexpro-sheen')) {
+  throw new Error('tool-card widget retained the v9 loading treatment');
+}
+if (!widgetText.includes('renderBash')) {
   throw new Error('tool-card widget resource did not include expected Apps bridge code');
 }
 if (!widgetMeta.ui?.csp || !widgetMeta['openai/widgetCSP']) {
@@ -308,12 +316,14 @@ if (!widgetMeta.ui?.csp || !widgetMeta['openai/widgetCSP']) {
 if (widgetMeta.ui?.domain !== 'https://widgets.codexpro.test' || widgetMeta['openai/widgetDomain'] !== 'https://widgets.codexpro.test') {
   throw new Error('tool-card widget resource did not expose standard and ChatGPT widget domain metadata');
 }
-const legacyWidget = await client.request('resources/read', { uri: legacyToolCardUri });
-if (legacyWidget.contents?.[0]?.uri !== legacyToolCardUri) {
-  throw new Error('legacy tool-card widget resource did not preserve requested URI');
-}
-if (!(legacyWidget.contents?.[0]?.text ?? '').includes('Waiting for tool result')) {
-  throw new Error('legacy tool-card widget resource did not serve widget HTML');
+for (const legacyToolCardUri of legacyToolCardUris) {
+  const legacyWidget = await client.request('resources/read', { uri: legacyToolCardUri });
+  if (legacyWidget.contents?.[0]?.uri !== legacyToolCardUri) {
+    throw new Error('legacy tool-card widget resource did not preserve requested URI');
+  }
+  if (!(legacyWidget.contents?.[0]?.text ?? '').includes('Result unavailable')) {
+    throw new Error('legacy tool-card widget resource did not serve v10 HTML');
+  }
 }
 const current = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
 const realTmp = await fs.realpath(tmp);

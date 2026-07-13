@@ -1,1079 +1,543 @@
-export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v9.html";
-export const TOOL_CARD_LEGACY_URIS = ["ui://widget/codexpro-tool-card-v8.html"];
+export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v10.html";
+export const TOOL_CARD_LEGACY_URIS = [
+  "ui://widget/codexpro-tool-card-v9.html",
+  "ui://widget/codexpro-tool-card-v8.html"
+];
 export const TOOL_CARD_MIME_TYPE = "text/html;profile=mcp-app";
 
-export const toolCardWidgetHtml = String.raw`
-<meta charset="utf-8">
-<div id="root" class="wrap">
-  <article class="card pending">
-    <div class="rail"></div>
-    <header class="head">
-      <span class="glyph">C</span>
-      <div class="headline">
-        <div class="title">CodexPro</div>
-        <div class="subtitle">Waiting for tool result...</div>
-      </div>
-      <span class="pill info">waiting</span>
-    </header>
-    <div class="skeleton">
-      <span></span>
-      <span></span>
-      <span></span>
-    </div>
-  </article>
-</div>
-
-<style>
-  :root {
-    color-scheme: dark light;
-    --panel: #11151c;
-    --panel-2: #161b24;
-    --panel-3: #0c1016;
-    --panel-4: #1d222b;
-    --line: rgba(212, 219, 229, 0.13);
-    --line-strong: rgba(212, 219, 229, 0.24);
-    --text: #f2f4f7;
-    --soft: #c9d0da;
-    --muted: #97a1af;
-    --quiet: #6f7988;
-    --accent: #d7b56d;
-    --accent-soft: rgba(215, 181, 109, 0.12);
-    --blue: #9dc3ff;
-    --green: #8edc99;
-    --red: #f29a9a;
-    --amber: #e8c978;
-    --shadow: rgba(0, 0, 0, 0.26);
-  }
-
-  * { box-sizing: border-box; }
-
-  body {
-    margin: 0;
-    background: transparent;
-    color: var(--text);
-    font: 12px/1.48 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    letter-spacing: 0;
-  }
-
-  .wrap {
-    width: 100%;
-  }
-
-  .card {
-    position: relative;
-    overflow: hidden;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background:
-      radial-gradient(circle at 18px 0, rgba(215, 181, 109, 0.12), transparent 42px),
-      linear-gradient(180deg, rgba(255, 255, 255, 0.042), rgba(255, 255, 255, 0)),
-      var(--panel);
-    box-shadow: 0 14px 34px var(--shadow);
-  }
-
-  .rail {
-    position: absolute;
-    inset: 0 auto 0 0;
-    width: 3px;
-    background: linear-gradient(180deg, var(--accent), rgba(142, 220, 153, 0.75) 64%, transparent);
-    opacity: 0.88;
-  }
-
-  .head {
-    display: grid;
-    grid-template-columns: 28px minmax(0, 1fr) auto;
-    align-items: center;
-    gap: 10px;
-    min-height: 56px;
-    padding: 11px 12px 10px 14px;
-    border-bottom: 1px solid var(--line);
-  }
-
-  .glyph {
-    display: inline-grid;
-    place-items: center;
-    width: 26px;
-    height: 26px;
-    border: 1px solid rgba(215, 181, 109, 0.28);
-    border-radius: 8px;
-    background: linear-gradient(180deg, rgba(215, 181, 109, 0.16), rgba(215, 181, 109, 0.04));
-    color: var(--accent);
-    font-size: 10px;
-    font-weight: 900;
-  }
-
-  .headline {
-    min-width: 0;
-  }
-
-  .title {
-    overflow: hidden;
-    color: var(--text);
-    font-size: 12px;
-    font-weight: 760;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .subtitle {
-    overflow: hidden;
-    margin-top: 2px;
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 650;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .meta {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-    gap: 6px;
-    min-width: 0;
-  }
-
-  .pill {
-    display: inline-flex;
-    align-items: center;
-    min-height: 20px;
-    max-width: 22ch;
-    overflow: hidden;
-    padding: 2px 7px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    background: rgba(255, 255, 255, 0.035);
-    color: var(--muted);
-    font-size: 10px;
-    font-weight: 720;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .pill.good { color: var(--green); border-color: rgba(134, 239, 172, 0.28); background: rgba(134, 239, 172, 0.08); }
-  .pill.bad { color: var(--red); border-color: rgba(253, 164, 175, 0.28); background: rgba(253, 164, 175, 0.08); }
-  .pill.info { color: var(--blue); border-color: rgba(157, 195, 255, 0.28); background: rgba(157, 195, 255, 0.08); }
-  .pill.warn { color: var(--amber); border-color: rgba(253, 230, 138, 0.28); background: rgba(253, 230, 138, 0.08); }
-
-  .body {
-    max-height: 420px;
-    overflow: auto;
-    padding: 10px;
-  }
-
-  .metrics {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-    margin-bottom: 10px;
-  }
-
-  .metric {
-    min-width: 0;
-    padding: 8px 9px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: rgba(255, 255, 255, 0.025);
-  }
-
-  .metric .label {
-    display: block;
-    margin-bottom: 4px;
-    color: var(--quiet);
-    font-size: 10px;
-    font-weight: 900;
-    text-transform: uppercase;
-  }
-
-  .metric .value {
-    overflow: hidden;
-    color: var(--soft);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .code {
-    overflow: hidden;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: var(--panel-3);
-  }
-
-  .codebar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    min-height: 30px;
-    padding: 6px 9px;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel-2);
-    color: var(--muted);
-    font-size: 11px;
-    font-weight: 720;
-  }
-
-  pre {
-    margin: 0;
-    padding: 10px;
-    overflow: visible;
-    color: var(--soft);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    font-size: 11px;
-    line-height: 1.52;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
-  }
-
-  .diff-line { display: block; min-height: 18px; padding: 0 4px; border-radius: 3px; }
-  .diff-add { color: var(--green); background: rgba(142, 220, 153, 0.08); }
-  .diff-del { color: var(--red); background: rgba(242, 154, 154, 0.08); }
-  .diff-hunk { color: var(--blue); }
-  .terminal pre { color: #dbe7f5; }
-  .prompt { color: var(--accent); }
-
-  .summary {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-    margin-bottom: 10px;
-  }
-
-  .summary-item {
-    min-width: 0;
-    padding: 9px 10px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: rgba(255, 255, 255, 0.025);
-  }
-
-  .summary-label {
-    display: block;
-    margin-bottom: 4px;
-    color: var(--quiet);
-    font-size: 10px;
-    font-weight: 760;
-  }
-
-  .summary-value {
-    color: var(--text);
-    font-size: 15px;
-    font-variant-numeric: tabular-nums;
-    font-weight: 760;
-  }
-
-  .file-list {
-    display: grid;
-    gap: 4px;
-    margin-bottom: 10px;
-  }
-
-  .section-label {
-    margin: 10px 1px 6px;
-    color: var(--quiet);
-    font-size: 10px;
-    font-weight: 850;
-    text-transform: uppercase;
-  }
-
-  .fold {
-    margin-top: 8px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: rgba(255, 255, 255, 0.018);
-  }
-
-  .fold > summary {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    gap: 10px;
-    align-items: center;
-    min-height: 34px;
-    padding: 8px 10px;
-    cursor: pointer;
-    color: var(--soft);
-    font-weight: 760;
-    list-style: none;
-  }
-
-  .fold > summary::-webkit-details-marker { display: none; }
-
-  .fold-title {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .fold-count {
-    color: var(--muted);
-    font-size: 10px;
-    font-weight: 800;
-  }
-
-  .fold-body {
-    padding: 0 8px 8px;
-  }
-
-  .file-row {
-    display: grid;
-    grid-template-columns: 42px minmax(0, 1fr);
-    gap: 8px;
-    align-items: center;
-    padding: 7px 8px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: rgba(255, 255, 255, 0.022);
-  }
-
-  .file-code {
-    color: var(--accent);
-    font: 10px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    font-weight: 800;
-  }
-
-  .file-name {
-    overflow: hidden;
-    color: var(--soft);
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .empty {
-    padding: 10px;
-    border: 1px dashed var(--line-strong);
-    border-radius: 7px;
-    background: rgba(255, 255, 255, 0.018);
-    color: var(--muted);
-  }
-
-  .search {
-    display: grid;
-    gap: 4px;
-  }
-
-  .hit {
-    display: grid;
-    grid-template-columns: minmax(120px, 0.34fr) minmax(0, 1fr);
-    gap: 8px;
-    padding: 6px 8px;
-    border-radius: 7px;
-  }
-
-  .hit:nth-child(odd) {
-    background: rgba(255, 255, 255, 0.025);
-  }
-
-  .hit-file {
-    overflow: hidden;
-    color: var(--blue);
-    font-weight: 850;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  .hit-text {
-    color: var(--soft);
-    overflow-wrap: anywhere;
-  }
-
-  .muted { color: var(--muted); }
-
-  .skeleton {
-    display: grid;
-    gap: 7px;
-    padding: 11px 13px 13px 17px;
-    border-top: 1px solid rgba(255, 255, 255, 0.02);
-  }
-
-  .skeleton span {
-    height: 8px;
-    max-width: 78%;
-    border-radius: 999px;
-    background: linear-gradient(90deg, rgba(148, 163, 184, 0.12), rgba(148, 163, 184, 0.22), rgba(148, 163, 184, 0.12));
-    animation: codexpro-sheen 1.55s ease-in-out infinite;
-  }
-
-  .skeleton span:nth-child(2) { max-width: 52%; animation-delay: 0.12s; }
-  .skeleton span:nth-child(3) { max-width: 66%; animation-delay: 0.24s; }
-
-  @keyframes codexpro-sheen {
-    0%, 100% { opacity: 0.46; transform: translateX(0); }
-    50% { opacity: 1; transform: translateX(2px); }
-  }
-
-  @media (max-width: 640px) {
-    .head { grid-template-columns: 28px minmax(0, 1fr); }
-    .meta { grid-column: 1 / -1; justify-content: flex-start; }
-    .summary,
-    .metrics,
-    .hit { grid-template-columns: 1fr; }
-  }
-</style>
-
-<script>
-  const root = document.getElementById("root");
-
-  function esc(value) {
-    return String(value ?? "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;");
-  }
-
-  function truncate(value, max = 9000) {
-    const text = String(value ?? "");
-    return text.length > max ? text.slice(0, max) + "\n...[truncated in widget]" : text;
-  }
-
-  function countLines(value) {
-    const text = String(value || "");
-    if (!text) return 0;
-    return text.replace(/\n$/, "").split("\n").length;
-  }
-
-  function previewLines(value, maxLines = 18) {
-    const text = String(value || "").replace(/\n$/, "");
-    if (!text) return "";
-    const lines = text.split("\n");
-    const shown = lines.slice(0, maxLines).join("\n");
-    const remaining = lines.length - maxLines;
-    return remaining > 0 ? shown + "\n...[" + remaining + " more lines]" : shown;
-  }
-
-  function basename(value) {
-    const text = String(value || "");
-    return text.split("/").filter(Boolean).pop() || text || ".";
-  }
-
-  function titleFor(tool) {
-    const titles = {
-      server_config: "Server config",
-      codexpro_self_test: "Self-test",
-      codexpro_inventory: "Inventory",
-      load_skill: "Skill",
-      list_workspaces: "Workspaces",
-      open_current_workspace: "Workspace",
-      open_workspace: "Workspace",
-      workspace_snapshot: "Workspace snapshot",
-      inspect_workspace: "Workspace analysis",
-      tree: "File tree",
-      write: "File write",
-      edit: "Exact edit",
-      apply_patch: "Patch",
-      git_status: "Git Status",
-      git_diff: "Git Diff",
-      show_changes: "Change review",
-      read_handoff: "Handoff context",
-      codex_context: "Codex context",
-      export_pro_context: "Pro context",
-      handoff_to_agent: "Agent handoff",
-      handoff_to_codex: "Codex handoff",
-      bash: "Terminal",
-      search: "Search",
-      read: "Read file"
-    };
-    return titles[tool] || "CodexPro";
-  }
-
-  function iconFor(tool) {
-    if (tool === "server_config") return "S";
-    if (tool === "codexpro_self_test") return "T";
-    if (tool === "codexpro_inventory") return "I";
-    if (tool === "load_skill") return "L";
-    if (tool === "list_workspaces") return "W";
-    if (tool === "open_current_workspace" || tool === "open_workspace") return "W";
-    if (tool === "workspace_snapshot") return "W";
-    if (tool === "inspect_workspace") return "I";
-    if (tool === "tree") return "T";
-    if (tool === "write") return "W";
-    if (tool === "edit") return "E";
-    if (tool === "apply_patch") return "P";
-    if (tool === "git_status" || tool === "git_diff") return "G";
-    if (tool === "show_changes") return "D";
-    if (tool === "read_handoff") return "H";
-    if (tool === "codex_context") return "C";
-    if (tool === "export_pro_context") return "P";
-    if (tool === "handoff_to_agent") return "A";
-    if (tool === "handoff_to_codex") return "H";
-    if (tool === "bash") return "$";
-    if (tool === "search") return "S";
-    if (tool === "read") return "R";
-    return "C";
-  }
-
-  function subtitleFor(data) {
-    if (data?.codexpro_tool === "open_current_workspace" || data?.codexpro_tool === "open_workspace") {
-      return data?.root || "Workspace opened";
+// This widget deliberately stays self-contained. It receives tool results through the
+// Apps SDK bridge and does not make network requests, invoke tools, or persist data.
+export const toolCardWidgetHtml = String.raw`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      color-scheme: light;
+      --card: #ffffff;
+      --canvas: #f7f7f8;
+      --ink: #202123;
+      --muted: #6e6e80;
+      --faint: #ececf1;
+      --line: #dedee5;
+      --code: #f1f1f3;
+      --good: #1f7a4c;
+      --warn: #a55200;
+      --bad: #b42318;
+      --shadow: 0 1px 2px rgba(15, 15, 20, .06), 0 8px 28px rgba(15, 15, 20, .05);
     }
-    if (data?.codexpro_tool === "show_changes") {
-      if (data?.status_error || data?.diff_error) return "Git state unavailable";
-      const count = Array.isArray(data?.changed_files) ? data.changed_files.length : 0;
-      if (!count && !data?.changed) return "Workspace is clean";
-      return count === 1 ? "1 changed file" : count + " changed files";
+
+    :root[data-theme="dark"] {
+      color-scheme: dark;
+      --card: #2f2f2f;
+      --canvas: #212121;
+      --ink: #ececf1;
+      --muted: #b4b4bf;
+      --faint: #3a3a3a;
+      --line: #4a4a4a;
+      --code: #242424;
+      --good: #5ccf91;
+      --warn: #f1a75b;
+      --bad: #ff8a80;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .22), 0 10px 28px rgba(0, 0, 0, .18);
     }
-    if (data?.codexpro_tool === "codexpro_self_test") return data?.status ? "Status " + data.status : "Local diagnostic";
-    if (data?.codexpro_tool === "codexpro_inventory") return (data?.skill_count ?? 0) + " skills, " + (data?.mcp_server_count ?? 0) + " MCP servers";
-    if (data?.codexpro_tool === "list_workspaces") return (data?.count ?? 0) + " open workspaces";
-    if (data?.codexpro_tool === "server_config") {
-      const session = data?.bashSessionId || data?.bash_session_id;
-      return "tools " + (data?.toolMode || data?.tool_mode || "-") + ", bash " + (data?.bashMode || data?.bash_mode || "-") + (session ? ", session " + session : "");
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-width: 0; background: transparent; }
+    body {
+      color: var(--ink);
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 13px;
+      line-height: 1.45;
+      -webkit-font-smoothing: antialiased;
     }
-    if (data?.codexpro_tool === "workspace_snapshot") return data?.root || "Workspace snapshot";
-    if (data?.codexpro_tool === "inspect_workspace") {
-      const coverage = data?.coverage || {};
-      return (coverage.analyzedFiles ?? coverage.analyzed_files ?? 0) + " files analyzed, " + (coverage.symbolCount ?? coverage.symbol_count ?? 0) + " symbols";
+    button, summary { font: inherit; }
+    #root { width: 100%; }
+    .card {
+      width: 100%;
+      max-width: 780px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      background: var(--card);
+      box-shadow: var(--shadow);
     }
-    if (data?.codexpro_tool === "git_status") {
-      const count = Array.isArray(data?.changed_files) ? data.changed_files.length : 0;
-      return count ? count + " changed entries" : "Working tree clean";
+    .head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 50px;
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--faint);
     }
-    if (data?.codexpro_tool === "codex_context") return (data?.agents_files?.length ?? 0) + " AGENTS, " + (data?.ai_context_files?.length ?? 0) + " bridge files";
-    if (data?.codexpro_tool === "read_handoff") return (data?.file_count ?? 0) + " bridge files";
-    if (data?.codexpro_tool === "load_skill" && data?.skill?.name) return data.skill.name;
-    if (data?.codexpro_tool === "handoff_to_agent" && data?.agent_name) return data.agent_name;
-    if (data?.path) return data.path;
-    if (data?.plan_path) return data.plan_path;
-    if (data?.root) return data.root;
-    if (data?.cwd) return data.cwd;
-    return "Tool output";
-  }
+    .tool-icon {
+      display: grid;
+      width: 26px;
+      height: 26px;
+      flex: 0 0 auto;
+      place-items: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--canvas);
+      color: var(--muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 12px;
+      font-weight: 700;
+    }
+    .title-group { min-width: 0; flex: 1; }
+    .title {
+      overflow: hidden;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 650;
+      letter-spacing: -.01em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .subtitle {
+      overflow: hidden;
+      margin-top: 1px;
+      color: var(--muted);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .badge {
+      flex: 0 0 auto;
+      padding: 3px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--canvas);
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: .01em;
+    }
+    .badge.good { color: var(--good); }
+    .badge.warn { color: var(--warn); }
+    .badge.bad { color: var(--bad); }
+    .body { padding: 13px 14px 14px; }
+    .summary { margin: 0 0 12px; color: var(--muted); }
+    .summary strong { color: var(--ink); font-weight: 600; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+      gap: 8px;
+      margin: 0 0 12px;
+    }
+    .metric {
+      min-width: 0;
+      padding: 9px 10px;
+      border: 1px solid var(--faint);
+      border-radius: 10px;
+      background: var(--canvas);
+    }
+    .metric-value {
+      overflow: hidden;
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 680;
+      letter-spacing: -.02em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .metric-label { margin-top: 1px; color: var(--muted); font-size: 10px; }
+    .facts {
+      display: grid;
+      grid-template-columns: minmax(78px, auto) minmax(0, 1fr);
+      gap: 7px 12px;
+      margin: 0;
+    }
+    .facts dt { color: var(--muted); }
+    .facts dd {
+      min-width: 0;
+      margin: 0;
+      overflow-wrap: anywhere;
+      color: var(--ink);
+    }
+    .mono, code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 11px;
+    }
+    .mono { color: var(--ink); }
+    .path { overflow-wrap: anywhere; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip {
+      max-width: 100%;
+      overflow: hidden;
+      padding: 4px 7px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--canvas);
+      color: var(--ink);
+      font-size: 11px;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+    .list li {
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      min-width: 0;
+      color: var(--ink);
+    }
+    .list li::before {
+      width: 4px;
+      height: 4px;
+      flex: 0 0 auto;
+      border-radius: 50%;
+      background: var(--muted);
+      content: "";
+    }
+    .list span { min-width: 0; overflow-wrap: anywhere; }
+    .notice {
+      padding: 10px 11px;
+      border: 1px solid var(--faint);
+      border-radius: 10px;
+      background: var(--canvas);
+      color: var(--muted);
+    }
+    .notice.warn { border-color: color-mix(in srgb, var(--warn) 30%, var(--line)); color: var(--warn); }
+    .notice.bad { border-color: color-mix(in srgb, var(--bad) 34%, var(--line)); color: var(--bad); }
+    details.fold { margin-top: 10px; border-top: 1px solid var(--faint); }
+    details.fold summary {
+      display: flex;
+      cursor: pointer;
+      align-items: center;
+      min-height: 34px;
+      color: var(--muted);
+      font-size: 11px;
+      list-style: none;
+      user-select: none;
+    }
+    details.fold summary::-webkit-details-marker { display: none; }
+    details.fold summary::after { margin-left: auto; content: "⌄"; font-size: 14px; }
+    details.fold[open] summary::after { content: "⌃"; }
+    .fold-content { padding: 0 0 3px; }
+    .code-shell { position: relative; overflow: hidden; border: 1px solid var(--faint); border-radius: 10px; background: var(--code); }
+    .code-topline {
+      display: flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 0 8px 0 10px;
+      border-bottom: 1px solid var(--faint);
+      color: var(--muted);
+      font-size: 10px;
+    }
+    .copy-card-output {
+      margin-left: auto;
+      border: 0;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--muted);
+      cursor: pointer;
+      padding: 4px 6px;
+      font-size: 10px;
+    }
+    .copy-card-output:hover, .copy-card-output:focus-visible { background: var(--faint); color: var(--ink); outline: none; }
+    pre {
+      max-height: 244px;
+      margin: 0;
+      padding: 10px;
+      overflow: auto;
+      color: var(--ink);
+      line-height: 1.5;
+      tab-size: 2;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .empty { color: var(--muted); }
+    .pending .body { padding: 12px 14px; }
+    @media (max-width: 420px) {
+      .card { border-radius: 13px; }
+      .head, .body { padding-left: 12px; padding-right: 12px; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .badge { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <main id="root" aria-live="polite"></main>
+  <script>
+    (() => {
+      const root = document.getElementById("root");
+      let copyableText = "";
+      let fallbackTimer = null;
 
-  function pill(text, cls) {
-    return '<span class="pill ' + esc(cls || "") + '">' + esc(text) + '</span>';
-  }
+      const escapeHtml = (value) => String(value ?? "").replace(/[&<>\"']/g, (character) => ({
+        "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"
+      })[character]);
 
-  function header(data, pills) {
-    const tool = data?.codexpro_tool;
-    return [
-      '<div class="rail"></div>',
-      '<header class="head">',
-      '<span class="glyph">' + esc(iconFor(tool)) + '</span>',
-      '<div class="headline"><div class="title">' + esc(titleFor(tool)) + '</div><div class="subtitle">' + esc(subtitleFor(data)) + '</div></div>',
-      '<div class="meta">' + (pills || '') + '</div>',
-      '</header>'
-    ].join('');
-  }
+      const toArray = (value) => Array.isArray(value) ? value : value == null ? [] : [value];
+      const asText = (value, fallback = "") => typeof value === "string" ? value : value == null ? fallback : String(value);
+      const number = (value, fallback = 0) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+      const truncate = (value, max = 2600) => {
+        const text = asText(value);
+        return text.length > max ? text.slice(0, max - 1) + "…" : text;
+      };
+      const fileName = (value) => {
+        if (!value || typeof value !== "object") return asText(value);
+        return asText(value.path || value.file || value.name || value.label || value.id || "");
+      };
+      const values = (items, limit = 12) => toArray(items).map(fileName).filter(Boolean).slice(0, limit);
+      const list = (items, empty = "None") => {
+        const entries = values(items);
+        return entries.length
+          ? '<ul class="list">' + entries.map((item) => '<li><span>' + escapeHtml(item) + '</span></li>').join("") + '</ul>'
+          : '<div class="empty">' + escapeHtml(empty) + '</div>';
+      };
+      const chips = (items, empty = "None") => {
+        const entries = values(items, 18);
+        return entries.length
+          ? '<div class="chips">' + entries.map((item) => '<span class="chip mono">' + escapeHtml(item) + '</span>').join("") + '</div>'
+          : '<div class="empty">' + escapeHtml(empty) + '</div>';
+      };
+      const metric = (value, label) => '<div class="metric"><div class="metric-value">' + escapeHtml(value) + '</div><div class="metric-label">' + escapeHtml(label) + '</div></div>';
+      function factRows(entries) {
+        return '<dl class="facts">' + entries.filter((entry) => entry[1] !== undefined && entry[1] !== null && entry[1] !== "").map((entry) => {
+          const value = entry[2] ? entry[1] : escapeHtml(entry[1]);
+          return '<dt>' + escapeHtml(entry[0]) + '</dt><dd>' + value + '</dd>';
+        }).join("") + '</dl>';
+      }
 
-  function metric(label, value) {
-    return '<div class="metric"><span class="label">' + esc(label) + '</span><div class="value">' + esc(value ?? "-") + '</div></div>';
-  }
+      function header(title, subtitle, badge, tone = "") {
+        return '<header class="head"><div class="tool-icon" aria-hidden="true">›_</div><div class="title-group"><div class="title">' + escapeHtml(title) + '</div>' +
+          (subtitle ? '<div class="subtitle">' + escapeHtml(subtitle) + '</div>' : '') +
+          '</div>' + (badge ? '<span class="badge ' + escapeHtml(tone) + '">' + escapeHtml(badge) + '</span>' : '') + '</header>';
+      }
 
-  function summaryItem(label, value) {
-    return '<div class="summary-item"><span class="summary-label">' + esc(label) + '</span><div class="summary-value">' + esc(value ?? "-") + '</div></div>';
-  }
+      function card(title, subtitle, badge, tone, body, extraClass = "") {
+        return '<section class="card ' + escapeHtml(extraClass) + '">' + header(title, subtitle, badge, tone) + '<div class="body">' + body + '</div></section>';
+      }
 
-  function codebox(label, text, extraClass) {
-    return '<div class="code ' + esc(extraClass || "") + '"><div class="codebar"><span>' + esc(label || "output") + '</span></div><pre>' + text + '</pre></div>';
-  }
+      function fold(title, content, open = false) {
+        return '<details class="fold"' + (open ? ' open' : '') + '><summary>' + escapeHtml(title) + '</summary><div class="fold-content">' + content + '</div></details>';
+      }
 
-  function fold(title, count, body, open) {
-    if (!body) return "";
-    return '<details class="fold"' + (open ? " open" : "") + '><summary><span class="fold-title">' + esc(title) + '</span><span class="fold-count">' + esc(count || "") + '</span></summary><div class="fold-body">' + body + '</div></details>';
-  }
+      function codeBlock(label, text, copy = false) {
+        const bounded = truncate(text, 9000);
+        if (copy) copyableText = bounded;
+        return '<div class="code-shell"><div class="code-topline"><span>' + escapeHtml(label) + '</span>' +
+          (copy ? '<button type="button" class="copy-card-output" data-copy-card-output aria-label="Copy result">Copy</button>' : '') +
+          '</div><pre>' + escapeHtml(bounded || "No output") + '</pre></div>';
+      }
 
-  function shortSource(value) {
-    if (value === "workspace") return "repo";
-    if (value === "plugin") return "plug";
-    if (value === "user") return "user";
-    return "skill";
-  }
+      function normalizedJson(value) {
+        if (typeof value !== "string") return value;
+        const text = value.trim();
+        if (!text || (text[0] !== "{" && text[0] !== "[")) return value;
+        try { return JSON.parse(text); } catch { return value; }
+      }
 
-  function renderDiff(diff) {
-    return truncate(diff, 14000).split("\n").map((line) => {
-      let cls = "diff-line";
-      if (line.startsWith("+") && !line.startsWith("+++")) cls += " diff-add";
-      else if (line.startsWith("-") && !line.startsWith("---")) cls += " diff-del";
-      else if (line.startsWith("@@")) cls += " diff-hunk";
-      return '<span class="' + cls + '">' + esc(line) + '</span>';
-    }).join("");
-  }
+      function extractStructuredContent(value, depth = 0, seen = new Set()) {
+        const normalized = normalizedJson(value);
+        if (!normalized || typeof normalized !== "object" || depth > 6 || seen.has(normalized)) return null;
+        seen.add(normalized);
+        if (Array.isArray(normalized)) {
+          for (const item of normalized) {
+            const match = extractStructuredContent(item, depth + 1, seen);
+            if (match) return match;
+          }
+          return null;
+        }
+        if (normalized.codexpro_tool || normalized.codexpro_title) return normalized;
+        const candidates = [
+          normalized.structuredContent,
+          normalized.toolOutput,
+          normalized.toolResponseMetadata,
+          normalized.toolResult,
+          normalized.tool_result,
+          normalized.mcp_tool_result,
+          normalized.call_tool_result,
+          normalized.result,
+          normalized.output,
+          normalized.payload,
+          normalized.data,
+          normalized.params
+        ];
+        for (const candidate of candidates) {
+          const match = extractStructuredContent(candidate, depth + 1, seen);
+          if (match) return match;
+        }
+        return null;
+      }
 
-  function renderFile(data) {
-    const pills = [
-      data.bytes !== undefined ? pill(data.bytes + " bytes") : "",
-      data.additions !== undefined ? pill("+" + data.additions, "good") : "",
-      data.deletions !== undefined ? pill("-" + data.deletions, "bad") : "",
-      data.replacements !== undefined ? pill(data.replacements + " replacements", "info") : ""
-    ].join("");
-    const body = data.diff ? renderDiff(data.diff) : esc(truncate(data.text || ""));
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      codebox(basename(data.path || data.plan_path || "file"), body, "") +
-      '</div></article>';
-  }
+      function applyHostTheme(globals = window.openai || {}) {
+        const theme = asText(globals.theme || window.openai?.theme || "light").toLowerCase();
+        document.documentElement.dataset.theme = theme.includes("dark") ? "dark" : "light";
+      }
 
-  function renderChanges(data) {
-    const files = Array.isArray(data.changed_files) ? data.changed_files : [];
-    const hasGitError = Boolean(data.status_error || data.diff_error);
-    const changed = Boolean(data.changed);
-    const pills = [
-      hasGitError ? pill("git unavailable", "warn") : changed ? pill("changed", "info") : pill("clean", "good"),
-      data.additions !== undefined ? pill("+" + data.additions, "good") : "",
-      data.deletions !== undefined ? pill("-" + data.deletions, "bad") : ""
-    ].join("");
-    const fileRows = files.slice(0, 10).map((line) => {
-      const status = String(line).slice(0, 2).trim() || "?";
-      const name = String(line).slice(2).trim() || String(line);
-      return '<div class="file-row"><span class="file-code">' + esc(status) + '</span><span class="file-name">' + esc(name) + '</span></div>';
-    }).join("");
-    const moreFiles = files.length > 10 ? '<div class="empty">+' + esc(files.length - 10) + ' more changed files</div>' : "";
-    const state = hasGitError
-      ? '<div class="empty">' + esc(data.status_error || data.diff_error) + '</div>'
-      : fileRows
-        ? '<div class="file-list">' + fileRows + '</div>' + moreFiles
-        : '<div class="empty">No changed files.</div>';
-    const diff = data.diff ? codebox("diff", renderDiff(data.diff), "") : "";
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      '<div class="summary">' +
-      summaryItem("Files", files.length) +
-      summaryItem("Added", "+" + (data.additions ?? 0)) +
-      summaryItem("Deleted", "-" + (data.deletions ?? 0)) +
-      '</div>' +
-      state +
-      diff +
-      '</div></article>';
-  }
+      function renderWorkspace(data) {
+        const rootPath = asText(data.root, "Workspace");
+        const git = asText(data.git_status, "");
+        const changed = git && !/clean|nothing to commit|no changes/i.test(git);
+        const summary = '<div class="summary"><strong>Ready to work.</strong> This workspace is connected for the current conversation.</div>' +
+          factRows([
+            ["Root", '<span class="mono path">' + escapeHtml(rootPath) + '</span>', true],
+            ["Instructions", data.agents_loaded ? "AGENTS.md loaded" : "No AGENTS.md found"],
+            ["Access", asText(data.tool_mode, "standard") + " tools · " + asText(data.write_mode, "off") + " writes"],
+            ["Shell", asText(data.bash_mode, "off")]
+          ]);
+        const context = chips(data.ai_context_files || data.skills, "No extra workspace context");
+        const status = git ? fold("Git status", codeBlock("Git", git), false) : "";
+        return card("Connected workspace", rootPath, changed ? "Changes" : "Ready", changed ? "warn" : "good", summary + fold("Available context", context, false) + status);
+      }
 
-  function compactRows(values, code, max = 8) {
-    const items = Array.isArray(values) ? values : [];
-    const rows = items.slice(0, max).map((value) => {
-      const label = typeof value === "string" ? value : (value?.path || value?.label || value?.name || "item");
-      const detail = typeof value === "object" && value ? (value?.reasons || []).join(", ") : "";
-      return '<div class="file-row"><span class="file-code">' + esc(code) + '</span><span class="file-name">' + esc(label + (detail ? ": " + detail : "")) + '</span></div>';
-    }).join("");
-    const more = items.length > max ? '<div class="empty">+' + esc(items.length - max) + ' more</div>' : "";
-    return '<div class="file-list">' + (rows || '<div class="empty">None.</div>') + more + '</div>';
-  }
+      function renderWorkspaceAnalysis(data) {
+        const coverage = data.coverage && typeof data.coverage === "object" ? data.coverage : {};
+        const analyzed = number(coverage.analyzedFiles ?? data.returned?.files ?? toArray(data.files).length);
+        const inventory = number(coverage.inventoryFiles, analyzed);
+        const symbols = number(coverage.symbolCount ?? data.returned?.symbols ?? toArray(data.symbols).length);
+        const relationships = number(coverage.relationshipCount ?? data.returned?.relationships ?? toArray(data.relationships).length);
+        const warnings = values(data.warnings, 6);
+        const metrics = '<div class="metrics">' + metric(analyzed + (inventory ? "/" + inventory : ""), "files analyzed") + metric(symbols, "symbols") + metric(relationships, "relationships") + '</div>';
+        const overview = factRows([
+          ["Scope", '<span class="mono path">' + escapeHtml(asText(data.path, ".")) + '</span>', true],
+          ["Languages", escapeHtml(values(data.languages).join(", ") || "Not detected"), true],
+          ["Projects", escapeHtml(values(data.project_types).join(", ") || "Not detected"), true]
+        ]);
+        const warningBlock = warnings.length ? '<div class="notice warn">' + escapeHtml(warnings.join(" ")) + '</div>' : "";
+        return card("Workspace map", asText(data.root, "Analysis complete"), data.output_limited ? "Partial" : "Ready", data.output_limited ? "warn" : "good", metrics + overview + warningBlock +
+          fold("Entrypoints", list(data.entrypoints, "No entrypoints detected"), false) +
+          fold("Important files", list(data.important_files || data.files, "No files returned"), false) +
+          fold("Areas", list(data.areas, "No areas returned"), false));
+      }
 
-  function renderWorkspaceAnalysis(data) {
-    const coverage = data.coverage || {};
-    const languages = Array.isArray(data.languages) ? data.languages : [];
-    const projects = Array.isArray(data.project_types) ? data.project_types : [];
-    const entrypoints = Array.isArray(data.entrypoints) ? data.entrypoints : [];
-    const areas = Array.isArray(data.areas) ? data.areas : [];
-    const symbols = Array.isArray(data.symbols) ? data.symbols : [];
-    const relationships = Array.isArray(data.relationships) ? data.relationships : [];
-    const warnings = Array.isArray(data.warnings) ? data.warnings : [];
-    const partial = Boolean(coverage.truncated || data.output_limited);
-    const pills = [
-      pill(projects.join(", ") || "project", "info"),
-      pill(languages.length + " languages"),
-      partial ? pill("limited", "warn") : pill("complete", "good")
-    ].join("");
-    const relationshipRows = relationships.slice(0, 8).map((edge) =>
-      '<div class="file-row"><span class="file-code">' + esc(edge?.kind || "edge") + '</span><span class="file-name">' + esc((edge?.from || "?") + " → " + (edge?.to || "?")) + '</span></div>'
-    ).join("");
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      '<div class="summary">' +
-      summaryItem("Files", coverage.inventoryFiles ?? coverage.inventory_files ?? 0) +
-      summaryItem("Analyzed", coverage.analyzedFiles ?? coverage.analyzed_files ?? 0) +
-      summaryItem("Symbols", coverage.symbolCount ?? coverage.symbol_count ?? symbols.length) +
-      '</div>' +
-      '<div class="section-label">Entrypoints</div>' + compactRows(entrypoints, "entry") +
-      fold("Areas", areas.length + " areas", compactRows(areas, "area"), false) +
-      fold("Symbols", symbols.length + " symbols", compactRows(symbols, "sym"), false) +
-      fold("Relationships", relationships.length + " edges", '<div class="file-list">' + (relationshipRows || '<div class="empty">None.</div>') + '</div>', false) +
-      (warnings.length ? fold("Warnings", warnings.length + " warnings", compactRows(warnings, "warn"), false) : "") +
-      '</div></article>';
-  }
+      function renderChanges(data) {
+        const files = values(data.changed_files, 18);
+        const failed = asText(data.status_error || data.diff_error, "");
+        const hasChanges = Boolean(data.changed) || files.length > 0 || number(data.additions) > 0 || number(data.deletions) > 0;
+        const metrics = '<div class="metrics">' + metric(files.length, "files") + metric("+" + number(data.additions), "additions") + metric("−" + number(data.deletions), "deletions") + '</div>';
+        const result = failed
+          ? '<div class="notice bad">' + escapeHtml(failed) + '</div>'
+          : hasChanges ? list(files, "Changes detected") : '<div class="notice">No changes detected.</div>';
+        const diff = asText(data.diff, "");
+        return card("Changes", asText(data.path, "Workspace review"), failed ? "Unavailable" : hasChanges ? "Review" : "Clean", failed ? "bad" : hasChanges ? "warn" : "good", metrics + result +
+          (diff ? fold("Raw diff", codeBlock("Diff", diff), false) : "") +
+          (data.status ? fold("Git status", codeBlock("Git", asText(data.status)), false) : ""));
+      }
 
-  function renderStructuredSearch(data) {
-    const analysis = data.analysis || {};
-    const groups = analysis.groups || {};
-    const order = ["definitions", "references", "tests", "configuration", "documentation", "other"];
-    const count = order.reduce((sum, name) => sum + (Array.isArray(groups[name]) ? groups[name].length : 0), 0);
-    const sections = order.map((name) => {
-      const matches = Array.isArray(groups[name]) ? groups[name] : [];
-      if (!matches.length) return "";
-      const rows = matches.slice(0, 8).map((match) =>
-        '<div class="hit"><div class="hit-file">' + esc((match.path || "match") + ":" + (match.line || 0)) + '</div><div class="hit-text">' + esc((match.text || "") + (match.reasons?.length ? ": " + match.reasons.join(", ") : "")) + '</div></div>'
-      ).join("");
-      const more = matches.length > 8 ? '<div class="empty">+' + esc(matches.length - 8) + ' more</div>' : "";
-      return fold(name, matches.length + " matches", '<div class="search">' + rows + more + '</div>', name === "definitions");
-    }).join("");
-    const coverage = analysis.coverage || {};
-    const pills = [pill(count + " grouped matches", "info"), pill(analysis.intent || "structured"), coverage.truncated ? pill("partial", "warn") : ""].join("");
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      '<div class="summary">' + summaryItem("Definitions", groups.definitions?.length ?? 0) + summaryItem("References", groups.references?.length ?? 0) + summaryItem("Tests", groups.tests?.length ?? 0) + '</div>' +
-      (sections || '<div class="empty">No grouped matches.</div>') +
-      '</div></article>';
-  }
+      function renderChangeAnalysis(data) {
+        const analysis = data.analysis && typeof data.analysis === "object" ? data.analysis : {};
+        const changeCard = renderChanges({ ...data, analysis: undefined });
+        const risks = toArray(analysis.risk_signals).map((risk) => typeof risk === "object" ? risk.label || risk.message || risk.path : risk).filter(Boolean);
+        const tests = toArray(analysis.related_tests).map(fileName).filter(Boolean);
+        const supplemental = '<div class="body">' +
+          (risks.length ? '<div class="notice warn">' + escapeHtml(values(risks, 5).join(" · ")) + '</div>' : '') +
+          fold("Affected areas", list(analysis.affected_areas, "No affected areas identified"), false) +
+          fold("Related tests", list(tests, "No related tests identified"), false) +
+          fold("Recommended checks", list(analysis.recommended_commands, "No additional checks suggested"), false) +
+          '</div>';
+        return changeCard.replace('</section>', supplemental + '</section>');
+      }
 
-  function renderChangeAnalysis(data) {
-    const analysis = data.analysis || {};
-    const files = Array.isArray(data.changed_files) ? data.changed_files : [];
-    const risks = Array.isArray(analysis.risk_signals) ? analysis.risk_signals : [];
-    const tests = Array.isArray(analysis.related_tests) ? analysis.related_tests : [];
-    const commands = Array.isArray(analysis.recommended_commands) ? analysis.recommended_commands : [];
-    const affected = Array.isArray(analysis.affected_areas) ? analysis.affected_areas : [];
-    const pills = [
-      pill(data.changed ? "changed" : "clean", data.changed ? "info" : "good"),
-      risks.length ? pill(risks.length + " risks", "warn") : pill("no risks", "good"),
-      pill("+" + (data.additions ?? 0), "good"),
-      pill("-" + (data.deletions ?? 0), "bad")
-    ].join("");
-    const commandRows = commands.slice(0, 8).map((item) =>
-      '<div class="file-row"><span class="file-code">run</span><span class="file-name">' + esc(item?.command || "") + '</span></div>'
-    ).join("");
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      '<div class="summary">' + summaryItem("Files", files.length) + summaryItem("Areas", affected.length) + summaryItem("Tests", tests.length) + '</div>' +
-      '<div class="section-label">Affected areas</div>' + compactRows(affected, "area") +
-      fold("Risk signals", risks.length + " signals", compactRows(risks, "risk"), risks.length > 0) +
-      fold("Related tests", tests.length + " tests", compactRows(tests, "test"), false) +
-      fold("Verification", commands.length + " commands", '<div class="file-list">' + (commandRows || '<div class="empty">None.</div>') + '</div>', false) +
-      (data.diff ? fold("Diff", "+" + (data.additions ?? 0) + " -" + (data.deletions ?? 0), codebox("diff", renderDiff(data.diff), ""), false) : "") +
-      '</div></article>';
-  }
+      function renderStatus(data) {
+        const status = asText(data.status, "");
+        const failed = asText(data.status_error, "");
+        const files = values(data.changed_files, 20);
+        const changed = Boolean(data.changed) || files.length > 0;
+        return card("Git status", asText(data.path, "Workspace"), failed ? "Unavailable" : changed ? "Changes" : "Clean", failed ? "bad" : changed ? "warn" : "good",
+          failed ? '<div class="notice bad">' + escapeHtml(failed) + '</div>' : (changed ? list(files, "No changed files") : '<div class="notice">Working tree is clean.</div>') +
+          (status ? fold("Full status", codeBlock("Git", status), false) : ""));
+      }
 
-  function gitStatusRows(status, max = 8) {
-    return String(status || "")
-      .split("\n")
-      .map((line) => line.trim())
-      .filter((line) => line && !line.startsWith("##"))
-      .slice(0, max)
-      .map((line) => {
-        const code = line.slice(0, 2).trim() || "?";
-        const name = line.slice(2).trim() || line;
-        return '<div class="file-row"><span class="file-code">' + esc(code) + '</span><span class="file-name">' + esc(name) + '</span></div>';
-      })
-      .join("");
-  }
+      function renderHandoff(data) {
+        const target = asText(data.agent_name || data.agent, "agent");
+        const details = factRows([
+          ["Target", target],
+          ["Plan", '<span class="mono path">' + escapeHtml(asText(data.plan_path, "Not recorded")) + '</span>', true],
+          ["Status", '<span class="mono path">' + escapeHtml(asText(data.status_path, "Not recorded")) + '</span>', true],
+          ["Changes", "+" + number(data.additions) + " −" + number(data.deletions)]
+        ]);
+        return card("Handoff ready", target, "Written", "good", '<div class="summary">The implementation plan is available to the selected local agent.</div>' + details +
+          (data.diff ? fold("Handoff diff", codeBlock("Diff", asText(data.diff)), false) : ""));
+      }
 
-  function renderWorkspace(data) {
-    const skills = Array.isArray(data.skill_inventory) ? data.skill_inventory : (Array.isArray(data.skills) ? data.skills : []);
-    const skillCount = Number(data.skill_counts?.total ?? skills.length);
-    const changedRows = gitStatusRows(data.git_status, 8);
-    const gitLines = String(data.git_status || "").split("\n").map((line) => line.trim()).filter((line) => line && !line.startsWith("##"));
-    const agentsLabel = data.agents_loaded ? (data.agents_path || "AGENTS.md") : "no AGENTS";
-    const pills = [
-      pill(agentsLabel, data.agents_loaded ? "good" : "warn"),
-      pill(skillCount + " skills", skillCount ? "info" : ""),
-      data.tool_mode ? pill("tools " + data.tool_mode) : ""
-    ].join("");
-    const contextRows = [
-      '<div class="file-row"><span class="file-code">root</span><span class="file-name">' + esc(data.root || ".") + '</span></div>',
-      data.workspace_id ? '<div class="file-row"><span class="file-code">id</span><span class="file-name">' + esc(data.workspace_id) + '</span></div>' : "",
-      data.agents_loaded ? '<div class="file-row"><span class="file-code">rules</span><span class="file-name">' + esc(data.agents_path || "AGENTS.md") + '</span></div>' : ""
-    ].join("");
-    const skillRows = skills.slice(0, 16).map((skill) => {
-      const value = typeof skill === "string" ? skill : (skill?.name || "skill");
-      const source = typeof skill === "string" ? "skill" : shortSource(skill?.source);
-      return '<div class="file-row"><span class="file-code">' + esc(source) + '</span><span class="file-name">' + esc(value) + '</span></div>';
-    }).join("");
-    const skillText = skills.length
-      ? '<div class="file-list">' + skillRows + '</div>' + (skills.length > 16 ? '<div class="empty">+' + esc(skills.length - 16) + ' more skills</div>' : "")
-      : '<div class="empty">No skills discovered. Use include_global_skills=true if this is unexpected.</div>';
-    const gitText = changedRows
-      ? '<div class="file-list">' + changedRows + '</div>' + (gitLines.length > 8 ? '<div class="empty">+' + esc(gitLines.length - 8) + ' more changed files</div>' : "")
-      : '<div class="empty">Working tree clean.</div>';
-    const tree = data.tree ? codebox("tree", esc(previewLines(data.tree, 18)), "") : "";
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      '<div class="summary">' +
-      summaryItem("Write", data.write_mode || "-") +
-      summaryItem("Bash", data.bash_mode || "-") +
-      summaryItem("Tools", data.tool_mode || "-") +
-      '</div>' +
-      '<div class="section-label">Context</div><div class="file-list">' + contextRows + '</div>' +
-      fold("Git", gitLines.length ? gitLines.length + " changed" : "clean", gitText, false) +
-      fold("Skills", skillCount + " discovered", skillText, false) +
-      fold("Tree", data.tree ? "available" : "", tree, false) +
-      '</div></article>';
-  }
+      function renderBash(data) {
+        const exitCode = data.exitCode ?? data.exit_code;
+        const success = Number(exitCode) === 0 && !data.signal;
+        const title = success ? "Verification completed" : "Verification needs attention";
+        const command = asText(data.command, "");
+        const output = "$ " + command + "\n\n" + (asText(data.stdout, "") || "(no stdout)") + (data.stderr ? "\n\n[stderr]\n" + asText(data.stderr) : "");
+        const factsBlock = factRows([
+          ["Directory", '<span class="mono path">' + escapeHtml(asText(data.cwd || data.root, "Workspace")) + '</span>', true],
+          ["Exit", asText(exitCode, "unknown") + (data.signal ? " · " + asText(data.signal) : "")],
+          ["Duration", number(data.durationMs ?? data.duration_ms) ? number(data.durationMs ?? data.duration_ms) + " ms" : "Not reported"]
+        ]);
+        return card(title, command || "Command finished", success ? "Passed" : "Review", success ? "good" : "warn", factsBlock + codeBlock("Terminal", output, true));
+      }
 
-  function renderHandoff(data) {
-    const pills = [
-      data.agent_name ? pill(data.agent_name, "info") : "",
-      data.model ? pill(data.model) : "",
-      data.additions !== undefined ? pill("+" + data.additions, "good") : "",
-      data.deletions !== undefined ? pill("-" + data.deletions, "bad") : ""
-    ].join("");
-    const rows = [
-      data.plan_path ? '<div class="file-row"><span class="file-code">plan</span><span class="file-name">' + esc(data.plan_path) + '</span></div>' : "",
-      data.status_path ? '<div class="file-row"><span class="file-code">status</span><span class="file-name">' + esc(data.status_path) + '</span></div>' : "",
-      data.diff_path ? '<div class="file-row"><span class="file-code">diff</span><span class="file-name">' + esc(data.diff_path) + '</span></div>' : ""
-    ].join("");
-    const diff = data.diff ? codebox("plan file diff", renderDiff(data.diff), "") : "";
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      '<div class="file-list">' + rows + '</div>' +
-      diff +
-      '</div></article>';
-  }
+      function renderGeneric(data) {
+        const title = asText(data.codexpro_title, "Tool result");
+        const preview = JSON.stringify(data, null, 2);
+        return card(title, "CodexPro", "Ready", "good", codeBlock("Result", preview));
+      }
 
-  function renderBash(data) {
-    const ok = Number(data.exitCode) === 0;
-    const stdoutLines = countLines(data.stdout);
-    const stderrLines = countLines(data.stderr);
-    const totalLines = stdoutLines + stderrLines;
-    const pills = [
-      pill(ok ? "passed" : "failed", ok ? "good" : "bad"),
-      pill(totalLines + " lines", "info"),
-      pill((data.durationMs ?? "-") + " ms")
-    ].join("");
-    const command = '<span class="prompt">$</span> ' + esc(data.command || "");
-    const output = previewLines(data.stdout || data.stderr || "", 18);
-    const outputBox = output
-      ? fold("Output preview", totalLines + " lines", codebox("output preview", esc(truncate(output, 5000)), "terminal"), false)
-      : '<div class="empty">Command produced no output.</div>';
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      '<div class="summary">' +
-      summaryItem("Exit", data.exitCode ?? "-") +
-      summaryItem("Lines", totalLines) +
-      summaryItem("Duration", (data.durationMs ?? "-") + " ms") +
-      '</div>' +
-      codebox("command", command, "terminal") +
-      outputBox +
-      '</div></article>';
-  }
+      function renderUnavailable() {
+        copyableText = "";
+        root.innerHTML = card("Result unavailable", "CodexPro", "Retry", "warn", '<div class="notice">The tool finished, but its display data did not reach this card. Refresh the ChatGPT plugin connection and try the action once more.</div>');
+      }
 
-  function renderSearch(data) {
-    const count = Array.isArray(data.matches) ? data.matches.length : 0;
-    const lines = String(data.text || "").split("\\n").filter(Boolean).slice(0, 90);
-    const hits = lines.map((line) => {
-      const parts = line.split(":");
-      const file = parts.length > 2 ? parts.slice(0, 2).join(":") : (parts[0] || "match");
-      const body = parts.length > 2 ? parts.slice(2).join(":").trim() : line;
-      return '<div class="hit"><div class="hit-file">' + esc(file) + '</div><div class="hit-text">' + esc(body) + '</div></div>';
-    }).join("") || '<div class="muted">No matches.</div>';
-    return '<article class="card">' + header(data, pill(count + " matches", "info") + pill(data.used || "search")) +
-      '<div class="body"><div class="search">' + hits + '</div></div></article>';
-  }
+      function renderPending() {
+        copyableText = "";
+        root.innerHTML = card("Preparing result", "CodexPro", "Loading", "", '<div class="notice">Loading the tool result…</div>', "pending");
+      }
 
-  function renderSelfTest(data) {
-    const checks = Array.isArray(data.checks) ? data.checks : [];
-    const status = String(data.status || "unknown");
-    const pills = [
-      pill(status, status === "pass" ? "good" : status === "fail" ? "bad" : "warn"),
-      pill((data.expected_tool_count ?? "-") + " tools", "info"),
-      pill((data.duration_ms ?? "-") + " ms")
-    ].join("");
-    const rows = checks.slice(0, 16).map((check) => {
-      const state = String(check?.status || "?").toUpperCase();
-      const cls = check?.status === "pass" ? "good" : check?.status === "fail" ? "bad" : "warn";
-      return '<div class="file-row"><span class="file-code ' + esc(cls) + '">' + esc(state) + '</span><span class="file-name">' + esc((check?.name || "check") + ": " + (check?.detail || "")) + '</span></div>';
-    }).join("");
-    const terms = data.terms_boundary
-      ? '<div class="file-list">' +
-          '<div class="file-row"><span class="file-code">tos</span><span class="file-name">local repo bridge only; no model access, quota, resale, or bypass behavior</span></div>' +
-        '</div>'
-      : "";
-    return '<article class="card">' + header(data, pills) + '<div class="body">' +
-      '<div class="summary">' +
-      summaryItem("Passed", data.passed ?? 0) +
-      summaryItem("Warned", data.warned ?? 0) +
-      summaryItem("Failed", data.failed ?? 0) +
-      '</div>' +
-      '<div class="file-list">' + (rows || '<div class="empty">No checks returned.</div>') + '</div>' +
-      fold("Terms boundary", "", terms, false) +
-      fold("Expected tools", Array.isArray(data.expected_tools) ? data.expected_tools.length + " tools" : "", codebox("tools", esc((data.expected_tools || []).join("\\n")), ""), false) +
-      '</div></article>';
-  }
+      function render(data) {
+        if (!data || typeof data !== "object") return false;
+        if (fallbackTimer) {
+          clearTimeout(fallbackTimer);
+          fallbackTimer = null;
+        }
+        copyableText = "";
+        const tool = asText(data.codexpro_tool, "");
+        if (tool === "open_current_workspace" || tool === "open_workspace" || tool === "workspace_snapshot") root.innerHTML = renderWorkspace(data);
+        else if (tool === "inspect_workspace") root.innerHTML = renderWorkspaceAnalysis(data);
+        else if (tool === "git_status") root.innerHTML = renderStatus(data);
+        else if (tool === "show_changes") root.innerHTML = data.analysis ? renderChangeAnalysis(data) : renderChanges(data);
+        else if (tool === "handoff_to_agent" || tool === "handoff_to_codex") root.innerHTML = renderHandoff(data);
+        else if (tool === "bash") root.innerHTML = renderBash(data);
+        else root.innerHTML = renderGeneric(data);
+        return true;
+      }
 
-  function renderInventory(data) {
-    const skills = Array.isArray(data.skills) ? data.skills : [];
-    const servers = Array.isArray(data.mcp_servers) ? data.mcp_servers : [];
-    const skillRows = skills.slice(0, 18).map((skill) =>
-      '<div class="file-row"><span class="file-code">' + esc(shortSource(skill?.source)) + '</span><span class="file-name">' + esc((skill?.name || "skill") + (skill?.description ? " — " + skill.description : "")) + '</span></div>'
-    ).join("");
-    const serverRows = servers.slice(0, 18).map((server) =>
-      '<div class="file-row"><span class="file-code">mcp</span><span class="file-name">' + esc((server?.name || "server") + (server?.source ? " — " + server.source : "")) + '</span></div>'
-    ).join("");
-    return '<article class="card">' + header(data, pill((data.skill_count ?? skills.length) + " skills", "info") + pill((data.mcp_server_count ?? servers.length) + " MCP")) +
-      '<div class="body">' +
-      '<div class="summary">' +
-      summaryItem("Write", data.write_mode || "-") +
-      summaryItem("Bash", data.bash_mode || "-") +
-      summaryItem("Tools", data.tool_mode || "-") +
-      '</div>' +
-      fold("Skills", (data.skill_count ?? skills.length) + " found", '<div class="file-list">' + (skillRows || '<div class="empty">No skills discovered.</div>') + '</div>', false) +
-      fold("MCP servers", (data.mcp_server_count ?? servers.length) + " found", '<div class="file-list">' + (serverRows || '<div class="empty">No MCP server names discovered.</div>') + '</div>', false) +
-      '</div></article>';
-  }
+      function renderFromHost(value) {
+        const data = extractStructuredContent(value);
+        if (data) render(data);
+      }
 
-  function renderWorkspaces(data) {
-    const spaces = Array.isArray(data.workspaces) ? data.workspaces : [];
-    const rows = spaces.map((workspace) =>
-      '<div class="file-row"><span class="file-code">ws</span><span class="file-name">' + esc((workspace?.id || "workspace") + " — " + (workspace?.root || "")) + '</span></div>'
-    ).join("");
-    return '<article class="card">' + header(data, pill((data.count ?? spaces.length) + " open", "info")) +
-      '<div class="body"><div class="file-list">' + (rows || '<div class="empty">No workspaces opened yet.</div>') + '</div></div></article>';
-  }
+      root.addEventListener("click", async (event) => {
+        const target = event.target instanceof Element ? event.target.closest("[data-copy-card-output]") : null;
+        if (!target || !copyableText) return;
+        const original = target.textContent;
+        try {
+          if (!navigator.clipboard || !navigator.clipboard.writeText) throw new Error("Clipboard unavailable");
+          await navigator.clipboard.writeText(copyableText);
+          target.textContent = "Copied";
+        } catch {
+          target.textContent = "Copy unavailable";
+        }
+        window.setTimeout(() => { target.textContent = original || "Copy"; }, 1400);
+      });
 
-  function renderServerConfig(data) {
-    const blocked = Array.isArray(data.blockedGlobs) ? data.blockedGlobs : [];
-    const allowed = Array.isArray(data.allowedRoots) ? data.allowedRoots : [];
-    const bashSession = data.bashSessionId || data.bash_session_id || "";
-    const bashSessionRequired = Boolean(data.requireBashSession || data.require_bash_session);
-    const rootRows = [
-      '<div class="file-row"><span class="file-code">root</span><span class="file-name">' + esc(data.defaultRoot || "-") + '</span></div>',
-      '<div class="file-row"><span class="file-code">url</span><span class="file-name">' + esc((data.host || "127.0.0.1") + ":" + (data.port || "-")) + '</span></div>',
-      '<div class="file-row"><span class="file-code">ui</span><span class="file-name">' + esc(data.widgetDomain || "-") + '</span></div>',
-      bashSession ? '<div class="file-row"><span class="file-code">bash</span><span class="file-name">' + esc("session " + bashSession + (bashSessionRequired ? " required" : "")) + '</span></div>' : ""
-    ].join("");
-    const allowedRows = allowed.map((root) =>
-      '<div class="file-row"><span class="file-code">allow</span><span class="file-name">' + esc(root) + '</span></div>'
-    ).join("");
-    const blockedRows = blocked.slice(0, 24).map((pattern) =>
-      '<div class="file-row"><span class="file-code">block</span><span class="file-name">' + esc(pattern) + '</span></div>'
-    ).join("");
-    const limits = [
-      summaryItem("Read", data.maxReadBytes ?? "-"),
-      summaryItem("Write", data.maxWriteBytes ?? "-"),
-      summaryItem("Output", data.maxOutputBytes ?? "-")
-    ].join("");
-    return '<article class="card">' + header(data, [
-      pill("tools " + (data.toolMode || "-"), "info"),
-      pill("bash " + (data.bashMode || "-")),
-      bashSession ? pill("session " + bashSession, bashSessionRequired ? "warn" : "info") : "",
-      pill(data.authEnabled ? "auth on" : "auth off", data.authEnabled ? "good" : "warn")
-    ].join("")) + '<div class="body">' +
-      '<div class="summary">' +
-      summaryItem("Write", data.writeMode || "-") +
-      summaryItem("Bash", data.bashMode || "-") +
-      summaryItem("Session", bashSession ? bashSession + (bashSessionRequired ? " required" : "") : "-") +
-      summaryItem("Tools", data.toolMode || "-") +
-      '</div>' +
-      '<div class="section-label">Runtime</div><div class="file-list">' + rootRows + '</div>' +
-      fold("Allowed roots", allowed.length + " roots", '<div class="file-list">' + (allowedRows || '<div class="empty">No roots configured.</div>') + '</div>', false) +
-      fold("Limits", "", '<div class="summary">' + limits + '</div>', false) +
-      fold("Blocked paths", blocked.length + " patterns", '<div class="file-list">' + (blockedRows || '<div class="empty">No blocked globs configured.</div>') + '</div>', false) +
-      fold("Raw config", "", codebox("config", esc(truncate(JSON.stringify(data || {}, null, 2), 8000)), ""), false) +
-      '</div></article>';
-  }
-
-  function renderStatus(data) {
-    const files = Array.isArray(data.changed_files) ? data.changed_files : [];
-    const rows = files.slice(0, 14).map((line) => {
-      const status = String(line).slice(0, 2).trim() || "?";
-      const name = String(line).slice(2).trim() || String(line);
-      return '<div class="file-row"><span class="file-code">' + esc(status) + '</span><span class="file-name">' + esc(name) + '</span></div>';
-    }).join("");
-    const state = data.status_error ? '<div class="empty">' + esc(data.status_error) + '</div>' : rows || '<div class="empty">Working tree clean.</div>';
-    return '<article class="card">' + header(data, pill(files.length ? files.length + " changed" : "clean", files.length ? "info" : "good")) +
-      '<div class="body"><div class="file-list">' + state + '</div>' +
-      fold("Raw status", countLines(data.status) + " lines", codebox("git status", esc(previewLines(data.status, 40)), ""), false) +
-      '</div></article>';
-  }
-
-  function renderTextSummary(data, label) {
-    const files = Array.isArray(data.files) ? data.files : Array.isArray(data.ai_context_files) ? data.ai_context_files : [];
-    const preview = data.preview || data.text || data.status || "";
-    const rows = files.slice(0, 14).map((file) =>
-      '<div class="file-row"><span class="file-code">file</span><span class="file-name">' + esc(file) + '</span></div>'
-    ).join("");
-    return '<article class="card">' + header(data, pill(files.length + " files", "info")) +
-      '<div class="body">' +
-      (rows ? '<div class="file-list">' + rows + '</div>' : '<div class="empty">No files listed.</div>') +
-      fold(label || "Preview", countLines(preview) + " lines", codebox(label || "preview", esc(previewLines(preview, 40)), ""), false) +
-      '</div></article>';
-  }
-
-  function renderGeneric(data) {
-    const keys = Object.keys(data || {}).filter((key) => !key.startsWith("codexpro_"));
-    const metrics = keys.slice(0, 3).map((key) => metric(key, typeof data[key] === "object" ? JSON.stringify(data[key]) : data[key])).join("");
-    return '<article class="card">' + header(data, pill("structured", "info")) +
-      '<div class="body">' + (metrics ? '<div class="metrics">' + metrics + '</div>' : '') +
-      codebox("structured output", esc(truncate(JSON.stringify(data || {}, null, 2))), "") +
-      '</div></article>';
-  }
-
-  function isPlaceholderPayload(data) {
-    if (!data || typeof data !== "object") return true;
-    const keys = Object.keys(data);
-    return !keys.length || (keys.length === 1 && data.codexpro_tool === "codexpro");
-  }
-
-  function renderPending() {
-    root.innerHTML = [
-      '<article class="card pending">',
-      '<div class="rail"></div>',
-      '<header class="head">',
-      '<span class="glyph">C</span>',
-      '<div class="headline"><div class="title">CodexPro</div><div class="subtitle">Waiting for tool result...</div></div>',
-      '<span class="pill info">waiting</span>',
-      '</header>',
-      '<div class="skeleton"><span></span><span></span><span></span></div>',
-      '</article>'
-    ].join("");
-  }
-
-  function render(data) {
-    if (isPlaceholderPayload(data)) {
+      applyHostTheme();
       renderPending();
-      return;
-    }
-    const tool = data.codexpro_tool;
-    if (tool === "server_config") {
-      root.innerHTML = renderServerConfig(data);
-    } else if (tool === "codexpro_self_test") {
-      root.innerHTML = renderSelfTest(data);
-    } else if (tool === "codexpro_inventory") {
-      root.innerHTML = renderInventory(data);
-    } else if (tool === "list_workspaces") {
-      root.innerHTML = renderWorkspaces(data);
-    } else if (tool === "open_current_workspace" || tool === "open_workspace" || tool === "workspace_snapshot") {
-      root.innerHTML = renderWorkspace(data);
-    } else if (tool === "inspect_workspace") {
-      root.innerHTML = renderWorkspaceAnalysis(data);
-    } else if (tool === "git_status") {
-      root.innerHTML = renderStatus(data);
-    } else if (tool === "show_changes") {
-      root.innerHTML = data.analysis ? renderChangeAnalysis(data) : renderChanges(data);
-    } else if (tool === "handoff_to_agent" || tool === "handoff_to_codex") {
-      root.innerHTML = renderHandoff(data);
-    } else if (tool === "write" || tool === "edit" || tool === "apply_patch" || tool === "git_diff" || tool === "export_pro_context" || tool === "read") {
-      root.innerHTML = renderFile(data);
-    } else if (tool === "bash") {
-      root.innerHTML = renderBash(data);
-    } else if (tool === "search") {
-      root.innerHTML = data.analysis ? renderStructuredSearch(data) : renderSearch(data);
-    } else if (tool === "read_handoff") {
-      root.innerHTML = renderTextSummary(data, "handoff");
-    } else if (tool === "codex_context") {
-      root.innerHTML = renderTextSummary(data, "context");
-    } else {
-      root.innerHTML = renderGeneric(data);
-    }
-  }
-
-  function extractStructuredContent(value) {
-    if (!value || typeof value !== "object") return {};
-    if (value.codexpro_tool || value.codexpro_title) return value;
-    const candidates = [
-      value.structuredContent,
-      value.toolOutput?.structuredContent,
-      value.toolOutput,
-      value.toolResponseMetadata?.structuredContent,
-      value.mcp_tool_result?.structuredContent,
-      value.call_tool_result?.structuredContent,
-      value.result?.structuredContent
-    ];
-    for (const candidate of candidates) {
-      if (candidate && typeof candidate === "object") return candidate;
-    }
-    return {};
-  }
-
-  render(extractStructuredContent(window.openai?.toolOutput || window.openai?.toolResponseMetadata || {}));
-
-  window.addEventListener("openai:set_globals", (event) => {
-    render(extractStructuredContent(
-      event.detail?.globals?.toolOutput ||
-      event.detail?.globals?.toolResponseMetadata ||
-      event.detail ||
-      window.openai?.toolOutput ||
-      window.openai?.toolResponseMetadata ||
-      {}
-    ));
-  }, { passive: true });
-
-  window.addEventListener("message", (event) => {
-    if (event.source !== window.parent) return;
-    const message = event.data;
-    if (!message || message.jsonrpc !== "2.0") return;
-    if (message.method === "ui/notifications/tool-result") {
-      render(extractStructuredContent(message.params || {}));
-    }
-  }, { passive: true });
-</script>
-`.trim();
+      fallbackTimer = window.setTimeout(renderUnavailable, 1200);
+      renderFromHost(window.openai?.toolOutput || window.openai?.toolResponseMetadata || window.openai?.toolResult || {});
+      window.addEventListener("openai:set_globals", (event) => {
+        const globals = event.detail?.globals || window.openai || {};
+        applyHostTheme(globals);
+        renderFromHost(globals.toolOutput || globals.toolResponseMetadata || globals.toolResult || globals);
+      });
+      window.addEventListener("message", (event) => {
+        const message = event.data || {};
+        if (message.type === "ui/notifications/tool-result" || message.method === "ui/notifications/tool-result") {
+          renderFromHost(message.params || message.data || message);
+        }
+      });
+    })();
+  </script>
+</body>
+</html>`;

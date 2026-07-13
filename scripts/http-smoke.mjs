@@ -446,7 +446,7 @@ try {
       throw new Error(`HTTP handoff mode should not advertise ${hidden}; got ${queryToolNames.join(', ')}`);
     }
   }
-  const toolCardUri = 'ui://widget/codexpro-tool-card-v9.html';
+  const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
   for (const visualTool of queryToolNames) {
     if (hasWidgetMeta(queryTools, visualTool, toolCardUri) || hasToolCardStatusMeta(queryTools, visualTool)) {
       throw new Error(`${visualTool} exposed widget metadata while CODEXPRO_TOOL_CARDS is off`);
@@ -483,13 +483,21 @@ try {
     if (toolCard.mimeType !== 'text/html;profile=mcp-app') {
       throw new Error(`unexpected HTTP tool-card mime type: ${toolCard.mimeType}`);
     }
-    const legacyToolCardUri = 'ui://widget/codexpro-tool-card-v8.html';
-    const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
-    if (!legacyToolCard) throw new Error(`HTTP MCP resources/list missing legacy ${legacyToolCardUri}`);
+    const legacyToolCardUris = ['ui://widget/codexpro-tool-card-v9.html', 'ui://widget/codexpro-tool-card-v8.html'];
+    for (const legacyToolCardUri of legacyToolCardUris) {
+      const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
+      if (!legacyToolCard) throw new Error(`HTTP MCP resources/list missing legacy ${legacyToolCardUri}`);
+    }
     const widget = await client.readResource({ uri: toolCardUri });
     const widgetText = widget.contents?.[0]?.text ?? '';
     const widgetMeta = widget.contents?.[0]?._meta ?? {};
-    if (!widgetText.includes('Waiting for tool result') || !widgetText.includes('renderWorkspace') || !widgetText.includes('renderSelfTest') || !widgetText.includes('details class="fold"') || !widgetText.includes('ui/notifications/tool-result')) {
+    for (const required of ['extractStructuredContent', 'renderWorkspace', 'renderBash', 'details class="fold"', 'ui/notifications/tool-result', 'copy-card-output', 'applyHostTheme', 'Result unavailable', 'Connected workspace', 'Verification completed']) {
+      if (!widgetText.includes(required)) throw new Error(`HTTP tool-card widget resource missing ${required}`);
+    }
+    if (widgetText.includes('Waiting for tool result') || widgetText.includes('codexpro-sheen')) {
+      throw new Error('HTTP tool-card widget retained the v9 loading treatment');
+    }
+    if (!widgetText.includes('renderChangeAnalysis')) {
       throw new Error('HTTP tool-card widget resource did not include expected Apps bridge code');
     }
     if (!widgetMeta.ui?.csp || !widgetMeta['openai/widgetCSP']) {
@@ -498,12 +506,14 @@ try {
     if (widgetMeta.ui?.domain !== 'https://widgets.codexpro.test' || widgetMeta['openai/widgetDomain'] !== 'https://widgets.codexpro.test') {
       throw new Error('HTTP tool-card widget resource did not expose standard and ChatGPT widget domain metadata');
     }
-    const legacyWidget = await client.readResource({ uri: legacyToolCardUri });
-    if (legacyWidget.contents?.[0]?.uri !== legacyToolCardUri) {
-      throw new Error('HTTP legacy tool-card widget resource did not preserve requested URI');
-    }
-    if (!(legacyWidget.contents?.[0]?.text ?? '').includes('Waiting for tool result')) {
-      throw new Error('HTTP legacy tool-card widget resource did not serve widget HTML');
+    for (const legacyToolCardUri of legacyToolCardUris) {
+      const legacyWidget = await client.readResource({ uri: legacyToolCardUri });
+      if (legacyWidget.contents?.[0]?.uri !== legacyToolCardUri) {
+        throw new Error('HTTP legacy tool-card widget resource did not preserve requested URI');
+      }
+      if (!(legacyWidget.contents?.[0]?.text ?? '').includes('Result unavailable')) {
+        throw new Error('HTTP legacy tool-card widget resource did not serve v10 HTML');
+      }
     }
   });
 
