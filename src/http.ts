@@ -1549,6 +1549,18 @@ async function main(): Promise<void> {
     });
   }
 
+  function sendMcpCompatibilityProbe(res: Response): void {
+    res.json({
+      ok: true,
+      name: "CodexPro",
+      protocol: "mcp",
+      transport: "streamable-http",
+      endpoint: "/mcp",
+      auth: config.authToken ? "query-token-or-bearer" : "none",
+      instructions: "POST an MCP initialize request to this URL. GET/HEAD without Mcp-Session-Id is a compatibility probe for ChatGPT connector creation."
+    });
+  }
+
   function closeTransport(record: TransportRecord): void {
     void record.transport.close?.();
   }
@@ -1687,6 +1699,10 @@ async function main(): Promise<void> {
 
   const handleSessionRequest = async (req: express.Request, res: express.Response) => {
     const sessionId = requestSessionId(req);
+    if (!sessionId && (req.method === "GET" || req.method === "HEAD")) {
+      sendMcpCompatibilityProbe(res);
+      return;
+    }
     const transport = getTransport(sessionId);
     if (!transport) {
       sendSessionError(res, sessionId);
@@ -1696,6 +1712,7 @@ async function main(): Promise<void> {
   };
 
   app.get("/mcp", handleSessionRequest);
+  app.head("/mcp", handleSessionRequest);
   app.delete("/mcp", handleSessionRequest);
 
   app.use((error: unknown, req: Request, res: Response, next: NextFunction) => {
