@@ -83,6 +83,20 @@ async function waitForJson(filePath, predicate, label) {
   throw new Error(`timed out waiting for ${label}: ${lastError?.message ?? 'predicate not met'}`);
 }
 
+async function waitForProcessExit(pid, label) {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === 'ESRCH') return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`timed out waiting for ${label} process ${pid} to exit`);
+}
+
 async function withStartedCodexPro(args, env, fn, options = {}) {
   const child = spawn(process.execPath, ['scripts/codexpro.mjs', 'start', ...args], {
     cwd: path.resolve('.'),
@@ -494,9 +508,12 @@ if (runInteractiveQuit([
 const cloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-'));
 const cloudflarePort = await getFreePort();
 const cloudflarePath = await runtimeStatusPath(cloudflareRoot, home);
+const fakeCloudflaredPidPath = path.join(home, 'fake-cloudflared.pid');
 const fakeCloudflared = await writeNodeExecutable(path.join(home, 'fake-cloudflared.mjs'), [
   '#!/usr/bin/env node',
+  "import fs from 'node:fs';",
   "if (process.argv.includes('--version')) { console.log('cloudflared version 2026.6.0'); process.exit(0); }",
+  'fs.writeFileSync(process.env.CODEXPRO_FAKE_CLOUDFLARED_PID, String(process.pid));',
   "console.error('https://api.trycloudflare.com/tunnel');",
   "setTimeout(() => console.error('https://real-codexpro.trycloudflare.com'), 100);",
   'setInterval(() => {}, 1000);',
@@ -514,12 +531,21 @@ await withStartedCodexPro([
   '--token',
   'codexpro-cloudflare-token',
   '--no-copy-url'
-], withoutProxyEnv(env), async () => {
+], withoutProxyEnv({ ...env, CODEXPRO_FAKE_CLOUDFLARED_PID: fakeCloudflaredPidPath }), async () => {
   const runtime = await waitForJson(cloudflarePath, (data) => data.endpoint?.includes('trycloudflare.com'), 'cloudflare runtime status');
   if (runtime.endpoint.includes('api.trycloudflare.com') || !runtime.endpoint.startsWith('https://real-codexpro.trycloudflare.com/mcp')) {
     throw new Error(`quick tunnel saved the wrong endpoint: ${JSON.stringify(runtime)}`);
   }
 });
+if (process.platform === 'win32') {
+  const fakeCloudflaredPid = Number(await fs.readFile(fakeCloudflaredPidPath, 'utf8'));
+  try {
+    await waitForProcessExit(fakeCloudflaredPid, 'fake cloudflared shim descendant');
+  } catch (error) {
+    spawnSync('taskkill.exe', ['/pid', String(fakeCloudflaredPid), '/t', '/f'], { stdio: 'ignore' });
+    throw error;
+  }
+}
 
 const proxyCloudflareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-cloudflare-proxy-'));
 const proxyCloudflarePort = await getFreePort();
