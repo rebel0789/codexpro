@@ -39,6 +39,7 @@ export interface WorkspaceProfile {
 export interface RuntimeConnection {
   version?: number;
   root?: string;
+  pid?: number;
   updatedAt?: string;
   endpoint?: string;
   localBase?: string;
@@ -136,5 +137,23 @@ export function readRuntimeConnection(root: string): RuntimeConnection {
   if (!runtime || typeof runtime !== "object" || Array.isArray(runtime)) return {};
   const typed = runtime as RuntimeConnection;
   if (typed.root && typed.root !== root) return {};
+  if (typeof typed.pid === "number" && !processIsAlive(typed.pid)) {
+    try {
+      fs.rmSync(runtimePath, { force: true });
+    } catch {
+      // Best-effort stale runtime cleanup.
+    }
+    return {};
+  }
   return typed;
+}
+
+function processIsAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return Boolean(error && typeof error === "object" && "code" in error && error.code === "EPERM");
+  }
 }

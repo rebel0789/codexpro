@@ -7,6 +7,8 @@
 - Kept raw reads and searches in normal chat output, added local copy support only for bounded terminal results, and added widget bridge smoke coverage.
 - Added guarded release scripts that reject wrong-folder and `npm --prefix` pack/publish attempts, verify the canonical CodexPro tarball, and require a full release check before publishing.
 
+- Added Windows CI coverage and made smoke, stress, tunnel-shim, and runtime-status checks portable across Windows and Unix hosts.
+
 ## 0.29.0-beta.1 (npm beta, 2026-07-11)
 
 - Added bounded multi-language repository analysis, grouped search results, change-impact and test recommendations, `codexpro inspect` / `codexpro review` CLI commands, and compact opt-in tool cards.
