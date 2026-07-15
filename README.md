@@ -170,6 +170,12 @@ https://your-device.your-tailnet.ts.net/mcp?codexpro_token=keep-this-token-stabl
 - `show_changes` keeps a review checkpoint so repeated unchanged reviews collapse.
 - Tool-card metadata is off unless `CODEXPRO_TOOL_CARDS=1`.
 
+## Guarded Git and pull requests
+
+Git state inspection is available as `git_current_state`. Mutating Git tools are opt-in: `CODEXPRO_GIT_WRITE=1` enables create/switch branch, explicit-path stage/unstage, and normal commits; `CODEXPRO_GIT_PUSH=1` enables a normal push of only the current branch; `CODEXPRO_GITHUB_PR=1` enables draft PR creation through authenticated `gh`. Push and PR calls require expected branch, expected HEAD, and confirmation.
+
+Handoff mode uses separate `CODEXPRO_HANDOFF_GIT_*` flags and limits stage/unstage/commit to `CODEXPRO_HANDOFF_GIT_ALLOWED_PATHS=.ai-bridge/**` by default. A commit fails if any staged path is outside that allowlist. Protected branches include the repository default plus main/master/develop/development/production/prod/release/staging. No merge, reset, clean, rebase, revert, cherry-pick, branch deletion, remote changes, force push, or implicit `git add .` capability is exposed. `gh auth status` must succeed in the LaunchAgent environment for PR creation.
+
 Read [SECURITY.md](SECURITY.md) before exposing CodexPro through any tunnel.
 
 ## RAM And ChatGPT Memory

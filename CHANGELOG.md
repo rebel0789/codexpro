@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Added opt-in guarded Git state, branch, explicit-path stage/unstage, commit, normal push, and draft pull-request MCP tools.
+- Added separate Agent and Handoff permission flags; Handoff Git writes default to `.ai-bridge/**` only.
+
 ## 0.29.0 (2026-07-13)
 
 - Replaced the heavy v9 Apps widget with a compact, host-theme-aware v10 card for selected user-visible results: workspace, analysis, changes, Git status, handoff, and terminal verification.
