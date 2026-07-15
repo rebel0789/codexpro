@@ -28,6 +28,7 @@ CodexPro can expose:
 - git status and diffs
 - `.ai-bridge` planning files
 - optional shell command execution through the `bash` tool, hidden when bash mode is off
+- opt-in guarded Git branch, explicit-path staging, commit, normal push, and draft-PR tools
 - optional write/edit/apply_patch capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
 - optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
 - optional local execute/review looping through `codexpro loop-handoff`, run from the user's terminal only with a user-provided reviewer command and iteration limit
@@ -43,6 +44,8 @@ Review changes against these failure modes before release:
 | ChatGPT can edit outside the intended repo | Allowed roots are explicit; path resolution rejects escapes, blocked globs, and symlink traversal. |
 | ChatGPT can run arbitrary shell by default | Bash defaults to safe mode, can be disabled, and full mode is a trusted-local-only choice. Safe mode can still run repo package scripts, so use `--no-bash` for untrusted repos. |
 | Handoff mode still exposes generic writes | Handoff/pro modes do not advertise generic `write`/`edit`/`apply_patch`; bounded handoff tools write `.ai-bridge` files only. |
+| Git tool can rewrite history or stage arbitrary files | Git tools use fixed argument arrays, protect default branches, require explicit paths, and expose no merge, reset, clean, rebase, revert, cherry-pick, delete, remote, or force operations. |
+| Handoff Git commits source files | Handoff stage/unstage/commit checks every path against `CODEXPRO_HANDOFF_GIT_ALLOWED_PATHS`, defaulting to `.ai-bridge/**`, including files staged before the call. |
 | Local Codex history is treated as ChatGPT memory | Codex session access is opt-in metadata/read mode and never attaches to a live Codex app session. |
 | Browser admin mutates live runtime unexpectedly | Admin profile changes apply on restart; active runtime policy stays stable for the current session. |
 | Remote MCP tool runs Codex/OpenCode/Pi directly | Agent execution remains a user-started CLI/watch process on the local machine. |
