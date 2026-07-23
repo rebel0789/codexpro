@@ -104,6 +104,21 @@ await fs.writeFile(path.join(codexSessionDir, `rollout-2026-06-18T01-02-03-${lar
   JSON.stringify({ timestamp: '2026-06-18T01:02:05Z', type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(140000) } }),
   JSON.stringify({ timestamp: '2026-06-18T01:02:06Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'Large tail summary' } })
 ].join('\n') + '\n', 'utf8');
+const oversizedCodexSessionId = '019cc365-cccc-7555-8666-123456789aaa';
+const oversizedCodexSessionPath = path.join(codexSessionDir, `rollout-2026-06-16T01-02-03-${oversizedCodexSessionId}.jsonl`);
+await fs.writeFile(oversizedCodexSessionPath, [
+  JSON.stringify({ timestamp: '2026-06-16T01:02:03Z', type: 'session_meta', payload: { id: oversizedCodexSessionId, cwd: tmp } }),
+  JSON.stringify({ timestamp: '2026-06-16T01:02:04Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Oversized session first request' } }),
+  JSON.stringify({ timestamp: '2026-06-16T01:02:05Z', type: 'response_item', payload: { type: 'function_call_output', output: 'x'.repeat(20_100_000) } }),
+  JSON.stringify({ timestamp: '2026-06-16T01:02:06Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: 'Oversized session tail answer' } }),
+  JSON.stringify({ timestamp: '2026-06-16T01:02:07Z', type: 'response_item', payload: { type: 'message', role: 'user', content: 'Oversized session latest request' } })
+].join('\n') + '\n', 'utf8');
+const oversizedSourceBeforeRead = await fs.stat(oversizedCodexSessionPath);
+const byteBoundaryCodexSessionId = '019cc364-dddd-7666-8777-123456789aaa';
+await fs.writeFile(path.join(codexSessionDir, `rollout-2026-06-15T01-02-03-${byteBoundaryCodexSessionId}.jsonl`), [
+  JSON.stringify({ timestamp: '2026-06-15T01:02:03Z', type: 'session_meta', payload: { id: byteBoundaryCodexSessionId, cwd: tmp } }),
+  JSON.stringify({ timestamp: '2026-06-15T01:02:04Z', type: 'response_item', payload: { type: 'message', role: 'assistant', content: `${'a'.repeat(3999)}😀` } })
+].join('\n') + '\n', 'utf8');
 const unreadableCodexSessionPath = path.join(codexSessionDir, 'rollout-2026-06-17T01-02-03-019cc366-bbbb-7444-8555-123456789aaa.jsonl');
 await fs.writeFile(unreadableCodexSessionPath, [
   JSON.stringify({ timestamp: '2026-06-17T01:02:03Z', type: 'session_meta', payload: { id: '019cc366-bbbb-7444-8555-123456789aaa', cwd: tmp } })
@@ -1095,6 +1110,166 @@ const sourcePathTranscript = await codexSessionsClient.request('tools/call', {
 });
 if (!sourcePathTranscript.content?.[0]?.text?.includes('Fix the smoke session browser')) {
   throw new Error(`read_codex_session rejected source_path returned by codex_sessions: ${sourcePathTranscript.content?.[0]?.text}`);
+}
+const oversizedTailPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: { session_id: oversizedCodexSessionId, max_messages: 2 }
+});
+if (
+  oversizedTailPage.structuredContent.direction !== 'tail' ||
+  !oversizedTailPage.content?.[0]?.text?.includes('Oversized session tail answer') ||
+  !oversizedTailPage.content?.[0]?.text?.includes('Oversized session latest request') ||
+  !oversizedTailPage.structuredContent.has_more ||
+  !Number.isInteger(oversizedTailPage.structuredContent.next_cursor) ||
+  oversizedTailPage.structuredContent.resume_cursor !== oversizedTailPage.structuredContent.next_cursor ||
+  oversizedTailPage.structuredContent.source_size_bytes <= 20_000_000
+) {
+  throw new Error(`read_codex_session did not tail-page an oversized session: ${JSON.stringify(oversizedTailPage.structuredContent)}`);
+}
+const boundedToolOutputPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: {
+    session_id: oversizedCodexSessionId,
+    cursor: oversizedTailPage.structuredContent.next_cursor,
+    max_messages: 1,
+    max_tool_output_bytes: 128
+  }
+});
+const boundedToolOutput = boundedToolOutputPage.structuredContent.messages?.[0]?.content ?? '';
+if (
+  boundedToolOutputPage.structuredContent.messages?.[0]?.role !== 'tool' ||
+  Buffer.byteLength(boundedToolOutput, 'utf8') > 128 ||
+  !boundedToolOutput.includes('[Tool output truncated]')
+) {
+  throw new Error(`read_codex_session did not bound a large tool output: ${JSON.stringify(boundedToolOutputPage.structuredContent)}`);
+}
+const tinyToolOutputPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: {
+    session_id: oversizedCodexSessionId,
+    cursor: oversizedTailPage.structuredContent.next_cursor,
+    max_messages: 1,
+    max_tool_output_bytes: 1
+  }
+});
+const tinyToolOutput = tinyToolOutputPage.structuredContent.messages?.[0]?.content ?? '';
+if (
+  tinyToolOutputPage.structuredContent.messages?.[0]?.role !== 'tool' ||
+  Buffer.byteLength(tinyToolOutput, 'utf8') > 1
+) {
+  throw new Error(`read_codex_session exceeded a tiny tool-output cap: ${JSON.stringify(tinyToolOutputPage.structuredContent)}`);
+}
+const zeroToolOutputPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: {
+    session_id: oversizedCodexSessionId,
+    cursor: oversizedTailPage.structuredContent.next_cursor,
+    max_messages: 1,
+    max_tool_output_bytes: 0
+  }
+});
+if (!zeroToolOutputPage.content?.[0]?.text?.includes('Oversized session first request')) {
+  throw new Error(`read_codex_session did not omit zero-byte tool output: ${zeroToolOutputPage.content?.[0]?.text}`);
+}
+const excludedToolOutputPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: {
+    session_id: oversizedCodexSessionId,
+    cursor: oversizedTailPage.structuredContent.next_cursor,
+    max_messages: 1,
+    exclude_tool_outputs: true
+  }
+});
+if (!excludedToolOutputPage.content?.[0]?.text?.includes('Oversized session first request')) {
+  throw new Error(`read_codex_session did not skip tool outputs: ${excludedToolOutputPage.content?.[0]?.text}`);
+}
+const oversizedHeadPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: { session_id: oversizedCodexSessionId, direction: 'head', max_messages: 1 }
+});
+if (
+  oversizedHeadPage.structuredContent.direction !== 'head' ||
+  !oversizedHeadPage.content?.[0]?.text?.includes('Oversized session first request') ||
+  !Number.isInteger(oversizedHeadPage.structuredContent.next_cursor)
+) {
+  throw new Error(`read_codex_session did not head-page an oversized session: ${JSON.stringify(oversizedHeadPage.structuredContent)}`);
+}
+const oversizedHeadSecondPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: {
+    session_id: oversizedCodexSessionId,
+    direction: 'head',
+    cursor: oversizedHeadPage.structuredContent.next_cursor,
+    max_messages: 1,
+    exclude_tool_outputs: true
+  }
+});
+const oversizedHeadThirdPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: {
+    session_id: oversizedCodexSessionId,
+    direction: 'head',
+    cursor: oversizedHeadSecondPage.structuredContent.next_cursor,
+    max_messages: 1,
+    exclude_tool_outputs: true
+  }
+});
+const headPageContents = [
+  oversizedHeadPage.structuredContent.messages?.[0]?.content,
+  oversizedHeadSecondPage.structuredContent.messages?.[0]?.content,
+  oversizedHeadThirdPage.structuredContent.messages?.[0]?.content
+];
+if (
+  JSON.stringify(headPageContents) !== JSON.stringify([
+    'Oversized session first request',
+    'Oversized session tail answer',
+    'Oversized session latest request'
+  ]) ||
+  oversizedHeadThirdPage.structuredContent.has_more ||
+  !Number.isInteger(oversizedHeadThirdPage.structuredContent.resume_cursor)
+) {
+  throw new Error(`read_codex_session head pagination skipped or duplicated messages: ${JSON.stringify(headPageContents)}`);
+}
+await expectToolError(
+  'read_codex_session',
+  {
+    session_id: oversizedCodexSessionId,
+    cursor: oversizedTailPage.structuredContent.source_size_bytes + 1
+  },
+  /cursor is beyond the current Codex session file/i,
+  codexSessionsClient
+);
+const oversizedSourceAfterRead = await fs.stat(oversizedCodexSessionPath);
+if (
+  oversizedSourceAfterRead.size !== oversizedSourceBeforeRead.size ||
+  oversizedSourceAfterRead.mtimeMs !== oversizedSourceBeforeRead.mtimeMs
+) {
+  throw new Error('read_codex_session modified the source JSONL');
+}
+await fs.appendFile(oversizedCodexSessionPath, JSON.stringify({
+  timestamp: '2026-06-16T01:02:08Z',
+  type: 'response_item',
+  payload: { type: 'message', role: 'assistant', content: 'Oversized session appended answer' }
+}) + '\n', 'utf8');
+const appendedHeadPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: {
+    session_id: oversizedCodexSessionId,
+    direction: 'head',
+    cursor: oversizedHeadThirdPage.structuredContent.resume_cursor,
+    max_messages: 1
+  }
+});
+if (!appendedHeadPage.content?.[0]?.text?.includes('Oversized session appended answer')) {
+  throw new Error(`read_codex_session could not resume after an append: ${appendedHeadPage.content?.[0]?.text}`);
+}
+const byteBoundaryPage = await codexSessionsClient.request('tools/call', {
+  name: 'read_codex_session',
+  arguments: { session_id: byteBoundaryCodexSessionId, max_messages: 1, max_total_bytes: 4000 }
+});
+const byteBoundaryContent = byteBoundaryPage.structuredContent.messages?.[0]?.content ?? '';
+if (Buffer.byteLength(byteBoundaryContent, 'utf8') > 4000) {
+  throw new Error(`read_codex_session exceeded max_total_bytes at a UTF-8 boundary: ${Buffer.byteLength(byteBoundaryContent, 'utf8')}`);
 }
 const largeTailSessions = await codexSessionsClient.request('tools/call', { name: 'codex_sessions', arguments: { query: 'Large tail summary', max_sessions: 5 } });
 if (largeTailSessions.structuredContent.total_found !== 0 || JSON.stringify(largeTailSessions.structuredContent).includes('Large tail summary')) {

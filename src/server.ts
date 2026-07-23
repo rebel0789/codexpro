@@ -2499,12 +2499,16 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         {
           title: "Read Codex Session",
           description:
-            "Opt-in, read-only local Codex transcript reader. Requires --codex-sessions read and returns a bounded transcript from a local Codex session JSONL file.",
+            "Opt-in, read-only local Codex transcript reader. Requires --codex-sessions read. It selects the newest page by default, returns that page chronologically, and reads the file in blocks instead of loading the full JSONL. Memory use still scales with the largest individual JSONL record scanned.",
           inputSchema: {
             session_id: z.string().optional().describe("Codex session id from codex_sessions."),
             source_path: z.string().optional().describe("Source path from codex_sessions. Must be inside the configured Codex session roots."),
+            direction: z.enum(["head", "tail"]).optional().describe("Page direction. tail selects the newest page and is the default; head reads from the start. Messages inside each page are returned chronologically."),
+            cursor: z.number().int().min(0).optional().describe("Opaque byte cursor returned as next_cursor or resume_cursor by a previous page. Reuse it only with the same session and direction. Omit for the newest tail page or the first head page."),
             max_messages: z.number().int().min(1).max(400).optional().describe("Maximum transcript messages. Default: 80."),
-            max_total_bytes: z.number().int().min(4000).max(400000).optional().describe("Maximum transcript content bytes. Default: 80000.")
+            max_total_bytes: z.number().int().min(4000).max(400000).optional().describe("Maximum returned transcript content bytes. Default: 80000."),
+            exclude_tool_outputs: z.boolean().optional().describe("Exclude function_call_output messages. Default: false."),
+            max_tool_output_bytes: z.number().int().min(0).max(400000).optional().describe("Maximum bytes retained per tool output before it is truncated. Default: 20000.")
           },
           annotations: READ_ONLY_ANNOTATIONS,
           _meta: {
@@ -2517,14 +2521,24 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           const result = await readCodexSession(config, {
             sessionId: args.session_id,
             sourcePath: args.source_path,
+            direction: args.direction,
+            cursor: args.cursor,
             maxMessages: args.max_messages,
-            maxTotalBytes: args.max_total_bytes
+            maxTotalBytes: args.max_total_bytes,
+            excludeToolOutputs: args.exclude_tool_outputs,
+            maxToolOutputBytes: args.max_tool_output_bytes
           });
           return textResult(result.text, {
             session: result.session,
             messages: result.messages,
             message_count: result.messages.length,
             truncated: result.truncated,
+            direction: result.direction,
+            cursor: result.cursor,
+            resume_cursor: result.resume_cursor,
+            next_cursor: result.next_cursor ?? null,
+            has_more: result.has_more,
+            source_size_bytes: result.source_size_bytes,
             codex_sessions_mode: config.codexSessions
           });
         }
