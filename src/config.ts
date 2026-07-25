@@ -38,6 +38,14 @@ export interface CodexProConfig {
   connectionTest: boolean;
   analysisEnabled: boolean;
   analysisLimits: AnalysisLimits;
+  gitWrite: boolean;
+  gitPush: boolean;
+  githubPr: boolean;
+  handoffGitWrite: boolean;
+  handoffGitPush: boolean;
+  handoffGithubPr: boolean;
+  handoffGitAllowedPaths: string[];
+  protectedBranches: string[];
 }
 
 const DEFAULT_BLOCKED_GLOBS = [
@@ -234,6 +242,11 @@ function boolFrom(value: string | undefined, fallback = false): boolean {
   return ["1", "true", "yes", "y", "on"].includes(value.toLowerCase());
 }
 
+function commaList(value: string | undefined, fallback: string[] = []): string[] {
+  const parsed = (value ?? "").split(",").map((item) => item.trim()).filter(Boolean);
+  return parsed.length ? [...new Set(parsed)] : fallback;
+}
+
 function isLoopbackHost(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1";
 }
@@ -330,6 +343,14 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
       maxScannedBytes: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_SCANNED_BYTES, DEFAULT_ANALYSIS_LIMITS.maxScannedBytes, 1_000_000, 512 * 1024 * 1024),
       maxSymbols: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_SYMBOLS, DEFAULT_ANALYSIS_LIMITS.maxSymbols, 100, 1_000_000),
       maxRelationships: numberFrom(process.env.CODEXPRO_ANALYSIS_MAX_RELATIONSHIPS, DEFAULT_ANALYSIS_LIMITS.maxRelationships, 100, 2_000_000)
-    }
+    },
+    gitWrite: boolFrom(process.env.CODEXPRO_GIT_WRITE),
+    gitPush: boolFrom(process.env.CODEXPRO_GIT_PUSH),
+    githubPr: boolFrom(process.env.CODEXPRO_GITHUB_PR),
+    handoffGitWrite: boolFrom(process.env.CODEXPRO_HANDOFF_GIT_WRITE),
+    handoffGitPush: boolFrom(process.env.CODEXPRO_HANDOFF_GIT_PUSH),
+    handoffGithubPr: boolFrom(process.env.CODEXPRO_HANDOFF_GITHUB_PR),
+    handoffGitAllowedPaths: commaList(process.env.CODEXPRO_HANDOFF_GIT_ALLOWED_PATHS, [".ai-bridge/**"]),
+    protectedBranches: commaList(process.env.CODEXPRO_PROTECTED_BRANCHES, ["main", "master", "develop", "development", "production", "prod", "release", "staging"])
   };
 }

@@ -10,6 +10,7 @@ import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge } f
 import { searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
 import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
+import { commit as guardedGitCommit, createBranch as guardedGitCreateBranch, createPullRequest as guardedGitCreatePullRequest, currentState as guardedGitCurrentState, gitToolNames, push as guardedGitPush, stagePaths as guardedGitStagePaths, switchBranch as guardedGitSwitchBranch, unstagePaths as guardedGitUnstagePaths } from "./guardedGit.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
@@ -418,11 +419,13 @@ function toolNamesForMode(config: CodexProConfig): string[] {
   for (const name of codexSessionToolNames(config)) {
     if (!names.includes(name)) names.push(name);
   }
+  for (const name of gitToolNames(config)) if (!names.includes(name)) names.push(name);
   return names;
 }
 
 const MINIMAL_TOOLS = new Set<string>(MINIMAL_TOOL_NAMES);
 const STANDARD_TOOLS = new Set<string>(STANDARD_TOOL_NAMES);
+const GUARDED_GIT_TOOL_NAMES = new Set(["git_current_state", "git_create_branch", "git_switch_branch", "git_stage_paths", "git_unstage_paths", "git_commit", "git_push_current_branch", "github_create_pull_request"]);
 const registeredToolNamesByServer = new WeakMap<object, string[]>();
 
 function rememberRegisteredTool(server: McpServer, name: string): void {
@@ -437,6 +440,7 @@ function registeredToolNames(server: McpServer): string[] {
 }
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
+  if (GUARDED_GIT_TOOL_NAMES.has(name)) return !config.connectionTest && gitToolNames(config).includes(name);
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
   if (name === "bash" && config.bashMode === "off") return false;
   if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
@@ -1058,6 +1062,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         connectionTest: config.connectionTest,
         analysisEnabled: config.analysisEnabled,
         analysisLimits: config.analysisLimits,
+        gitProfile: config.writeMode === "handoff" ? "handoff" : "agent",
+        gitPermissions: config.writeMode === "handoff"
+          ? { write: config.handoffGitWrite, push: config.handoffGitPush, pullRequest: config.handoffGithubPr, allowedPaths: config.handoffGitAllowedPaths }
+          : { write: config.gitWrite, push: config.gitPush, pullRequest: config.githubPr },
+        protectedBranches: config.protectedBranches,
         inheritEnv: config.inheritEnv,
         contextDir: config.contextDir,
         maxReadBytes: config.maxReadBytes,
@@ -1941,6 +1950,63 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const text = bashTextResult(config, result);
       return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result, bash_session_id: result.bashSessionId ?? null });
     }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "git_current_state",
+    { title: "Git Current State", description: "Return a bounded Git branch and change summary.", inputSchema: { workspace_id: z.string().optional() }, annotations: READ_ONLY_ANNOTATIONS },
+    async (args) => { const workspace = workspaces.getWorkspace(args.workspace_id); const state = guardedGitCurrentState(config, workspace); return textResult(JSON.stringify(state, null, 2), { workspace_id: workspace.id, ...state }); }
+  );
+  registerCodexTool(
+    config,
+    server,
+    "git_create_branch",
+    { title: "Create Git Branch", description: "Create and switch to a new non-protected branch without force flags.", inputSchema: { workspace_id: z.string().optional(), branch_name: z.string(), start_point: z.string().optional() }, annotations: LOCAL_WRITE_ANNOTATIONS },
+    async (args) => { const workspace = workspaces.getWorkspace(args.workspace_id); const state = guardedGitCreateBranch(config, workspace, args.branch_name, args.start_point); return textResult(JSON.stringify(state, null, 2), { workspace_id: workspace.id, ...state }); }
+  );
+  registerCodexTool(
+    config,
+    server,
+    "git_switch_branch",
+    { title: "Switch Git Branch", description: "Switch only to an existing local branch without force or cleanup.", inputSchema: { workspace_id: z.string().optional(), branch_name: z.string() }, annotations: LOCAL_WRITE_ANNOTATIONS },
+    async (args) => { const workspace = workspaces.getWorkspace(args.workspace_id); const state = guardedGitSwitchBranch(config, workspace, args.branch_name); return textResult(JSON.stringify(state, null, 2), { workspace_id: workspace.id, ...state }); }
+  );
+  registerCodexTool(
+    config,
+    server,
+    "git_stage_paths",
+    { title: "Stage Explicit Git Paths", description: "Stage only the supplied explicit workspace-relative paths; repository-wide staging is blocked.", inputSchema: { workspace_id: z.string().optional(), paths: z.array(z.string()).min(1) }, annotations: LOCAL_WRITE_ANNOTATIONS },
+    async (args) => { const workspace = workspaces.getWorkspace(args.workspace_id); const state = guardedGitStagePaths(config, guard, workspace, args.paths); return textResult(JSON.stringify(state, null, 2), { workspace_id: workspace.id, ...state }); }
+  );
+  registerCodexTool(
+    config,
+    server,
+    "git_unstage_paths",
+    { title: "Unstage Explicit Git Paths", description: "Unstage only supplied explicit paths without changing working-tree content.", inputSchema: { workspace_id: z.string().optional(), paths: z.array(z.string()).min(1) }, annotations: LOCAL_WRITE_ANNOTATIONS },
+    async (args) => { const workspace = workspaces.getWorkspace(args.workspace_id); const state = guardedGitUnstagePaths(config, guard, workspace, args.paths); return textResult(JSON.stringify(state, null, 2), { workspace_id: workspace.id, ...state }); }
+  );
+  registerCodexTool(
+    config,
+    server,
+    "git_commit",
+    { title: "Commit Staged Git Paths", description: "Create a normal commit from the current staged set after explicit confirmation.", inputSchema: { workspace_id: z.string().optional(), message: z.string(), expected_branch: z.string().optional(), expected_head: z.string().optional(), confirmation: z.boolean() }, annotations: LOCAL_WRITE_ANNOTATIONS },
+    async (args) => { const workspace = workspaces.getWorkspace(args.workspace_id); const result = guardedGitCommit(config, workspace, args.message, args.expected_branch, args.expected_head, args.confirmation); return textResult(JSON.stringify(result, null, 2), { workspace_id: workspace.id, ...result }); }
+  );
+  registerCodexTool(
+    config,
+    server,
+    "git_push_current_branch",
+    { title: "Push Current Git Branch", description: "Normally push only the current non-protected branch after expected branch, HEAD, and confirmation checks.", inputSchema: { workspace_id: z.string().optional(), remote: z.string().optional(), expected_branch: z.string(), expected_head: z.string(), confirmation: z.boolean() }, annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false, idempotentHint: false } },
+    async (args) => { const workspace = workspaces.getWorkspace(args.workspace_id); const result = guardedGitPush(config, workspace, args.remote, args.expected_branch, args.expected_head, args.confirmation); return textResult(JSON.stringify(result, null, 2), { workspace_id: workspace.id, ...result }); }
+  );
+  registerCodexTool(
+    config,
+    server,
+    "github_create_pull_request",
+    { title: "Create Draft GitHub Pull Request", description: "Create or return a draft PR for the current pushed non-protected branch after explicit confirmation.", inputSchema: { workspace_id: z.string().optional(), title: z.string(), body: z.string(), base: z.string().optional(), draft: z.boolean().optional(), expected_branch: z.string(), expected_head: z.string(), confirmation: z.boolean() }, annotations: { readOnlyHint: false, openWorldHint: true, destructiveHint: false, idempotentHint: false } },
+    async (args) => { const workspace = workspaces.getWorkspace(args.workspace_id); const result = guardedGitCreatePullRequest(config, workspace, args.title, args.body, args.base, args.draft, args.expected_branch, args.expected_head, args.confirmation); return textResult(JSON.stringify(result, null, 2), { workspace_id: workspace.id, ...result }); }
   );
 
   registerCodexTool(
