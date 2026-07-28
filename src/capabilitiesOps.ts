@@ -14,6 +14,7 @@ export interface SkillInventoryItem {
 
 interface SkillInventoryRecord extends SkillInventoryItem {
   absPath: string;
+  precedence: number;
 }
 
 export interface LoadedSkill {
@@ -89,8 +90,7 @@ function realpathOrUndefined(filePath: string): string | undefined {
   }
 }
 
-function displayPath(absPath: string, workspaceRoot: string): string {
-  const home = os.homedir();
+function displayPath(absPath: string, workspaceRoot: string, home = os.homedir()): string {
   if (absPath === workspaceRoot) return "$WORKSPACE";
   if (absPath.startsWith(`${workspaceRoot}${path.sep}`)) {
     return `$WORKSPACE/${path.relative(workspaceRoot, absPath).split(path.sep).join("/")}`;
@@ -102,10 +102,10 @@ function displayPath(absPath: string, workspaceRoot: string): string {
   return absPath;
 }
 
-function skillSource(skillPath: string, workspaceRoot: string): SkillInventoryItem["source"] {
+function skillSource(skillPath: string, workspaceRoot: string, home = os.homedir()): SkillInventoryItem["source"] {
   if (skillPath.startsWith(`${workspaceRoot}${path.sep}`)) return "workspace";
   if (skillPath.includes(`${path.sep}.codex${path.sep}plugins${path.sep}`)) return "plugin";
-  if (skillPath.startsWith(`${os.homedir()}${path.sep}`)) return "user";
+  if (skillPath.startsWith(`${home}${path.sep}`)) return "user";
   return "other";
 }
 
@@ -124,6 +124,19 @@ function compareSkills(a: SkillInventoryItem, b: SkillInventoryItem): number {
   );
 }
 
+function compareSkillPrecedence(a: SkillInventoryRecord, b: SkillInventoryRecord): number {
+  return (
+    a.precedence - b.precedence ||
+    skillSourceRank(a.source) - skillSourceRank(b.source) ||
+    a.name.localeCompare(b.name) ||
+    a.path.localeCompare(b.path)
+  );
+}
+
+function activeSkillRecords(records: SkillInventoryRecord[]): SkillInventoryRecord[] {
+  return unique([...records].sort(compareSkillPrecedence), (item) => item.name).sort(compareSkills);
+}
+
 function publicSkill(record: SkillInventoryRecord): SkillInventoryItem {
   return {
     name: record.name,
@@ -138,28 +151,35 @@ function frontmatterValue(text: string, key: string): string | undefined {
   return match?.[1]?.trim().replace(/^["']|["']$/g, "");
 }
 
-async function findSkillFiles(root: string, maxDepth: number, out: string[], maxItems: number): Promise<void> {
+async function findSkillFiles(
+  root: string,
+  maxDepth: number,
+  out: Array<{ file: string; precedence: number }>,
+  maxItems: number,
+  precedence: number
+): Promise<void> {
   if (out.length >= maxItems || maxDepth < 0) return;
-  const entries = await safeReaddir(root);
+  const entries = (await safeReaddir(root)).sort((a, b) => a.name.localeCompare(b.name));
   for (const entry of entries) {
     if (out.length >= maxItems) return;
     if (entry.name === "node_modules" || entry.name === ".git") continue;
     const abs = path.join(root, entry.name);
     if (entry.isFile() && entry.name === "SKILL.md") {
-      out.push(abs);
+      out.push({ file: abs, precedence });
       continue;
     }
     if (entry.isDirectory()) {
-      await findSkillFiles(abs, maxDepth - 1, out, maxItems);
+      await findSkillFiles(abs, maxDepth - 1, out, maxItems, precedence);
     }
   }
 }
 
 async function discoverSkillRecords(
   workspace: Workspace,
-  options: { includeGlobal?: boolean; maxSkills?: number } = {}
+  options: { includeGlobal?: boolean; maxSkills?: number; homeDir?: string } = {}
 ): Promise<SkillInventoryRecord[]> {
   const maxSkills = Math.max(1, Math.min(options.maxSkills ?? 120, 500));
+  const homeDir = options.homeDir ?? os.homedir();
   const workspaceRoots = [
     path.join(workspace.root, ".codex", "skills"),
     path.join(workspace.root, ".agents", "skills"),
@@ -172,21 +192,28 @@ async function discoverSkillRecords(
     ...workspaceRoots,
     ...(options.includeGlobal
       ? [
-          path.join(os.homedir(), ".codex", "skills"),
-          path.join(os.homedir(), ".agents", "skills"),
-          path.join(os.homedir(), ".codex", "plugins", "cache")
+          path.join(homeDir, ".codex", "skills"),
+          path.join(homeDir, ".agents", "skills"),
+          path.join(homeDir, ".codex", "plugins", "cache")
         ]
       : [])
   ].filter((dir) => fs.existsSync(dir));
 
-  const skillFiles: string[] = [];
-  for (const root of roots) {
-    await findSkillFiles(root, root.includes(`${path.sep}plugins${path.sep}cache`) ? 9 : 3, skillFiles, maxSkills);
+  const skillFiles: Array<{ file: string; precedence: number }> = [];
+  for (const [precedence, root] of roots.entries()) {
+    await findSkillFiles(
+      root,
+      root.includes(`${path.sep}plugins${path.sep}cache`) ? 9 : 3,
+      skillFiles,
+      maxSkills,
+      precedence
+    );
     if (skillFiles.length >= maxSkills) break;
   }
 
   const items: SkillInventoryRecord[] = [];
-  for (const file of skillFiles.slice(0, maxSkills)) {
+  for (const discovered of skillFiles.slice(0, maxSkills)) {
+    const file = discovered.file;
     const realFile = realpathOrUndefined(file) ?? file;
     if (isSubpath(file, workspace.root) && !isSubpath(realFile, workspace.root)) continue;
     let text = "";
@@ -200,20 +227,21 @@ async function discoverSkillRecords(
     items.push({
       name,
       description,
-      source: skillSource(realFile, workspace.root),
-      path: displayPath(realFile, workspace.root),
-      absPath: realFile
+      source: skillSource(realFile, workspace.root, homeDir),
+      path: displayPath(realFile, workspace.root, homeDir),
+      absPath: realFile,
+      precedence: discovered.precedence
     });
   }
 
-  return unique(items, (item) => `${item.source}:${item.name}:${item.path}`).sort(compareSkills);
+  return unique(items, (item) => `${item.source}:${item.name}:${item.path}`).sort(compareSkillPrecedence);
 }
 
 export async function discoverSkillInventory(
   workspace: Workspace,
-  options: { includeGlobal?: boolean; maxSkills?: number } = {}
+  options: { includeGlobal?: boolean; maxSkills?: number; homeDir?: string } = {}
 ): Promise<SkillInventoryItem[]> {
-  return (await discoverSkillRecords(workspace, options)).map(publicSkill);
+  return activeSkillRecords(await discoverSkillRecords(workspace, options)).map(publicSkill);
 }
 
 export async function loadSkill(
@@ -225,6 +253,7 @@ export async function loadSkill(
     includeGlobal?: boolean;
     maxSkills?: number;
     maxBytes?: number;
+    homeDir?: string;
   }
 ): Promise<LoadedSkill> {
   const name = options.name.trim();
@@ -233,16 +262,21 @@ export async function loadSkill(
 
   const records = await discoverSkillRecords(workspace, {
     includeGlobal: options.includeGlobal !== false,
-    maxSkills: options.maxSkills
+    maxSkills: options.maxSkills,
+    homeDir: options.homeDir
   });
-  const matches = records.filter(
+  const activeRecords = activeSkillRecords(records);
+  const candidateRecords = requestedPath
+    ? records
+    : activeSkillRecords(options.source ? records.filter((skill) => skill.source === options.source) : records);
+  const matches = candidateRecords.filter(
     (skill) =>
       skill.name === name &&
       (!options.source || skill.source === options.source) &&
       (!requestedPath || skill.path === requestedPath)
   );
   if (!matches.length) {
-    const near = records
+    const near = activeRecords
       .filter((skill) => skill.name.toLowerCase().includes(name.toLowerCase()))
       .slice(0, 8)
       .map((skill) => `${skill.name} [${skill.source}]`)
@@ -252,7 +286,7 @@ export async function loadSkill(
   }
   if (matches.length > 1) {
     const choices = matches.map((skill) => `${skill.name} [${skill.source}] at ${skill.path}`).join("; ");
-    throw new Error(`Multiple skills named ${name} were found. Pass source and path to choose one: ${choices}`);
+    throw new Error(`Multiple exact skill matches remained for ${name}: ${choices}`);
   }
 
   const [skill] = matches;

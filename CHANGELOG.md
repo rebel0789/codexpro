@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Made skill inventory and name-only `load_skill` use one deterministic winner per skill name, with workspace skills taking precedence over user-global and plugin skills.
+- Kept explicit `source` and `path` overrides available for diagnostics or intentionally loading a suppressed duplicate.
+
 ## 0.29.0 (2026-07-13)
 
 - Replaced the heavy v9 Apps widget with a compact, host-theme-aware v10 card for selected user-visible results: workspace, analysis, changes, Git status, handoff, and terminal verification.

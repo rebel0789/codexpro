@@ -342,15 +342,17 @@ for (const legacyToolCardUri of legacyToolCardUris) {
 }
 const current = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
 const realTmp = await fs.realpath(tmp);
-if (current.structuredContent.root !== realTmp) throw new Error(`open_current_workspace opened ${current.structuredContent.root}, expected ${realTmp}`);
+const realOpenedRoot = await fs.realpath(current.structuredContent.root);
+if (realOpenedRoot.toLowerCase() !== realTmp.toLowerCase()) throw new Error(`open_current_workspace opened ${current.structuredContent.root}, expected ${realTmp}`);
 if (current.structuredContent.codexpro_tool !== 'open_current_workspace') throw new Error('tool result was not tagged for widget rendering');
 if (current.structuredContent.tool_mode !== 'full') throw new Error(`open_current_workspace did not expose tool_mode: ${current.structuredContent.tool_mode}`);
 if (current.structuredContent.skill_inventory?.length) {
   throw new Error('open_current_workspace discovered skills by default');
 }
 const currentWithSkills = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false, include_skills: true } });
-if (!currentWithSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'smoke-skill')) {
-  throw new Error('open_current_workspace did not discover workspace skill inventory when requested');
+const activeSmokeSkills = currentWithSkills.structuredContent.skill_inventory?.filter?.((skill) => skill.name === 'smoke-skill') ?? [];
+if (activeSmokeSkills.length !== 1 || activeSmokeSkills[0].source !== 'workspace') {
+  throw new Error(`open_current_workspace did not expose exactly one workspace smoke-skill: ${JSON.stringify(activeSmokeSkills)}`);
 }
 if (currentWithSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'outside-skill')) {
   throw new Error('open_current_workspace followed a symlinked workspace skill root outside the workspace');
@@ -383,17 +385,22 @@ const snapshotAlias = await client.request('tools/call', {
 if (!snapshotAlias.structuredContent.tree) {
   throw new Error('workspace_snapshot did not accept max_files alias or return a tree');
 }
-await expectToolError('load_skill', { name: 'smoke-skill', source: 'workspace' }, /Multiple skills named smoke-skill/);
 const loadedSkill = await client.request('tools/call', {
+  name: 'load_skill',
+  arguments: { name: 'smoke-skill' }
+});
+if (loadedSkill.structuredContent.skill?.source !== 'workspace' || !loadedSkill.structuredContent.text?.includes('# Smoke Skill')) {
+  throw new Error('load_skill did not return bounded SKILL.md content for smoke-skill');
+}
+const suppressedSkill = await client.request('tools/call', {
   name: 'load_skill',
   arguments: {
     name: 'smoke-skill',
-    source: 'workspace',
-    path: '$WORKSPACE/.codex/skills/smoke-skill/SKILL.md'
+    path: '$WORKSPACE/.agents/skills/smoke-skill/SKILL.md'
   }
 });
-if (loadedSkill.structuredContent.skill?.name !== 'smoke-skill' || !loadedSkill.structuredContent.text?.includes('# Smoke Skill')) {
-  throw new Error('load_skill did not return bounded SKILL.md content for smoke-skill');
+if (!suppressedSkill.structuredContent.text?.includes('# Duplicate Smoke Skill')) {
+  throw new Error('load_skill path override did not load the suppressed workspace duplicate');
 }
 await expectToolError('load_skill', { name: 'missing-skill' }, /Skill not found/);
 await expectToolError('load_skill', { name: 'outside-skill', source: 'workspace', include_global_skills: false }, /Skill not found/);
@@ -685,7 +692,9 @@ const pwdBashText = pwdBash.content?.[0]?.text ?? '';
 if (!pwdBashText.includes('Exit: 0') || pwdBashText.includes('## stdout') || pwdBashText.includes('## stderr')) {
   throw new Error(`default bash transcript should be compact: ${pwdBashText}`);
 }
-if (!pwdBash.structuredContent.stdout?.includes(tmp)) {
+const normalizedPwd = (pwdBash.structuredContent.stdout ?? '').trim().replace(/^\/([A-Za-z])\//, '$1:/').replaceAll('/', path.sep).toLowerCase();
+const normalizedTmp = tmp.replaceAll('/', path.sep).toLowerCase();
+if (!normalizedPwd.includes(normalizedTmp)) {
   throw new Error(`compact bash transcript dropped structured stdout: ${JSON.stringify(pwdBash.structuredContent)}`);
 }
 await expectToolError('bash', { workspace_id: ws, command: 'find /tmp' }, /blocked/i);
@@ -1018,7 +1027,8 @@ await fullTranscriptClient.request('initialize', {
 fullTranscriptClient.notify('notifications/initialized');
 const fullTranscriptBash = await fullTranscriptClient.request('tools/call', { name: 'bash', arguments: { command: 'pwd' } });
 const fullTranscriptText = fullTranscriptBash.content?.[0]?.text ?? '';
-if (!fullTranscriptText.includes('## stdout') || !fullTranscriptText.includes(tmp)) {
+const normalizedFullTranscriptText = fullTranscriptText.replace(/\/([A-Za-z])\//g, '$1:/').replaceAll('/', path.sep).toLowerCase();
+if (!fullTranscriptText.includes('## stdout') || !normalizedFullTranscriptText.includes(normalizedTmp)) {
   throw new Error(`full bash transcript mode did not preserve raw stdout in chat text: ${fullTranscriptText}`);
 }
 fullTranscriptClient.close();
