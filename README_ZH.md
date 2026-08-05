@@ -148,6 +148,30 @@ npx codexpro@latest start --root /absolute/path/to/your/repo
 
 但普通用户更推荐全局安装，这样命令就是固定的 `codexpro setup` 和 `codexpro start`。
 
+## Tailscale Funnel 公网端口
+
+如果 tailnet 已允许 Funnel HTTPS，可以用这台设备的 `.ts.net` hostname 提供稳定的 ChatGPT Server URL：
+
+```bash
+codexpro tailscale \
+  --hostname your-device.your-tailnet.ts.net \
+  --tailscale-port 8443
+```
+
+`--tailscale-port` 控制的是 Tailscale Funnel 的公网 HTTPS 端口，默认是 `443`，只允许 `443`、`8443` 或 `10000`。它和本地 `--port`（默认 `8787`）是两回事：`--port` 只决定 CodexPro 在本机监听的端口。上面的示例会运行：
+
+```bash
+tailscale funnel --https=8443 http://127.0.0.1:8787
+```
+
+对应的 ChatGPT Server URL 是：
+
+```text
+https://your-device.your-tailnet.ts.net:8443/mcp
+```
+
+Funnel 必须已获 tailnet 允许，并需要 MagicDNS、HTTPS 证书和 Funnel policy 支持。
+
 ## ChatGPT 中的 App 设置
 
 先在 ChatGPT 打开 Developer Mode：

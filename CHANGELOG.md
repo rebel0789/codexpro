@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added configurable Tailscale Funnel public HTTPS ports through `--tailscale-port` and `CODEXPRO_TAILSCALE_PORT`; it defaults to `443`, accepts `443`, `8443`, or `10000`, and remains separate from the local CodexPro port.
 - Added saved additional projects with `codexpro settings set --project <path>`, session-local workspace selection through the existing `open_workspace` tool, and `--clear-projects` for removing the saved allowlist.
 - Isolated workspace selection between HTTP MCP sessions while preserving explicit workspace-id access for configured roots, with stdio, HTTP, profile, and regression coverage.
 - Added native workspace image inspection for PNG, JPEG, GIF, and WebP files through `view_image`.

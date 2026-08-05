@@ -162,7 +162,7 @@ ChatGPT web needs a public HTTPS Server URL. CodexPro supports:
 - Fast demo URL: `codexpro start --tunnel cloudflare`
 - Stable ngrok domain: `codexpro ngrok --hostname your-domain.ngrok-free.dev`
 - Stable Cloudflare route: `codexpro stable --hostname codexpro.example.com --tunnel-name codexpro`
-- Tailscale Funnel: `codexpro tailscale --hostname your-device.your-tailnet.ts.net`
+- Tailscale Funnel: `codexpro tailscale --hostname your-device.your-tailnet.ts.net --tailscale-port 8443`
 - Local only: `codexpro start --tunnel none`
 
 Cloudflare quick tunnels honor `HTTPS_PROXY`, `ALL_PROXY`, or `HTTP_PROXY` when those env vars are set.
@@ -176,19 +176,20 @@ chmod 600 ~/.codexpro/http-token
 
 codexpro tailscale \
   --hostname your-device.your-tailnet.ts.net \
+  --tailscale-port 8443 \
   --token-file ~/.codexpro/http-token
 ```
 
-Tailscale Funnel must already be allowed for your tailnet. It requires MagicDNS, HTTPS certificates, and Funnel policy support. CodexPro runs:
+`--tailscale-port` chooses the public HTTPS port for Tailscale Funnel. It defaults to `443`; the only allowed values are `443`, `8443`, and `10000`. It is separate from local `--port` (default `8787`), which controls only where CodexPro listens. Tailscale Funnel must already be allowed for your tailnet. It requires MagicDNS, HTTPS certificates, and Funnel policy support. With the example above, CodexPro runs:
 
 ```bash
-tailscale funnel http://127.0.0.1:8787
+tailscale funnel --https=8443 http://127.0.0.1:8787
 ```
 
 Then ChatGPT uses:
 
 ```text
-https://your-device.your-tailnet.ts.net/mcp?codexpro_token=keep-this-token-stable
+https://your-device.your-tailnet.ts.net:8443/mcp?codexpro_token=keep-this-token-stable
 ```
 
 The URL token is a personal-use compatibility fallback for connector forms that cannot set
