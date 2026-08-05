@@ -371,10 +371,13 @@ try {
   if (!homeText.includes('history.replaceState') || !homeText.includes('initialUrl.searchParams.delete("codexpro_token")')) {
     throw new Error('onboarding page did not remove query credentials from browser history');
   }
-  for (const fieldName of ['tunnelName', 'ngrokConfig', 'cloudflareConfig', 'cloudflareTokenFile', 'toolCards', 'noInstallCloudflared']) {
+  for (const fieldName of ['tunnelName', 'ngrokConfig', 'cloudflareConfig', 'cloudflareTokenFile', 'tailscalePort', 'toolCards', 'noInstallCloudflared']) {
     if (!homeText.includes(`name="${fieldName}"`)) {
       throw new Error(`onboarding page did not include profile field ${fieldName}`);
     }
+  }
+  if (!homeText.includes('<label data-tailscale-port-wrap hidden>') || !homeText.includes('tailscalePortInput.hidden = tunnel !== "tailscale"')) {
+    throw new Error('onboarding page did not restrict the Tailscale public-port selector to Tailscale Funnel');
   }
   if (homeText.includes(token)) {
     throw new Error('onboarding page leaked the raw auth token');
@@ -471,6 +474,75 @@ try {
     allowedRoots: [realAlternateRoot]
   }, null, 2), 'utf8');
 
+  const invalidTailscalePort = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      tunnel: 'tailscale',
+      hostname: 'codexpro-http-smoke.tailnet.ts.net',
+      tailscalePort: '9999'
+    })
+  });
+  const invalidTailscalePortJson = await invalidTailscalePort.json();
+  if (invalidTailscalePort.status !== 400 || !invalidTailscalePortJson.error?.issues?.fieldErrors?.tailscalePort?.length) {
+    throw new Error(`expected invalid Tailscale Funnel port to be rejected, got ${invalidTailscalePort.status} ${JSON.stringify(invalidTailscalePortJson)}`);
+  }
+
+  const tailscaleProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      tunnel: 'tailscale',
+      hostname: 'https://codexpro-http-smoke.tailnet.ts.net/mcp',
+      tailscalePort: '8443'
+    })
+  });
+  const tailscaleProfileJson = await tailscaleProfile.json();
+  const savedTailscaleProfile = JSON.parse(await fs.readFile(tailscaleProfileJson.profile_path, 'utf8'));
+  if (
+    tailscaleProfile.status !== 200 ||
+    savedTailscaleProfile.version !== 1 ||
+    savedTailscaleProfile.hostname !== 'codexpro-http-smoke.tailnet.ts.net' ||
+    savedTailscaleProfile.tailscalePort !== '8443' ||
+    tailscaleProfileJson.profile?.tailscalePort !== '8443' ||
+    tailscaleProfileJson.effective?.tailscalePort !== '8443'
+  ) {
+    throw new Error(`expected Tailscale selector port to persist independently from local port, got ${tailscaleProfile.status} ${JSON.stringify(tailscaleProfileJson)} ${JSON.stringify(savedTailscaleProfile)}`);
+  }
+
+  await fs.writeFile(path.join(profileHome, 'runtime', `${runtimeId}.json`), JSON.stringify({ version: 1, root, tunnel: 'tailscale' }), 'utf8');
+  const tailscaleHome = await fetch(`${baseUrl}/?codexpro_token=${encodeURIComponent(token)}`);
+  const tailscaleHomeText = await tailscaleHome.text();
+  if (
+    tailscaleHome.status !== 200 ||
+    !tailscaleHomeText.includes('<select name="tailscalePort" data-tailscale-port><option value="443">443</option><option value="8443" selected>8443</option><option value="10000">10000</option></select>') ||
+    !tailscaleHomeText.includes('https://codexpro-http-smoke.tailnet.ts.net:8443/mcp') ||
+    !tailscaleHomeText.includes('serverPreviewFor(hostnameInput.value, tunnel === "tailscale" ? tailscalePortInput?.value : "")') ||
+    !tailscaleHomeText.includes('tailscalePort: data.tailscalePort')
+  ) {
+    throw new Error('Tailscale profile page did not render or submit the selected non-default public port');
+  }
+
+  const { tailscalePort: _savedTailscalePort, ...legacyTailscaleProfileSeed } = savedTailscaleProfile;
+  await fs.writeFile(tailscaleProfileJson.profile_path, JSON.stringify({
+    ...legacyTailscaleProfileSeed,
+    hostname: 'legacy-http-smoke.tailnet.ts.net:8443'
+  }, null, 2), 'utf8');
+  const legacyTailscaleProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ tunnel: 'tailscale' })
+  });
+  const legacyTailscaleProfileJson = await legacyTailscaleProfile.json();
+  const savedLegacyTailscaleProfile = JSON.parse(await fs.readFile(legacyTailscaleProfileJson.profile_path, 'utf8'));
+  if (
+    legacyTailscaleProfile.status !== 200 ||
+    savedLegacyTailscaleProfile.hostname !== 'legacy-http-smoke.tailnet.ts.net' ||
+    savedLegacyTailscaleProfile.tailscalePort !== '8443'
+  ) {
+    throw new Error(`expected legacy Tailscale hostname port to canonicalize on save, got ${legacyTailscaleProfile.status} ${JSON.stringify(savedLegacyTailscaleProfile)}`);
+  }
+
   const localProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -486,15 +558,18 @@ try {
     localSavedProfile.cloudflareConfig ||
     localSavedProfile.cloudflareToken ||
     localSavedProfile.cloudflareTokenFile ||
+    localSavedProfile.tailscalePort ||
     JSON.stringify(localSavedProfile.allowedRoots) !== JSON.stringify([realAlternateRoot]) ||
     localProfileJson.profile?.hostname ||
     localProfileJson.profile?.ngrokConfig ||
     localProfileJson.profile?.cloudflareToken ||
     localProfileJson.profile?.cloudflareTokenFile ||
+    localProfileJson.profile?.tailscalePort ||
     localProfileJson.effective?.hostname ||
     localProfileJson.effective?.ngrokConfig ||
     localProfileJson.effective?.cloudflareToken ||
-    localProfileJson.effective?.cloudflareTokenFile
+    localProfileJson.effective?.cloudflareTokenFile ||
+    localProfileJson.effective?.tailscalePort
   ) {
     throw new Error(`admin profile local-only save kept stale tunnel config: ${JSON.stringify(localProfileJson)} ${JSON.stringify(localSavedProfile)}`);
   }
