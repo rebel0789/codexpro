@@ -284,12 +284,17 @@ function statusLine(status, detail = '') {
   const marker = status === 'ok' ? paint('green', 'OK') : status === 'warn' ? paint('yellow', 'WARN') : paint('cyan', '..');
   console.log(`${marker} ${detail}`);
 }
+function profilePublicHostname(profile) {
+  if (!profile?.hostname) return '';
+  if (profile.tunnel === 'tailscale' && profile.tailscalePort && profile.tailscalePort !== '443') return `${profile.hostname}:${profile.tailscalePort}`;
+  return profile.hostname;
+}
 
 function profileSummary(profile) {
   if (!profile?.tunnel) return '';
   if (profile.tunnel === 'ngrok' && profile.hostname) return `Saved ngrok URL: ${profile.hostname}`;
   if (profile.tunnel === 'cloudflare-named' && profile.hostname) return `Saved Cloudflare URL: ${profile.hostname}`;
-  if (profile.tunnel === 'tailscale' && profile.hostname) return `Saved Tailscale Funnel URL: ${profile.hostname}`;
+  if (profile.tunnel === 'tailscale' && profile.hostname) return `Saved Tailscale Funnel URL: ${profilePublicHostname(profile)}`;
   if (profile.tunnel === 'cloudflare') return 'Saved Cloudflare quick-tunnel setup';
   if (profile.tunnel === 'none') return 'Saved local-only setup';
   return '';
@@ -298,8 +303,8 @@ function profileSummary(profile) {
 function profileOneLine(profile, index = 0) {
   const prefix = index ? `${index}. ` : '';
   const tunnel = profile.tunnel ?? 'cloudflare';
-  const host = profile.hostname ? ` -> ${profile.hostname}` : '';
-  const port = profile.port ? ` :${profile.port}` : '';
+  const host = profile.hostname ? ` -> ${profilePublicHostname(profile)}` : '';
+  const port = profile.port ? `  local :${profile.port}` : '';
   return `${prefix}${profile.root}  ${tunnel}${host}${port}`;
 }
 

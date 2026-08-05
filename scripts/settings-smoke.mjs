@@ -888,7 +888,6 @@ if (!afterDelete.includes('No saved settings')) {
   throw new Error(`expected empty settings after delete, got:\n${afterDelete}`);
 }
 
-console.log('✓ settings smoke test passed');
 const tailscaleSettingsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-tailscale-config-'));
 run([
   'settings',
@@ -904,6 +903,15 @@ const tailscaleSettingsProfile = await readProfile(tailscaleSettingsRoot, home);
 if (tailscaleSettingsProfile.hostname !== 'codexpro-config.tailnet.ts.net' || tailscaleSettingsProfile.tailscalePort !== '8443') {
   throw new Error(`tailscale settings did not canonicalize legacy hostname port: ${JSON.stringify(tailscaleSettingsProfile)}`);
 }
+const tailscaleSettingsShown = run(['settings', 'show', '--root', tailscaleSettingsRoot], env);
+if (!tailscaleSettingsShown.includes('Tailscale port') || !tailscaleSettingsShown.includes('8443')) {
+  throw new Error(`tailscale settings show did not display the dedicated public port\n${tailscaleSettingsShown}`);
+}
+const tailscaleSettingsListed = run(['settings', 'list'], env);
+if (!tailscaleSettingsListed.includes('codexpro-config.tailnet.ts.net:8443') || !tailscaleSettingsListed.includes('local :8787')) {
+  throw new Error(`tailscale settings list did not distinguish public and local ports\n${tailscaleSettingsListed}`);
+}
+
 
 const tailscaleEnvPort = await getFreePort();
 const tailscaleEnvFailure = runFail([
@@ -995,3 +1003,4 @@ const localTailscaleSettingsProfile = await readProfile(tailscaleSettingsRoot, h
 if (localTailscaleSettingsProfile.tailscalePort !== undefined) {
   throw new Error(`non-Tailscale settings kept a stale Tailscale public port: ${JSON.stringify(localTailscaleSettingsProfile)}`);
 }
+console.log('✓ settings smoke test passed');
