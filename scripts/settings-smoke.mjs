@@ -73,6 +73,19 @@ async function readProfile(root, home) {
   return JSON.parse(await fs.readFile(path.join(home, 'profiles', `${id}.json`), 'utf8'));
 }
 
+async function writeRawProfile(root, home, profile) {
+  const realRoot = await fs.realpath(root);
+  const id = createHash('sha256').update(realRoot).digest('hex').slice(0, 24);
+  const profilesDir = path.join(home, 'profiles');
+  await fs.mkdir(profilesDir, { recursive: true });
+  await fs.writeFile(path.join(profilesDir, `${id}.json`), `${JSON.stringify({
+    version: 1,
+    ...profile,
+    root: realRoot,
+    updatedAt: new Date().toISOString()
+  }, null, 2)}\n`, 'utf8');
+}
+
 async function runtimeStatusPath(root, home) {
   const realRoot = await fs.realpath(root);
   const id = createHash('sha256').update(realRoot).digest('hex').slice(0, 24);
@@ -165,6 +178,76 @@ function findPythonForPty() {
     if (result.status === 0) return command;
   }
   return '';
+}
+
+function runInteractiveAnswers(args, env, answers) {
+  const python = findPythonForPty();
+  if (!python) return null;
+  const payload = JSON.stringify({
+    cmd: process.execPath,
+    args: ['scripts/codexpro.mjs', ...args],
+    cwd: path.resolve('.'),
+    answers
+  });
+  const code = `
+import json, os, pty, select, subprocess, sys, time
+payload = json.loads(sys.argv[1])
+master, slave = pty.openpty()
+proc = subprocess.Popen([payload["cmd"]] + payload["args"], cwd=payload["cwd"], env=os.environ.copy(), stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
+out = bytearray()
+pending = bytearray()
+answer_index = 0
+deadline = time.time() + 20
+while time.time() < deadline:
+    if proc.poll() is not None:
+        break
+    ready, _, _ = select.select([master], [], [], 0.1)
+    if not ready:
+        continue
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out.extend(chunk)
+    pending.extend(chunk)
+    if answer_index < len(payload["answers"]) and pending.endswith(b"\\n> "):
+        os.write(master, (payload["answers"][answer_index] + "\\n").encode())
+        answer_index += 1
+        pending.clear()
+if proc.poll() is None:
+    proc.terminate()
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+    sys.stderr.write(out.decode(errors="replace"))
+    raise SystemExit(124)
+while True:
+    ready, _, _ = select.select([master], [], [], 0)
+    if not ready:
+        break
+    try:
+        chunk = os.read(master, 4096)
+    except OSError:
+        break
+    if not chunk:
+        break
+    out.extend(chunk)
+os.close(master)
+sys.stdout.write(out.decode(errors="replace"))
+raise SystemExit(proc.returncode or 0)
+`;
+  const result = spawnSync(python, ['-c', code, payload], {
+    cwd: path.resolve('.'),
+    env: { ...env, NO_COLOR: '1' },
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024
+  });
+  return { status: result.status, output: `${result.stdout}\n${result.stderr}` };
 }
 
 function runInteractiveQuit(args, env) {
@@ -1002,5 +1085,100 @@ run([
 const localTailscaleSettingsProfile = await readProfile(tailscaleSettingsRoot, home);
 if (localTailscaleSettingsProfile.tailscalePort !== undefined) {
   throw new Error(`non-Tailscale settings kept a stale Tailscale public port: ${JSON.stringify(localTailscaleSettingsProfile)}`);
+}
+
+const guidedLegacyHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-legacy-home-'));
+const guidedLegacyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-legacy-root-'));
+await writeRawProfile(guidedLegacyRoot, guidedLegacyHome, {
+  tunnel: 'tailscale',
+  hostname: 'guided-legacy.tailnet.ts.net:8443',
+  port: '8787',
+  mode: 'agent',
+  token: 'guided-legacy-token'
+});
+const guidedLegacyEnv = { ...process.env, CODEXPRO_HOME: guidedLegacyHome };
+delete guidedLegacyEnv.CI;
+const guidedLegacy = runInteractiveAnswers([
+  'setup', '--root', guidedLegacyRoot
+], guidedLegacyEnv, ['', '', '', '', '', '', '', '', 'no']);
+if (guidedLegacy && guidedLegacy.status !== 0) {
+  throw new Error(`guided setup rejected defaults from a legacy saved Tailscale hostname\n${guidedLegacy.output}`);
+}
+if (guidedLegacy) {
+  const guidedLegacyProfile = await readProfile(guidedLegacyRoot, guidedLegacyHome);
+  if (guidedLegacyProfile.hostname !== 'guided-legacy.tailnet.ts.net' || guidedLegacyProfile.tailscalePort !== '8443') {
+    throw new Error(`guided setup did not canonicalize legacy saved Tailscale defaults: ${JSON.stringify(guidedLegacyProfile)}`);
+  }
+}
+
+const guidedEnvHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-env-home-'));
+const guidedEnvRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-env-root-'));
+const guidedEnv = {
+  ...process.env,
+  CODEXPRO_HOME: guidedEnvHome,
+  CODEXPRO_TUNNEL: 'tailscale',
+  CODEXPRO_HOSTNAME: 'guided-env.tailnet.ts.net:8443',
+  CODEXPRO_HTTP_TOKEN: 'guided-env-token'
+};
+delete guidedEnv.CI;
+const guidedFromEnv = runInteractiveAnswers([
+  'setup', '--root', guidedEnvRoot
+], guidedEnv, ['', '', '', '', '', '', '', '', 'no']);
+if (guidedFromEnv && guidedFromEnv.status !== 0) {
+  throw new Error(`guided setup rejected defaults from a legacy environment Tailscale hostname\n${guidedFromEnv.output}`);
+}
+if (guidedFromEnv) {
+  const guidedEnvProfile = await readProfile(guidedEnvRoot, guidedEnvHome);
+  if (guidedEnvProfile.hostname !== 'guided-env.tailnet.ts.net' || guidedEnvProfile.tailscalePort !== '8443') {
+    throw new Error(`guided setup did not canonicalize legacy environment Tailscale defaults: ${JSON.stringify(guidedEnvProfile)}`);
+  }
+}
+
+const legacyReuseHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-reuse-home-'));
+const legacyReuseSource = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-reuse-source-'));
+const legacyFirstRunTarget = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-first-run-target-'));
+const legacySettingsTarget = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-settings-target-'));
+await writeRawProfile(legacyReuseSource, legacyReuseHome, {
+  tunnel: 'tailscale',
+  hostname: 'reused-legacy.tailnet.ts.net:8443',
+  port: '8787',
+  mode: 'agent',
+  token: 'reused-legacy-token'
+});
+const legacyReuseEnv = { ...process.env, CODEXPRO_HOME: legacyReuseHome };
+delete legacyReuseEnv.CI;
+const firstRunReuse = runInteractiveAnswers([
+  'start', '--root', legacyFirstRunTarget, '--port', 'invalid'
+], legacyReuseEnv, ['']);
+if (firstRunReuse && (firstRunReuse.status === 0 || !/Invalid port: invalid/i.test(firstRunReuse.output))) {
+  throw new Error(`first-run profile reuse did not reach the expected post-save validation\n${firstRunReuse.output}`);
+}
+if (firstRunReuse) {
+  const firstRunReusedProfile = await readProfile(legacyFirstRunTarget, legacyReuseHome);
+  if (firstRunReusedProfile.hostname !== 'reused-legacy.tailnet.ts.net' || firstRunReusedProfile.tailscalePort !== '8443') {
+    throw new Error(`first-run profile reuse did not canonicalize legacy Tailscale settings: ${JSON.stringify(firstRunReusedProfile)}`);
+  }
+}
+
+run([
+  'settings', 'use', '--root', legacySettingsTarget, '--from-root', legacyReuseSource
+], legacyReuseEnv);
+const settingsReusedProfile = await readProfile(legacySettingsTarget, legacyReuseHome);
+if (settingsReusedProfile.hostname !== 'reused-legacy.tailnet.ts.net' || settingsReusedProfile.tailscalePort !== '8443') {
+  throw new Error(`settings use did not canonicalize legacy Tailscale settings: ${JSON.stringify(settingsReusedProfile)}`);
+}
+
+const legacyDisplayHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-display-home-'));
+const legacyDisplayRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-display-root-'));
+await writeRawProfile(legacyDisplayRoot, legacyDisplayHome, {
+  tunnel: 'tailscale',
+  hostname: 'display-legacy.tailnet.ts.net:8443',
+  tailscalePort: '8443',
+  port: '8787',
+  mode: 'agent'
+});
+const legacyDisplay = run(['settings', 'list'], { ...process.env, CODEXPRO_HOME: legacyDisplayHome });
+if (!legacyDisplay.includes('display-legacy.tailnet.ts.net:8443') || legacyDisplay.includes('display-legacy.tailnet.ts.net:8443:8443')) {
+  throw new Error(`settings list did not normalize a matching legacy suffix and dedicated Tailscale port\n${legacyDisplay}`);
 }
 console.log('✓ settings smoke test passed');

@@ -286,7 +286,11 @@ function statusLine(status, detail = '') {
 }
 function profilePublicHostname(profile) {
   if (!profile?.hostname) return '';
-  if (profile.tunnel === 'tailscale' && profile.tailscalePort && profile.tailscalePort !== '443') return `${profile.hostname}:${profile.tailscalePort}`;
+  if (profile.tunnel === 'tailscale') {
+    const endpoint = normalizeTailscaleEndpoint(profile.hostname, profile.tailscalePort, 'saved profile');
+    if (endpoint.port && endpoint.port !== '443') return `${endpoint.hostname}:${endpoint.port}`;
+    return endpoint.hostname;
+  }
   return profile.hostname;
 }
 
@@ -703,12 +707,13 @@ function deleteWorkspaceProfile(root) {
 function saveWorkspaceProfile(root, profile) {
   const dir = profileDir();
   const filePath = profilePathForRoot(root);
+  const canonicalProfile = canonicalProfileForSave(profile);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const payload = {
     version: 1,
     root,
     updatedAt: new Date().toISOString(),
-    ...profile
+    ...canonicalProfile
   };
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
   try {
@@ -1316,6 +1321,16 @@ function normalizeTailscaleEndpoint(hostname, dedicatedPort = '', source = 'sett
     throw new Error(`Conflicting Tailscale Funnel ports in ${source}: --tailscale-port is ${canonicalPort}, but the hostname uses ${legacyPort}.`);
   }
   return { hostname: parsed?.hostname ?? '', port: canonicalPort || legacyPort || '' };
+}
+
+function canonicalProfileForSave(profile) {
+  if (profile?.tunnel !== 'tailscale') return profile;
+  const endpoint = normalizeTailscaleEndpoint(profile.hostname, profile.tailscalePort, 'saved profile');
+  return {
+    ...profile,
+    hostname: endpoint.hostname,
+    tailscalePort: endpoint.port || '443'
+  };
 }
 
 function tailscaleEndpointOptions(args, profile = {}) {
@@ -3161,13 +3176,14 @@ async function collectTunnelPreference(rl, defaults, profile, options = {}) {
     cloudflareConfig = optionValue(defaults, profile, 'cloudflareConfig', ['CODEXPRO_CLOUDFLARE_CONFIG', 'CLOUDFLARE_TUNNEL_CONFIG'], '');
     cloudflareTokenFile = optionValue(defaults, profile, 'cloudflareTokenFile', ['CODEXPRO_CLOUDFLARE_TUNNEL_TOKEN_FILE', 'CLOUDFLARE_TUNNEL_TOKEN_FILE'], '');
   } else if (tunnel === 'tailscale') {
+    const defaultEndpoint = tailscaleEndpointOptions(defaults, profile);
     hostname = await ask(
       rl,
       'Tailscale Funnel hostname, without /mcp',
-      optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'TAILSCALE_FUNNEL_HOSTNAME'], '')
+      defaultEndpoint.hostname
     );
     if (!hostname) throw new Error('Tailscale setup needs your Funnel hostname, for example machine.tailnet.ts.net.');
-    const endpoint = normalizeTailscaleEndpoint(hostname, await ask(rl, 'Tailscale Funnel public HTTPS port', optionValue(defaults, profile, 'tailscalePort', ['CODEXPRO_TAILSCALE_PORT'], '443')), 'guided setup');
+    const endpoint = normalizeTailscaleEndpoint(hostname, await ask(rl, 'Tailscale Funnel public HTTPS port', defaultEndpoint.port), 'guided setup');
     hostname = endpoint.hostname;
     tailscalePort = endpoint.port;
   }
@@ -3413,13 +3429,14 @@ async function runSetupWizard(argv) {
       }
     } else if (tunnelChoice === 'tailscale') {
       profileTunnel = 'tailscale';
+      const defaultEndpoint = tailscaleEndpointOptions(defaults, profile);
       let hostname = await ask(
         rl,
         'Tailscale Funnel hostname, without /mcp',
-        optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'TAILSCALE_FUNNEL_HOSTNAME'], '')
+        defaultEndpoint.hostname
       );
       if (!hostname) throw new Error('Tailscale setup needs your Funnel hostname, for example machine.tailnet.ts.net.');
-      const endpoint = normalizeTailscaleEndpoint(hostname, await ask(rl, 'Tailscale Funnel public HTTPS port', optionValue(defaults, profile, 'tailscalePort', ['CODEXPRO_TAILSCALE_PORT'], '443')), 'guided setup');
+      const endpoint = normalizeTailscaleEndpoint(hostname, await ask(rl, 'Tailscale Funnel public HTTPS port', defaultEndpoint.port), 'guided setup');
       profileHostname = endpoint.hostname;
       profileTailscalePort = endpoint.port;
       args.push('--tunnel', 'tailscale', '--hostname', profileHostname, '--tailscale-port', profileTailscalePort);
