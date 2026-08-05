@@ -37,6 +37,13 @@ try {
   await writeSkill(homeRoot, path.join('.codex', 'plugins', 'cache', 'test-plugin-a', '1.0.0', 'skills', 'global-smoke-skill'), 'global-smoke-skill', 'Suppressed plugin global duplicate.', 'Plugin Global Duplicate');
   await writeSkill(homeRoot, path.join('.codex', 'plugins', 'cache', 'test-plugin-a', '1.0.0', 'skills', 'plugin-only-skill'), 'plugin-only-skill', 'First plugin copy.', 'Plugin First Copy');
   await writeSkill(homeRoot, path.join('.codex', 'plugins', 'cache', 'test-plugin-b', '2.0.0', 'skills', 'plugin-only-skill'), 'plugin-only-skill', 'Second plugin copy.', 'Plugin Second Copy');
+  const linkedSkillDir = path.join(homeRoot, '.cc-switch', 'skills', 'linked-skill');
+  await writeSkill(homeRoot, path.join('.cc-switch', 'skills', 'linked-skill'), 'linked-skill', 'Symlinked user skill.', 'Symlinked User Skill');
+  await fs.symlink(
+    linkedSkillDir,
+    path.join(homeRoot, '.codex', 'skills', 'linked-skill'),
+    process.platform === 'win32' ? 'junction' : 'dir'
+  );
 
   const workspace = {
     id: 'skill-precedence-smoke',
@@ -61,6 +68,11 @@ try {
     throw new Error(`plugin duplicate was not reduced to one plugin winner: ${JSON.stringify(pluginWinner)}`);
   }
 
+  const linkedSkill = onlySkill(inventory, 'linked-skill');
+  if (linkedSkill.source !== 'user' || linkedSkill.path !== '~/.cc-switch/skills/linked-skill/SKILL.md') {
+    throw new Error(`symlinked user skill was not discovered through its real directory: ${JSON.stringify(linkedSkill)}`);
+  }
+
   const loadedWorkspace = await loadSkill(workspace, { name: 'smoke-skill', maxSkills: 50, homeDir: homeRoot });
   if (!loadedWorkspace.text.includes('# Workspace Codex Skill')) {
     throw new Error(`name-only load did not choose the workspace winner: ${loadedWorkspace.skill.path}`);
@@ -69,6 +81,11 @@ try {
   const loadedUser = await loadSkill(workspace, { name: 'global-smoke-skill', maxSkills: 50, homeDir: homeRoot });
   if (!loadedUser.text.includes('# User Global Preferred Skill')) {
     throw new Error(`name-only load did not choose the user winner: ${loadedUser.skill.path}`);
+  }
+
+  const loadedLinkedSkill = await loadSkill(workspace, { name: 'linked-skill', maxSkills: 50, homeDir: homeRoot });
+  if (!loadedLinkedSkill.text.includes('# Symlinked User Skill')) {
+    throw new Error(`name-only load did not follow the symlinked skill directory: ${loadedLinkedSkill.skill.path}`);
   }
 
   const loadedPluginOverride = await loadSkill(workspace, {

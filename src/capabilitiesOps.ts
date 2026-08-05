@@ -170,6 +170,17 @@ async function findSkillFiles(
     }
     if (entry.isDirectory()) {
       await findSkillFiles(abs, maxDepth - 1, out, maxItems, precedence);
+      continue;
+    }
+    if (entry.isSymbolicLink()) {
+      try {
+        const target = await fsp.realpath(abs);
+        if ((await fsp.stat(target)).isDirectory()) {
+          await findSkillFiles(target, maxDepth - 1, out, maxItems, precedence);
+        }
+      } catch {
+        // Ignore broken or inaccessible skill directory links.
+      }
     }
   }
 }
