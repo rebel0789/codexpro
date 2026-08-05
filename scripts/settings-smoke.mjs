@@ -1134,6 +1134,36 @@ if (guidedFromEnv) {
   }
 }
 
+const guidedTailscaleEnvHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-tailscale-env-home-'));
+const guidedTailscaleEnvRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-tailscale-env-root-'));
+const guidedTailscaleEnv = {
+  ...process.env,
+  CODEXPRO_HOME: guidedTailscaleEnvHome,
+  CODEXPRO_TUNNEL: 'tailscale',
+  TAILSCALE_FUNNEL_HOSTNAME: 'guided-tailscale-env.tailnet.ts.net:8443',
+  CODEXPRO_HTTP_TOKEN: 'guided-tailscale-env-token'
+};
+for (const name of ['CI', 'CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'NGROK_DOMAIN', 'CODEXPRO_TAILSCALE_PORT']) {
+  delete guidedTailscaleEnv[name];
+}
+const guidedFromTailscaleEnv = runInteractiveAnswers([
+  'setup', '--root', guidedTailscaleEnvRoot
+], guidedTailscaleEnv, ['', '', '', '', '', '', '', '', 'no']);
+if (guidedFromTailscaleEnv && guidedFromTailscaleEnv.status !== 0) {
+  throw new Error(`guided setup rejected TAILSCALE_FUNNEL_HOSTNAME defaults\n${guidedFromTailscaleEnv.output}`);
+}
+if (guidedFromTailscaleEnv) {
+  const guidedTailscaleEnvProfile = await readProfile(guidedTailscaleEnvRoot, guidedTailscaleEnvHome);
+  if (
+    guidedTailscaleEnvProfile.hostname !== 'guided-tailscale-env.tailnet.ts.net'
+    || guidedTailscaleEnvProfile.tailscalePort !== '8443'
+  ) {
+    throw new Error(
+      `guided setup did not canonicalize TAILSCALE_FUNNEL_HOSTNAME defaults: ${JSON.stringify(guidedTailscaleEnvProfile)}`
+    );
+  }
+}
+
 const legacyReuseHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-reuse-home-'));
 const legacyReuseSource = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-reuse-source-'));
 const legacyFirstRunTarget = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-legacy-first-run-target-'));

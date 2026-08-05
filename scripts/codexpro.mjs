@@ -1336,7 +1336,7 @@ function canonicalProfileForSave(profile) {
 function tailscaleEndpointOptions(args, profile = {}) {
   const cli = normalizeTailscaleEndpoint(args.hostname ?? args.url ?? '', args.tailscalePort, 'CLI options');
   const env = normalizeTailscaleEndpoint(
-    process.env.CODEXPRO_PUBLIC_HOSTNAME ?? process.env.CODEXPRO_HOSTNAME ?? process.env.NGROK_DOMAIN ?? '',
+    process.env.CODEXPRO_PUBLIC_HOSTNAME ?? process.env.CODEXPRO_HOSTNAME ?? process.env.TAILSCALE_FUNNEL_HOSTNAME ?? process.env.NGROK_DOMAIN ?? '',
     process.env.CODEXPRO_TAILSCALE_PORT,
     'environment variables'
   );
