@@ -889,3 +889,109 @@ if (!afterDelete.includes('No saved settings')) {
 }
 
 console.log('✓ settings smoke test passed');
+const tailscaleSettingsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-tailscale-config-'));
+run([
+  'settings',
+  'set',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tunnel',
+  'tailscale',
+  '--hostname',
+  'https://codexpro-config.tailnet.ts.net:8443/mcp'
+], env);
+const tailscaleSettingsProfile = await readProfile(tailscaleSettingsRoot, home);
+if (tailscaleSettingsProfile.hostname !== 'codexpro-config.tailnet.ts.net' || tailscaleSettingsProfile.tailscalePort !== '8443') {
+  throw new Error(`tailscale settings did not canonicalize legacy hostname port: ${JSON.stringify(tailscaleSettingsProfile)}`);
+}
+
+const tailscaleEnvPort = await getFreePort();
+const tailscaleEnvFailure = runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tailscale',
+  fakeTailscale,
+  '--port',
+  String(tailscaleEnvPort),
+  '--token',
+  'codexpro-tailscale-env-token',
+  '--no-copy-url'
+], { ...env, CODEXPRO_TAILSCALE_PORT: '10000' }, /Recent tailscale output/);
+if (!tailscaleEnvFailure.includes(`funnel|--https=10000|http://127.0.0.1:${tailscaleEnvPort}`)) {
+  throw new Error(`tailscale environment public port did not override the saved profile\n${tailscaleEnvFailure}`);
+}
+
+const tailscaleCliPort = await getFreePort();
+const tailscaleCliFailure = runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tailscale',
+  fakeTailscale,
+  '--port',
+  String(tailscaleCliPort),
+  '--tailscale-port',
+  '443',
+  '--token',
+  'codexpro-tailscale-cli-token',
+  '--no-copy-url'
+], { ...env, CODEXPRO_TAILSCALE_PORT: '10000' }, /Recent tailscale output/);
+if (!tailscaleCliFailure.includes(`funnel|http://127.0.0.1:${tailscaleCliPort}`) || tailscaleCliFailure.includes('--https=')) {
+  throw new Error(`tailscale CLI public port did not override environment without changing the local port\n${tailscaleCliFailure}`);
+}
+
+const invalidTailscaleMarker = path.join(home, 'invalid-tailscale-started');
+const invalidTailscale = await writeNodeExecutable(path.join(home, 'invalid-tailscale.mjs'), [
+  '#!/usr/bin/env node',
+  "import fs from 'node:fs';",
+  "fs.writeFileSync(process.env.CODEXPRO_INVALID_TAILSCALE_MARKER, 'started');",
+  'process.exit(2);',
+  ''
+]);
+runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tailscale',
+  invalidTailscale,
+  '--tailscale-port',
+  '9999',
+  '--token',
+  'codexpro-tailscale-invalid-token',
+  '--no-copy-url'
+], { ...env, CODEXPRO_INVALID_TAILSCALE_MARKER: invalidTailscaleMarker }, /Tailscale Funnel HTTPS port must be 443, 8443, or 10000/i);
+try {
+  await fs.access(invalidTailscaleMarker);
+  throw new Error('invalid Tailscale public port started a child process');
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+
+runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tailscale',
+  invalidTailscale,
+  '--hostname',
+  'codexpro-config.tailnet.ts.net:8443',
+  '--tailscale-port',
+  '10000',
+  '--token',
+  'codexpro-tailscale-conflict-token',
+  '--no-copy-url'
+], { ...env, CODEXPRO_INVALID_TAILSCALE_MARKER: invalidTailscaleMarker }, /conflicting Tailscale Funnel ports/i);
+
+run([
+  'settings',
+  'set',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tunnel',
+  'none'
+], env);
+const localTailscaleSettingsProfile = await readProfile(tailscaleSettingsRoot, home);
+if (localTailscaleSettingsProfile.tailscalePort !== undefined) {
+  throw new Error(`non-Tailscale settings kept a stale Tailscale public port: ${JSON.stringify(localTailscaleSettingsProfile)}`);
+}

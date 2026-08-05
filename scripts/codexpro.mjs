@@ -113,6 +113,8 @@ Options:
   --ngrok <path>            ngrok executable. Default: PATH.
   --ngrok-config <path>     Optional ngrok config file path.
   --tailscale <path>        tailscale executable. Default: PATH.
+  --tailscale-port <443|8443|10000>
+                             Tailscale Funnel public HTTPS port. Default: 443.
   --no-profile              Do not load a saved ~/.codexpro workspace profile.
   --save-config             Save setup choices for this workspace when using setup.
   --no-save-config          Do not save setup choices when using setup.
@@ -1289,12 +1291,45 @@ function publicBaseFromHostname(hostname) {
   return `https://${normalizePublicHostname(hostname)}`;
 }
 
-function tailscaleFunnelHttpsPort(publicBase) {
-  const port = new URL(publicBase).port || '443';
+function normalizeTailscaleFunnelPort(value) {
+  const port = String(value ?? '').trim();
   if (!['443', '8443', '10000'].includes(port)) {
     throw new Error('Tailscale Funnel HTTPS port must be 443, 8443, or 10000.');
   }
   return port;
+}
+
+function normalizeTailscaleEndpoint(hostname, dedicatedPort = '', source = 'settings') {
+  const rawHostname = String(hostname ?? '').trim();
+  const requestedPort = String(dedicatedPort ?? '').trim();
+  const normalizedHostname = rawHostname ? normalizePublicHostname(rawHostname) : '';
+  const parsed = normalizedHostname ? new URL(`https://${normalizedHostname}`) : null;
+  const suffixPort = parsed?.port ?? '';
+  const canonicalPort = requestedPort ? normalizeTailscaleFunnelPort(requestedPort) : '';
+  const legacyPort = suffixPort ? normalizeTailscaleFunnelPort(suffixPort) : '';
+  if (canonicalPort && legacyPort && canonicalPort !== legacyPort) {
+    throw new Error(`Conflicting Tailscale Funnel ports in ${source}: --tailscale-port is ${canonicalPort}, but the hostname uses ${legacyPort}.`);
+  }
+  return { hostname: parsed?.hostname ?? '', port: canonicalPort || legacyPort || '' };
+}
+
+function tailscaleEndpointOptions(args, profile = {}) {
+  const cli = normalizeTailscaleEndpoint(args.hostname ?? args.url ?? '', args.tailscalePort, 'CLI options');
+  const env = normalizeTailscaleEndpoint(
+    process.env.CODEXPRO_PUBLIC_HOSTNAME ?? process.env.CODEXPRO_HOSTNAME ?? process.env.NGROK_DOMAIN ?? '',
+    process.env.CODEXPRO_TAILSCALE_PORT,
+    'environment variables'
+  );
+  const saved = normalizeTailscaleEndpoint(profile.hostname ?? '', profile.tailscalePort, 'saved profile');
+  return {
+    hostname: cli.hostname || env.hostname || saved.hostname || '',
+    port: cli.port || env.port || saved.port || '443'
+  };
+}
+
+function publicBaseFromTailscaleEndpoint(hostname, port) {
+  const normalizedPort = normalizeTailscaleFunnelPort(port);
+  return `https://${hostname}${normalizedPort === '443' ? '' : `:${normalizedPort}`}`;
 }
 
 function readTokenFile(filePath) {
@@ -3094,6 +3129,7 @@ async function collectTunnelPreference(rl, defaults, profile, options = {}) {
   const tunnelChoice = normalizeSetupChoice(tunnelAnswer, ['cloudflare', 'quick', 'ngrok', 'tailscale', 'stable', 'local'], defaultTunnel);
   const tunnel = tunnelModeFromChoice(tunnelChoice);
   let hostname = '';
+  let tailscalePort = '';
   let tunnelName = '';
   let ngrokConfig = '';
   let cloudflareConfig = '';
@@ -3126,10 +3162,13 @@ async function collectTunnelPreference(rl, defaults, profile, options = {}) {
       optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'TAILSCALE_FUNNEL_HOSTNAME'], '')
     );
     if (!hostname) throw new Error('Tailscale setup needs your Funnel hostname, for example machine.tailnet.ts.net.');
-    hostname = normalizePublicHostname(hostname);
+    const endpoint = normalizeTailscaleEndpoint(hostname, await ask(rl, 'Tailscale Funnel public HTTPS port', optionValue(defaults, profile, 'tailscalePort', ['CODEXPRO_TAILSCALE_PORT'], '443')), 'guided setup');
+    hostname = endpoint.hostname;
+    tailscalePort = endpoint.port;
   }
 
   return {
+    tailscalePort,
     tunnel,
     hostname,
     tunnelName,
@@ -3141,6 +3180,7 @@ async function collectTunnelPreference(rl, defaults, profile, options = {}) {
 
 function applyTunnelPreferenceToArgs(args, preference) {
   args.tunnel = preference.tunnel;
+  if (preference.tailscalePort) args.tailscalePort = preference.tailscalePort;
   if (preference.hostname) args.hostname = preference.hostname;
   if (preference.tunnelName) args.tunnelName = preference.tunnelName;
   if (preference.ngrokConfig) args.ngrokConfig = preference.ngrokConfig;
@@ -3163,6 +3203,7 @@ function profileFromPreference(root, args, profile, preference) {
   const token = preference.tunnel === 'none' ? existingToken : stableToken(existingToken);
   const allowedRoots = configuredProjectRoots(root, args, profile);
   return {
+    ...(preference.tailscalePort ? { tailscalePort: preference.tailscalePort } : {}),
     port,
     mode,
     tunnel: preference.tunnel,
@@ -3323,6 +3364,7 @@ async function runSetupWizard(argv) {
     let profileTunnel = 'cloudflare';
     let profileHostname = '';
     let profileTunnelName = '';
+    let profileTailscalePort = '';
     let profileNgrokConfig = '';
     let profileCloudflareConfig = '';
     let profileCloudflareTokenFile = '';
@@ -3372,9 +3414,10 @@ async function runSetupWizard(argv) {
         optionValue(defaults, profile, 'hostname', ['CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'TAILSCALE_FUNNEL_HOSTNAME'], '')
       );
       if (!hostname) throw new Error('Tailscale setup needs your Funnel hostname, for example machine.tailnet.ts.net.');
-      hostname = normalizePublicHostname(hostname);
-      profileHostname = hostname;
-      args.push('--tunnel', 'tailscale', '--hostname', hostname);
+      const endpoint = normalizeTailscaleEndpoint(hostname, await ask(rl, 'Tailscale Funnel public HTTPS port', optionValue(defaults, profile, 'tailscalePort', ['CODEXPRO_TAILSCALE_PORT'], '443')), 'guided setup');
+      profileHostname = endpoint.hostname;
+      profileTailscalePort = endpoint.port;
+      args.push('--tunnel', 'tailscale', '--hostname', profileHostname, '--tailscale-port', profileTailscalePort);
     } else {
       profileTunnel = 'cloudflare';
       args.push('--tunnel', 'cloudflare');
@@ -3394,6 +3437,7 @@ async function runSetupWizard(argv) {
         port,
         mode,
         tunnel: profileTunnel,
+        ...(profileTailscalePort ? { tailscalePort: profileTailscalePort } : {}),
         ...(profileHostname ? { hostname: profileHostname } : {}),
         ...(profileTunnelName ? { tunnelName: profileTunnelName } : {}),
         ...(profileNgrokConfig ? { ngrokConfig: profileNgrokConfig } : {}),
@@ -3447,6 +3491,7 @@ function printProfile(root, profile) {
     labelValue('Profile', profile.profilePath),
     labelValue('Tunnel', safe.tunnel ?? 'cloudflare'),
     ...(safe.hostname ? [labelValue('Hostname', safe.hostname)] : []),
+    ...(safe.tailscalePort ? [labelValue('Tailscale port', safe.tailscalePort)] : []),
     ...(safe.tunnelName ? [labelValue('Tunnel name', safe.tunnelName)] : []),
     ...(safe.ngrokConfig ? [labelValue('Ngrok config', safe.ngrokConfig)] : []),
     ...(safe.cloudflareConfig ? [labelValue('Cloudflare cfg', safe.cloudflareConfig)] : []),
@@ -3492,7 +3537,10 @@ function saveSettingsFromArgs(root, args, profile) {
   }
   const needsHostname = tunnel === 'ngrok' || tunnel === 'cloudflare-named' || tunnel === 'tailscale';
   const rawHostname = needsHostname ? (args.hostname ?? args.url ?? profile.hostname ?? '') : '';
-  const hostname = needsHostname ? normalizePublicHostname(rawHostname) : String(rawHostname ?? '').trim();
+  const tailscaleEndpoint = tunnel === 'tailscale' ? tailscaleEndpointOptions(args, profile) : null;
+  const hostname = tailscaleEndpoint
+    ? tailscaleEndpoint.hostname
+    : needsHostname ? normalizePublicHostname(rawHostname) : String(rawHostname ?? '').trim();
   if (needsHostname && !hostname) {
     throw new Error('--hostname is required for ngrok, cloudflare-named, and tailscale settings.');
   }
@@ -3528,6 +3576,7 @@ function saveSettingsFromArgs(root, args, profile) {
     mode,
     tunnel,
     ...(hostname ? { hostname } : {}),
+    ...(tailscaleEndpoint ? { tailscalePort: tailscaleEndpoint.port } : {}),
     ...(tunnelName ? { tunnelName } : {}),
     ...(ngrokConfig ? { ngrokConfig } : {}),
     ...(cloudflareConfig ? { cloudflareConfig } : {}),
@@ -3903,13 +3952,15 @@ async function main() {
   if (!['none', 'cloudflare', 'cloudflare-named', 'ngrok', 'tailscale'].includes(tunnel)) {
     throw new Error('--tunnel must be none, cloudflare, cloudflare-named, ngrok, or tailscale');
   }
-  const stableHostname = args.hostname
+  let stableHostname = args.hostname
     ?? args.url
     ?? process.env.CODEXPRO_PUBLIC_HOSTNAME
     ?? process.env.CODEXPRO_HOSTNAME
     ?? process.env.NGROK_DOMAIN
     ?? profile.hostname
     ?? '';
+  const tailscaleEndpoint = tunnel === 'tailscale' ? tailscaleEndpointOptions(args, profile) : null;
+  if (tailscaleEndpoint) stableHostname = tailscaleEndpoint.hostname;
   if (tunnel === 'cloudflare-named' && !stableHostname) {
     printStableUrlHelp();
     throw new Error('--hostname is required with stable URL mode.');
@@ -4006,7 +4057,7 @@ async function main() {
           : tunnel === 'ngrok'
             ? `ngrok endpoint for ${stableHostname}`
             : tunnel === 'tailscale'
-              ? `Tailscale Funnel endpoint for ${stableHostname}`
+              ? `Tailscale Funnel endpoint for ${publicBaseFromTailscaleEndpoint(stableHostname, tailscaleEndpoint.port)}`
               : 'none'
     )
   ]);
@@ -4116,8 +4167,8 @@ async function main() {
 
   if (tunnel === 'tailscale') {
     const tailscalePath = resolveTailscale(effectiveArgs);
-    const publicBase = publicBaseFromHostname(stableHostname);
-    const httpsPort = tailscaleFunnelHttpsPort(publicBase);
+    const publicBase = publicBaseFromTailscaleEndpoint(stableHostname, tailscaleEndpoint.port);
+    const httpsPort = tailscaleEndpoint.port;
     const tailscaleArgs = ['funnel'];
     if (httpsPort !== '443') tailscaleArgs.push(`--https=${httpsPort}`);
     tailscaleArgs.push(localBase);
