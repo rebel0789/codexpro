@@ -190,7 +190,7 @@ function runInteractiveAnswers(args, env, answers) {
     answers
   });
   const code = `
-import json, os, pty, select, subprocess, sys, time
+import json, os, pty, re, select, subprocess, sys, time
 payload = json.loads(sys.argv[1])
 master, slave = pty.openpty()
 proc = subprocess.Popen([payload["cmd"]] + payload["args"], cwd=payload["cwd"], env=os.environ.copy(), stdin=slave, stdout=slave, stderr=slave, close_fds=True)
@@ -213,7 +213,7 @@ while time.time() < deadline:
         break
     out.extend(chunk)
     pending.extend(chunk)
-    if answer_index < len(payload["answers"]) and pending.endswith(b"\\n> "):
+    if answer_index < len(payload["answers"]) and re.sub(rb"\\x1b\\[[0-9;?]*[A-Za-z]", b"", bytes(pending)).endswith(b"\\n> "):
         os.write(master, (payload["answers"][answer_index] + "\\n").encode())
         answer_index += 1
         pending.clear()
