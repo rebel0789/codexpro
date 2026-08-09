@@ -259,8 +259,9 @@ codexpro start</code></pre>
           <article>
             <span class="tag">Tailnet</span>
             <h3>Tailscale Funnel</h3>
-            <p>适合已经允许 Funnel HTTPS 的 tailnet。使用这台设备的 <code>.ts.net</code> hostname。</p>
-            <pre><code>codexpro tailscale --hostname your-device.your-tailnet.ts.net</code></pre>
+            <p>适合已经允许 Funnel HTTPS 的 tailnet。使用这台设备的 <code>.ts.net</code> hostname。<code>--tailscale-port</code> 选择公网端口：默认 <code>443</code>，也可用 <code>8443</code>/<code>10000</code>；它和本地 <code>--port</code> 相互独立。</p>
+            <pre><code>codexpro tailscale --hostname your-device.your-tailnet.ts.net --tailscale-port 8443
+# https://your-device.your-tailnet.ts.net:8443/mcp</code></pre>
           </article>
         </div>
       </section>

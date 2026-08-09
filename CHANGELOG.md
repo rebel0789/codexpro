@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added configurable Tailscale Funnel public HTTPS ports through `--tailscale-port` and `CODEXPRO_TAILSCALE_PORT`; it defaults to `443`, accepts `443`, `8443`, or `10000`, and remains separate from the local CodexPro port. Guided setup asks for the port and re-asks on invalid input, `--tailscale-port` is rejected for non-Tailscale tunnels, and an occupied public port now reports which port is taken.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.

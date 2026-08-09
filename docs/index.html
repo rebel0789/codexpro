@@ -293,8 +293,9 @@ codexpro setup</code>
           <article>
             <span class="tag">Tailnet</span>
             <h3>Tailscale Funnel</h3>
-            <p>Use your device's <code>.ts.net</code> hostname when your tailnet already allows public Funnel HTTPS.</p>
-            <pre><code>codexpro tailscale --hostname your-device.your-tailnet.ts.net</code></pre>
+            <p>Use your device's <code>.ts.net</code> hostname when your tailnet already allows public Funnel HTTPS. <code>--tailscale-port</code> selects the public port: <code>443</code> by default, or <code>8443</code>/<code>10000</code>; it is separate from local <code>--port</code>.</p>
+            <pre><code>codexpro tailscale --hostname your-device.your-tailnet.ts.net --tailscale-port 8443
+# https://your-device.your-tailnet.ts.net:8443/mcp</code></pre>
           </article>
         </div>
       </section>

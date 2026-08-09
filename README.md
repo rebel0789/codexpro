@@ -123,9 +123,11 @@ ChatGPT web needs HTTPS:
 codexpro start --tunnel cloudflare          # quick demo URL (changes)
 codexpro ngrok --hostname your.ngrok-free.dev
 codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
-codexpro tailscale --hostname your-device.your-tailnet.ts.net
+codexpro tailscale --hostname your-device.your-tailnet.ts.net --tailscale-port 8443
 codexpro start --tunnel none                # local only
 ```
+
+`--tailscale-port` sets the public HTTPS port for Tailscale Funnel: `443` (default), `8443`, or `10000`. It is separate from local `--port` (default `8787`), which only controls where CodexPro listens. The example above runs `tailscale funnel --https=8443 http://127.0.0.1:8787`, so ChatGPT connects to `https://your-device.your-tailnet.ts.net:8443/mcp`. Funnel must already be allowed for your tailnet, with MagicDNS and HTTPS certificates enabled.
 
 Keep a stable token for stable hostnames:
 
