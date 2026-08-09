@@ -3118,6 +3118,17 @@ async function ask(rl, question, fallback = '') {
   return answer.trim() || fallback;
 }
 
+async function askTailscalePort(rl, fallback) {
+  for (;;) {
+    const answer = await ask(rl, 'Tailscale Funnel public HTTPS port: 443, 8443, or 10000?', fallback);
+    try {
+      return normalizeTailscaleFunnelPort(answer);
+    } catch {
+      statusLine('warn', `${answer} is not a Funnel port. Choose 443, 8443, or 10000.`);
+    }
+  }
+}
+
 function tunnelChoiceFromProfile(profile, fallback = 'cloudflare') {
   if (profile?.tunnel === 'ngrok') return 'ngrok';
   if (profile?.tunnel === 'cloudflare-named') return 'stable';
@@ -3183,9 +3194,9 @@ async function collectTunnelPreference(rl, defaults, profile, options = {}) {
       defaultEndpoint.hostname
     );
     if (!hostname) throw new Error('Tailscale setup needs your Funnel hostname, for example machine.tailnet.ts.net.');
-    const endpoint = normalizeTailscaleEndpoint(hostname, await ask(rl, 'Tailscale Funnel public HTTPS port', defaultEndpoint.port), 'guided setup');
-    hostname = endpoint.hostname;
-    tailscalePort = endpoint.port;
+    const typed = normalizeTailscaleEndpoint(hostname, '', 'guided setup');
+    hostname = typed.hostname;
+    tailscalePort = await askTailscalePort(rl, typed.port || defaultEndpoint.port);
   }
 
   return {
@@ -3436,9 +3447,9 @@ async function runSetupWizard(argv) {
         defaultEndpoint.hostname
       );
       if (!hostname) throw new Error('Tailscale setup needs your Funnel hostname, for example machine.tailnet.ts.net.');
-      const endpoint = normalizeTailscaleEndpoint(hostname, await ask(rl, 'Tailscale Funnel public HTTPS port', defaultEndpoint.port), 'guided setup');
-      profileHostname = endpoint.hostname;
-      profileTailscalePort = endpoint.port;
+      const typed = normalizeTailscaleEndpoint(hostname, '', 'guided setup');
+      profileHostname = typed.hostname;
+      profileTailscalePort = await askTailscalePort(rl, typed.port || defaultEndpoint.port);
       args.push('--tunnel', 'tailscale', '--hostname', profileHostname, '--tailscale-port', profileTailscalePort);
     } else {
       profileTunnel = 'cloudflare';
@@ -3974,6 +3985,9 @@ async function main() {
   if (!['none', 'cloudflare', 'cloudflare-named', 'ngrok', 'tailscale'].includes(tunnel)) {
     throw new Error('--tunnel must be none, cloudflare, cloudflare-named, ngrok, or tailscale');
   }
+  if (args.tailscalePort !== undefined && tunnel !== 'tailscale') {
+    throw new Error(`--tailscale-port only applies to --tunnel tailscale, not ${tunnel}.`);
+  }
   let stableHostname = args.hostname
     ?? args.url
     ?? process.env.CODEXPRO_PUBLIC_HOSTNAME
@@ -4079,7 +4093,7 @@ async function main() {
           : tunnel === 'ngrok'
             ? `ngrok endpoint for ${stableHostname}`
             : tunnel === 'tailscale'
-              ? `Tailscale Funnel endpoint for ${publicBaseFromTailscaleEndpoint(stableHostname, tailscaleEndpoint.port)}`
+              ? `Tailscale Funnel for ${publicBaseFromTailscaleEndpoint(stableHostname, tailscaleEndpoint.port).replace('https://', '')}`
               : 'none'
     )
   ]);
@@ -4200,7 +4214,18 @@ async function main() {
       await waitForPublicHealth(publicBase, token, cloudflared, 'Tailscale Funnel');
     } catch (error) {
       const tail = typeof cloudflared.codexproLogTail === 'function' ? cloudflared.codexproLogTail() : '';
-      const hint = [
+      const takenPort = /listener already exists for port (\d+)/.exec(tail)?.[1];
+      const hint = takenPort ? [
+        '',
+        `Public port ${takenPort} already has a Tailscale listener, so Funnel could not claim it.`,
+        '',
+        `  ${'tailscale serve status'.padEnd(34)}see what holds that port`,
+        `  ${`tailscale funnel --https=${takenPort} off`.padEnd(34)}release it`,
+        '',
+        'Or start CodexPro on a free port. Allowed public ports are 443, 8443, and 10000:',
+        '',
+        '  codexpro tailscale --hostname your-device.your-tailnet.ts.net --tailscale-port 8443'
+      ].join('\n') : [
         '',
         'Tailscale Funnel needs one-time setup before this can succeed:',
         '',

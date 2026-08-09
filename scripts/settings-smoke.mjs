@@ -1087,6 +1087,19 @@ if (localTailscaleSettingsProfile.tailscalePort !== undefined) {
   throw new Error(`non-Tailscale settings kept a stale Tailscale public port: ${JSON.stringify(localTailscaleSettingsProfile)}`);
 }
 
+runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tunnel',
+  'cloudflare',
+  '--tailscale-port',
+  '10000',
+  '--token',
+  'codexpro-tailscale-misapplied-token',
+  '--no-copy-url'
+], env, /--tailscale-port only applies to --tunnel tailscale/i);
+
 const guidedLegacyHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-legacy-home-'));
 const guidedLegacyRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-legacy-root-'));
 await writeRawProfile(guidedLegacyRoot, guidedLegacyHome, {
@@ -1161,6 +1174,47 @@ if (guidedFromTailscaleEnv) {
     throw new Error(
       `guided setup did not canonicalize TAILSCALE_FUNNEL_HOSTNAME defaults: ${JSON.stringify(guidedTailscaleEnvProfile)}`
     );
+  }
+}
+
+const guidedRetryHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-retry-home-'));
+const guidedRetryRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-retry-root-'));
+const guidedRetryEnv = { ...process.env, CODEXPRO_HOME: guidedRetryHome, CODEXPRO_HTTP_TOKEN: 'guided-retry-token' };
+for (const name of ['CI', 'CODEXPRO_TUNNEL', 'CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'NGROK_DOMAIN', 'TAILSCALE_FUNNEL_HOSTNAME', 'CODEXPRO_TAILSCALE_PORT']) {
+  delete guidedRetryEnv[name];
+}
+const guidedRetry = runInteractiveAnswers([
+  'setup', '--root', guidedRetryRoot
+], guidedRetryEnv, ['', '', '', 'tailscale', 'guided-retry.tailnet.ts.net', '8080', '10000', '', '', 'no']);
+if (guidedRetry && guidedRetry.status !== 0) {
+  throw new Error(`guided setup aborted instead of re-asking for a valid Tailscale port\n${guidedRetry.output}`);
+}
+if (guidedRetry) {
+  if (!/is not a Funnel port/i.test(guidedRetry.output)) {
+    throw new Error(`guided setup accepted an invalid Tailscale port without complaining\n${guidedRetry.output}`);
+  }
+  const guidedRetryProfile = await readProfile(guidedRetryRoot, guidedRetryHome);
+  if (guidedRetryProfile.hostname !== 'guided-retry.tailnet.ts.net' || guidedRetryProfile.tailscalePort !== '10000') {
+    throw new Error(`guided setup did not save the re-asked Tailscale port: ${JSON.stringify(guidedRetryProfile)}`);
+  }
+}
+
+const guidedTypedHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-typed-home-'));
+const guidedTypedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-guided-typed-root-'));
+const guidedTypedEnv = { ...process.env, CODEXPRO_HOME: guidedTypedHome, CODEXPRO_HTTP_TOKEN: 'guided-typed-token' };
+for (const name of ['CI', 'CODEXPRO_TUNNEL', 'CODEXPRO_PUBLIC_HOSTNAME', 'CODEXPRO_HOSTNAME', 'NGROK_DOMAIN', 'TAILSCALE_FUNNEL_HOSTNAME', 'CODEXPRO_TAILSCALE_PORT']) {
+  delete guidedTypedEnv[name];
+}
+const guidedTyped = runInteractiveAnswers([
+  'setup', '--root', guidedTypedRoot
+], guidedTypedEnv, ['', '', '', 'tailscale', 'guided-typed.tailnet.ts.net:8443', '', '', '', 'no']);
+if (guidedTyped && guidedTyped.status !== 0) {
+  throw new Error(`guided setup rejected a typed Tailscale hostname carrying a port suffix\n${guidedTyped.output}`);
+}
+if (guidedTyped) {
+  const guidedTypedProfile = await readProfile(guidedTypedRoot, guidedTypedHome);
+  if (guidedTypedProfile.hostname !== 'guided-typed.tailnet.ts.net' || guidedTypedProfile.tailscalePort !== '8443') {
+    throw new Error(`guided setup did not prefill the port from a typed hostname suffix: ${JSON.stringify(guidedTypedProfile)}`);
   }
 }
 
