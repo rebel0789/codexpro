@@ -17,6 +17,7 @@ export interface WorkspaceProfile {
   mode?: ConnectorMode | string;
   tunnel?: TunnelMode | string;
   hostname?: string;
+  tailscalePort?: string;
   tunnelName?: string;
   ngrokConfig?: string;
   cloudflareConfig?: string;

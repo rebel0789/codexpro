@@ -133,9 +133,11 @@ ChatGPT Web 需要 HTTPS：
 codexpro start --tunnel cloudflare
 codexpro ngrok --hostname your.ngrok-free.dev
 codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
-codexpro tailscale --hostname your-device.your-tailnet.ts.net
+codexpro tailscale --hostname your-device.your-tailnet.ts.net --tailscale-port 8443
 codexpro start --tunnel none
 ```
+
+`--tailscale-port` 控制 Tailscale Funnel 的公网 HTTPS 端口：`443`（默认）、`8443` 或 `10000`。它和本地 `--port`（默认 `8787`）是两回事，后者只决定 CodexPro 在本机监听的端口。上面的示例会运行 `tailscale funnel --https=8443 http://127.0.0.1:8787`，所以 ChatGPT 连接的是 `https://your-device.your-tailnet.ts.net:8443/mcp`。Funnel 必须已获 tailnet 允许，并需要 MagicDNS 和 HTTPS 证书。
 
 稳定主机名请固定 token：
 

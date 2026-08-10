@@ -48,6 +48,7 @@ function copyCommand(title: string, description: string, command: string, displa
 }
 
 const TUNNELS = ["cloudflare", "ngrok", "cloudflare-named", "tailscale", "none"] as const;
+const TAILSCALE_PORTS = ["443", "8443", "10000"] as const;
 const MODES = ["agent", "handoff", "pro"] as const;
 const BASH_MODES = ["safe", "off", "full"] as const;
 const BASH_TRANSCRIPTS = ["compact", "full"] as const;
@@ -57,10 +58,15 @@ const TOOL_MODES = ["standard", "minimal", "full"] as const;
 
 const textField = (max: number) =>
   z.preprocess((value) => (typeof value === "string" ? value.trim() : value), z.string().max(max).optional());
+const tailscalePortField = z.preprocess(
+  (value) => (typeof value === "number" ? String(value) : typeof value === "string" ? value.trim() : value),
+  z.enum(TAILSCALE_PORTS).optional()
+);
 
 const AdminProfilePatch = z.object({
   tunnel: z.enum(TUNNELS).optional(),
   hostname: textField(253),
+  tailscalePort: tailscalePortField,
   port: z.coerce.number().int().min(1).max(65535).optional(),
   mode: z.enum(MODES).optional(),
   bash: z.enum(BASH_MODES).optional(),
@@ -90,6 +96,7 @@ interface ProfileFormValues {
   mode: ConnectorMode;
   tunnel: TunnelMode;
   hostname: string;
+  tailscalePort: string;
   tunnelName: string;
   ngrokConfig: string;
   cloudflareConfig: string;
@@ -128,6 +135,37 @@ function normalizePublicHostname(value: string | undefined): string {
   return url.host;
 }
 
+function explicitHostnamePort(value: string | undefined): string {
+  const raw = value?.trim().replace(/\/+$/, "") ?? "";
+  if (!raw) return "";
+  const authorityStart = raw.includes("://") ? raw.indexOf("://") + 3 : 0;
+  const authority = raw.slice(authorityStart).split(/[/?#]/, 1)[0];
+  return authority.match(/:(\d+)$/)?.[1] ?? "";
+}
+
+function normalizeTailscaleEndpoint(hostname: string | undefined, tailscalePort: string | undefined): { hostname: string; tailscalePort: string } {
+  const normalizedHostname = normalizePublicHostname(hostname);
+  const parsed = normalizedHostname ? new URL(`https://${normalizedHostname}`) : null;
+  const legacyPort = explicitHostnamePort(hostname);
+  const requestedPort = tailscalePort ?? "";
+  if (requestedPort && !TAILSCALE_PORTS.includes(requestedPort as (typeof TAILSCALE_PORTS)[number])) {
+    throw new Error("Tailscale Funnel HTTPS port must be 443, 8443, or 10000.");
+  }
+  if (legacyPort && !TAILSCALE_PORTS.includes(legacyPort as (typeof TAILSCALE_PORTS)[number])) {
+    throw new Error("Tailscale Funnel HTTPS port must be 443, 8443, or 10000.");
+  }
+  if (requestedPort && legacyPort && requestedPort !== legacyPort) {
+    throw new Error(`Conflicting Tailscale Funnel ports: tailscalePort is ${requestedPort}, but hostname uses ${legacyPort}.`);
+  }
+  return { hostname: parsed?.hostname ?? "", tailscalePort: requestedPort || legacyPort || "443" };
+}
+
+function publicEndpoint(tunnel: TunnelMode, hostname: string, tailscalePort: string): string {
+  if (!hostname) return "";
+  const publicHostname = tunnel === "tailscale" && tailscalePort !== "443" ? `${hostname}:${tailscalePort}` : hostname;
+  return `https://${publicHostname}/mcp`;
+}
+
 function normalizeWidgetDomain(value: string | undefined): string {
   const raw = value?.trim() ?? "";
   if (!raw) return "";
@@ -154,19 +192,22 @@ function normalizeProfilePath(root: string, value: string | undefined): string {
 }
 
 function profileValues(config: CodexProConfig, profile = readWorkspaceProfile(config.defaultRoot)): ProfileFormValues {
-  const hostname =
+  const rawHostname =
     profile.hostname ??
     process.env.CODEXPRO_PUBLIC_HOSTNAME ??
     process.env.CODEXPRO_HOSTNAME ??
     process.env.NGROK_DOMAIN ??
     "";
   const mode = oneOf(profile.mode ?? process.env.CODEXPRO_MODE, MODES, "agent");
+  const tunnel = oneOf(profile.tunnel, TUNNELS, runtimeTunnelFallback());
+  const tailscaleEndpoint = tunnel === "tailscale" ? normalizeTailscaleEndpoint(String(rawHostname), profile.tailscalePort) : null;
   const write = effectiveWriteMode(mode, oneOf(profile.write ?? config.writeMode, WRITE_MODES, config.writeMode));
   return {
     port: String(profile.port ?? config.port),
     mode,
-    tunnel: oneOf(profile.tunnel, TUNNELS, runtimeTunnelFallback()),
-    hostname: String(hostname),
+    tunnel,
+    hostname: tailscaleEndpoint?.hostname ?? String(rawHostname),
+    tailscalePort: tailscaleEndpoint?.tailscalePort ?? "",
     tunnelName: String(profile.tunnelName ?? ""),
     ngrokConfig: String(profile.ngrokConfig ?? ""),
     cloudflareConfig: String(profile.cloudflareConfig ?? ""),
@@ -247,7 +288,7 @@ function profileForm(config: CodexProConfig): string {
   const runtimeEndpoint = typeof runtime.endpoint === "string" ? runtime.endpoint : "";
   const runtimeTunnel = oneOf(runtime.tunnel ?? values.tunnel, TUNNELS, values.tunnel);
   const runtimeUrl = serverUrlDisplay(runtimeEndpoint, Boolean(config.authToken));
-  const savedEndpoint = values.hostname ? `https://${values.hostname}/mcp` : "";
+  const savedEndpoint = publicEndpoint(values.tunnel, values.hostname, values.tailscalePort);
   const savedUrl = serverUrlDisplay(savedEndpoint, Boolean(config.authToken));
   const ngrokHostname = process.env.NGROK_DOMAIN ?? (values.tunnel === "ngrok" ? values.hostname : "");
   const cloudflareHostname =
@@ -287,6 +328,7 @@ function profileForm(config: CodexProConfig): string {
           <div class="form-grid">
             <label><span>Tunnel</span><select name="tunnel" data-tunnel-select data-ngrok-hostname="${escapeHtml(ngrokHostname)}" data-cloudflare-hostname="${escapeHtml(cloudflareHostname)}">${selectOptions(TUNNELS, values.tunnel)}</select></label>
             <label><span>Public hostname</span><input name="hostname" value="${escapeHtml(values.hostname)}" data-hostname-input data-autofilled="0"></label>
+            <label data-tailscale-port-wrap${values.tunnel === "tailscale" ? "" : " hidden"}><span>Tailscale public port</span><select name="tailscalePort" data-tailscale-port${values.tunnel === "tailscale" ? "" : " hidden"}>${selectOptions(TAILSCALE_PORTS, values.tailscalePort)}</select></label>
             <label><span>Port</span><input name="port" type="number" min="1" max="65535" value="${escapeHtml(values.port)}"></label>
             <label><span>Mode</span><select name="mode">${selectOptions(MODES, values.mode)}</select></label>
             <label><span>Cloudflare tunnel name</span><input name="tunnelName" value="${escapeHtml(values.tunnelName)}"></label>
@@ -336,8 +378,15 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
     requireBashSession: input.requireBashSession ?? current.requireBashSession,
     noInstallCloudflared: input.noInstallCloudflared ?? current.noInstallCloudflared
   };
-  next.hostname = normalizePublicHostname(next.hostname);
-  if (next.tunnel !== "ngrok" && next.tunnel !== "cloudflare-named" && next.tunnel !== "tailscale") next.hostname = "";
+  if (next.tunnel === "tailscale") {
+    const endpoint = normalizeTailscaleEndpoint(next.hostname, next.tailscalePort);
+    next.hostname = endpoint.hostname;
+    next.tailscalePort = endpoint.tailscalePort;
+  } else {
+    next.hostname = normalizePublicHostname(next.hostname);
+    next.tailscalePort = "";
+    if (next.tunnel !== "ngrok" && next.tunnel !== "cloudflare-named") next.hostname = "";
+  }
   next.widgetDomain = normalizeWidgetDomain(next.widgetDomain);
   if ((next.tunnel === "ngrok" || next.tunnel === "cloudflare-named" || next.tunnel === "tailscale") && !next.hostname) {
     throw new Error("hostname is required for ngrok, cloudflare-named, and tailscale profiles.");
@@ -358,6 +407,7 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
     mode: next.mode,
     tunnel: next.tunnel,
     ...(next.hostname ? { hostname: next.hostname } : {}),
+    ...(next.tunnel === "tailscale" ? { tailscalePort: next.tailscalePort } : {}),
     ...(tunnelName ? { tunnelName } : {}),
     ...(ngrokConfig ? { ngrokConfig } : {}),
     ...(cloudflareConfig ? { cloudflareConfig } : {}),
@@ -1345,16 +1395,23 @@ function onboardingPage(config: CodexProConfig): string {
     const profileForm = document.querySelector("[data-profile-form]");
     const tunnelSelect = document.querySelector("[data-tunnel-select]");
     const hostnameInput = document.querySelector("[data-hostname-input]");
+    const tailscalePortInput = document.querySelector("[data-tailscale-port]");
     const hostnameHelp = document.querySelector("[data-hostname-help]");
     const tokenEnabled = ${config.authToken ? "true" : "false"};
-    function serverPreviewFor(hostname) {
+    function serverPreviewFor(hostname, tailscalePort) {
       const clean = String(hostname || "").trim().replace(/^https?:\\/\\//, "").replace(/\\/mcp\\/?$/, "").replace(/\\/+$/, "");
       if (!clean) return "";
-      return "https://" + clean + "/mcp" + (tokenEnabled ? "?codexpro_token=<redacted>" : "");
+      const parsed = new URL("https://" + clean);
+      const publicHostname = tailscalePort ? parsed.hostname + (tailscalePort === "443" ? "" : ":" + tailscalePort) : parsed.host;
+      return "https://" + publicHostname + "/mcp" + (tokenEnabled ? "?codexpro_token=<redacted>" : "");
     }
     function updateTunnelHelp() {
       if (!tunnelSelect || !hostnameInput || !hostnameHelp) return;
       const tunnel = tunnelSelect.value;
+      if (tailscalePortInput) {
+        tailscalePortInput.hidden = tunnel !== "tailscale";
+        tailscalePortInput.closest("label")?.toggleAttribute("hidden", tunnel !== "tailscale");
+      }
       const ngrokHost = tunnelSelect.getAttribute("data-ngrok-hostname") || "";
       const cloudflareHost = tunnelSelect.getAttribute("data-cloudflare-hostname") || "";
       if (tunnel === "ngrok" && !hostnameInput.value && ngrokHost) {
@@ -1369,7 +1426,7 @@ function onboardingPage(config: CodexProConfig): string {
         hostnameInput.value = "";
         hostnameInput.setAttribute("data-autofilled", "0");
       }
-      const preview = serverPreviewFor(hostnameInput.value);
+      const preview = serverPreviewFor(hostnameInput.value, tunnel === "tailscale" ? tailscalePortInput?.value : "");
       if (tunnel === "cloudflare") {
         hostnameHelp.textContent = "Cloudflare quick tunnel generates the public URL at launch and this page shows it when the launcher reports it.";
       } else if (tunnel === "ngrok") {
@@ -1383,6 +1440,7 @@ function onboardingPage(config: CodexProConfig): string {
       }
     }
     tunnelSelect?.addEventListener("change", updateTunnelHelp);
+    tailscalePortInput?.addEventListener("change", updateTunnelHelp);
     hostnameInput?.addEventListener("input", () => {
       hostnameInput.setAttribute("data-autofilled", "0");
       updateTunnelHelp();
@@ -1397,6 +1455,7 @@ function onboardingPage(config: CodexProConfig): string {
         const payload = {
           tunnel: data.tunnel,
           hostname: data.hostname,
+          tailscalePort: data.tailscalePort,
           tunnelName: data.tunnelName,
           ngrokConfig: data.ngrokConfig,
           cloudflareConfig: data.cloudflareConfig,
