@@ -198,6 +198,7 @@ os.close(slave)
 out = bytearray()
 pending = bytearray()
 answer_index = 0
+pty_closed = False
 deadline = time.time() + 20
 while time.time() < deadline:
     if proc.poll() is not None:
@@ -208,8 +209,10 @@ while time.time() < deadline:
     try:
         chunk = os.read(master, 4096)
     except OSError:
+        pty_closed = True
         break
     if not chunk:
+        pty_closed = True
         break
     out.extend(chunk)
     pending.extend(chunk)
@@ -217,6 +220,11 @@ while time.time() < deadline:
         os.write(master, (payload["answers"][answer_index] + "\\n").encode())
         answer_index += 1
         pending.clear()
+if pty_closed and proc.poll() is None:
+    try:
+        proc.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
 if proc.poll() is None:
     proc.terminate()
     try:
