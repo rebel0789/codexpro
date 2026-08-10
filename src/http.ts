@@ -135,10 +135,18 @@ function normalizePublicHostname(value: string | undefined): string {
   return url.host;
 }
 
+function explicitHostnamePort(value: string | undefined): string {
+  const raw = value?.trim().replace(/\/+$/, "") ?? "";
+  if (!raw) return "";
+  const authorityStart = raw.includes("://") ? raw.indexOf("://") + 3 : 0;
+  const authority = raw.slice(authorityStart).split(/[/?#]/, 1)[0];
+  return authority.match(/:(\d+)$/)?.[1] ?? "";
+}
+
 function normalizeTailscaleEndpoint(hostname: string | undefined, tailscalePort: string | undefined): { hostname: string; tailscalePort: string } {
   const normalizedHostname = normalizePublicHostname(hostname);
   const parsed = normalizedHostname ? new URL(`https://${normalizedHostname}`) : null;
-  const legacyPort = parsed?.port ?? "";
+  const legacyPort = explicitHostnamePort(hostname);
   const requestedPort = tailscalePort ?? "";
   if (requestedPort && !TAILSCALE_PORTS.includes(requestedPort as (typeof TAILSCALE_PORTS)[number])) {
     throw new Error("Tailscale Funnel HTTPS port must be 443, 8443, or 10000.");

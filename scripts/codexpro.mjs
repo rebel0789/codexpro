@@ -1309,18 +1309,36 @@ function normalizeTailscaleFunnelPort(value) {
   return port;
 }
 
-function normalizeTailscaleEndpoint(hostname, dedicatedPort = '', source = 'settings') {
-  const rawHostname = String(hostname ?? '').trim();
+function explicitHostnamePort(value) {
+  const raw = String(value ?? '').trim().replace(/\/+$/, '');
+  if (!raw) return '';
+  const authorityStart = raw.includes('://') ? raw.indexOf('://') + 3 : 0;
+  const authority = raw.slice(authorityStart).split(/[/?#]/, 1)[0];
+  return authority.match(/:(\d+)$/)?.[1] ?? '';
+}
+
+function normalizeTailscaleHostname(value) {
+  const normalized = normalizePublicHostname(String(value ?? '').trim());
+  return normalized ? new URL(`https://${normalized}`).hostname : '';
+}
+
+function normalizeTailscalePortPair(dedicatedPort = '', suffixPort = '', source = 'settings') {
   const requestedPort = String(dedicatedPort ?? '').trim();
-  const normalizedHostname = rawHostname ? normalizePublicHostname(rawHostname) : '';
-  const parsed = normalizedHostname ? new URL(`https://${normalizedHostname}`) : null;
-  const suffixPort = parsed?.port ?? '';
+  const requestedSuffixPort = String(suffixPort ?? '').trim();
   const canonicalPort = requestedPort ? normalizeTailscaleFunnelPort(requestedPort) : '';
-  const legacyPort = suffixPort ? normalizeTailscaleFunnelPort(suffixPort) : '';
+  const legacyPort = requestedSuffixPort ? normalizeTailscaleFunnelPort(requestedSuffixPort) : '';
   if (canonicalPort && legacyPort && canonicalPort !== legacyPort) {
     throw new Error(`Conflicting Tailscale Funnel ports in ${source}: --tailscale-port is ${canonicalPort}, but the hostname uses ${legacyPort}.`);
   }
-  return { hostname: parsed?.hostname ?? '', port: canonicalPort || legacyPort || '' };
+  return canonicalPort || legacyPort || '';
+}
+
+function normalizeTailscaleEndpoint(hostname, dedicatedPort = '', source = 'settings') {
+  const rawHostname = String(hostname ?? '').trim();
+  return {
+    hostname: normalizeTailscaleHostname(rawHostname),
+    port: normalizeTailscalePortPair(dedicatedPort, explicitHostnamePort(rawHostname), source)
+  };
 }
 
 function canonicalProfileForSave(profile) {
@@ -1334,17 +1352,26 @@ function canonicalProfileForSave(profile) {
 }
 
 function tailscaleEndpointOptions(args, profile = {}) {
-  const cli = normalizeTailscaleEndpoint(args.hostname ?? args.url ?? '', args.tailscalePort, 'CLI options');
-  const env = normalizeTailscaleEndpoint(
-    process.env.CODEXPRO_PUBLIC_HOSTNAME ?? process.env.CODEXPRO_HOSTNAME ?? process.env.TAILSCALE_FUNNEL_HOSTNAME ?? process.env.NGROK_DOMAIN ?? '',
-    process.env.CODEXPRO_TAILSCALE_PORT,
-    'environment variables'
+  const candidates = [
+    { hostname: args.hostname ?? args.url ?? '', port: args.tailscalePort, source: 'CLI options' },
+    {
+      hostname: process.env.CODEXPRO_PUBLIC_HOSTNAME ?? process.env.CODEXPRO_HOSTNAME ?? process.env.TAILSCALE_FUNNEL_HOSTNAME ?? process.env.NGROK_DOMAIN ?? '',
+      port: process.env.CODEXPRO_TAILSCALE_PORT,
+      source: 'environment variables'
+    },
+    { hostname: profile.hostname ?? '', port: profile.tailscalePort, source: 'saved profile' }
+  ];
+  const hostnameIndex = candidates.findIndex((candidate) => String(candidate.hostname ?? '').trim());
+  const portIndex = candidates.findIndex((candidate) =>
+    String(candidate.port ?? '').trim() || explicitHostnamePort(candidate.hostname)
   );
-  const saved = normalizeTailscaleEndpoint(profile.hostname ?? '', profile.tailscalePort, 'saved profile');
-  return {
-    hostname: cli.hostname || env.hostname || saved.hostname || '',
-    port: cli.port || env.port || saved.port || '443'
-  };
+  const hostname = hostnameIndex >= 0 ? normalizeTailscaleHostname(candidates[hostnameIndex].hostname) : '';
+  let port = '';
+  if (portIndex >= 0) {
+    const candidate = candidates[portIndex];
+    port = normalizeTailscalePortPair(candidate.port, explicitHostnamePort(candidate.hostname), candidate.source);
+  }
+  return { hostname, port: port || '443' };
 }
 
 function publicBaseFromTailscaleEndpoint(hostname, port) {
@@ -3568,6 +3595,9 @@ function saveSettingsFromArgs(root, args, profile) {
   if (!['none', 'cloudflare', 'cloudflare-named', 'ngrok', 'tailscale'].includes(tunnel)) {
     throw new Error('--tunnel must be none, cloudflare, cloudflare-named, ngrok, or tailscale');
   }
+  if (args.tailscalePort !== undefined && tunnel !== 'tailscale') {
+    throw new Error(`--tailscale-port only applies to --tunnel tailscale, not ${tunnel}.`);
+  }
   const needsHostname = tunnel === 'ngrok' || tunnel === 'cloudflare-named' || tunnel === 'tailscale';
   const rawHostname = needsHostname ? (args.hostname ?? args.url ?? profile.hostname ?? '') : '';
   const tailscaleEndpoint = tunnel === 'tailscale' ? tailscaleEndpointOptions(args, profile) : null;
@@ -3975,18 +4005,28 @@ async function main() {
   let profile = args.noProfile ? {} : loadWorkspaceProfile(root);
   profile = await maybeConfigureFirstRun(root, args, profile);
   const effectiveArgs = { ...profile, ...args };
-  if (profile.profilePath && !args.noProfile) {
-    statusLine('ok', `Using saved profile: ${profile.profilePath}`);
-    const summary = profileSummary(profile);
-    if (summary) statusLine('ok', `${summary}. Future launches from this folder only need: codexpro start`);
-  }
-
   const tunnel = optionValue(args, profile, 'tunnel', ['CODEXPRO_TUNNEL'], 'cloudflare');
   if (!['none', 'cloudflare', 'cloudflare-named', 'ngrok', 'tailscale'].includes(tunnel)) {
     throw new Error('--tunnel must be none, cloudflare, cloudflare-named, ngrok, or tailscale');
   }
   if (args.tailscalePort !== undefined && tunnel !== 'tailscale') {
     throw new Error(`--tailscale-port only applies to --tunnel tailscale, not ${tunnel}.`);
+  }
+  if (profile.profilePath && !args.noProfile) {
+    statusLine('ok', `Using saved profile: ${profile.profilePath}`);
+    const tailscaleEndpointOverridden = [
+      args.hostname,
+      args.url,
+      args.tailscalePort,
+      process.env.CODEXPRO_PUBLIC_HOSTNAME,
+      process.env.CODEXPRO_HOSTNAME,
+      process.env.TAILSCALE_FUNNEL_HOSTNAME,
+      process.env.NGROK_DOMAIN,
+      process.env.CODEXPRO_TAILSCALE_PORT
+    ].some((value) => String(value ?? '').trim());
+    const hideTailscaleSummary = profile.tunnel === 'tailscale' && (tunnel !== 'tailscale' || tailscaleEndpointOverridden);
+    const summary = hideTailscaleSummary ? '' : profileSummary(profile);
+    if (summary) statusLine('ok', `${summary}. Future launches from this folder only need: codexpro start`);
   }
   let stableHostname = args.hostname
     ?? args.url

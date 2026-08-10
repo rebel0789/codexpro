@@ -488,6 +488,25 @@ try {
     throw new Error(`expected invalid Tailscale Funnel port to be rejected, got ${invalidTailscalePort.status} ${JSON.stringify(invalidTailscalePortJson)}`);
   }
 
+  const conflictingDefaultTailscalePort = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      tunnel: 'tailscale',
+      hostname: 'codexpro-http-smoke.tailnet.ts.net:443',
+      tailscalePort: '8443'
+    })
+  });
+  const conflictingDefaultTailscalePortJson = await conflictingDefaultTailscalePort.json();
+  if (
+    conflictingDefaultTailscalePort.status !== 400
+    || !/conflicting Tailscale Funnel ports/i.test(conflictingDefaultTailscalePortJson.error?.message ?? '')
+  ) {
+    throw new Error(
+      `expected explicit :443 to conflict with dedicated port 8443, got ${conflictingDefaultTailscalePort.status} ${JSON.stringify(conflictingDefaultTailscalePortJson)}`
+    );
+  }
+
   const tailscaleProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

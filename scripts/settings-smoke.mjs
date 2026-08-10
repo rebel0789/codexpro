@@ -1040,6 +1040,80 @@ if (!tailscaleCliFailure.includes(`funnel|http://127.0.0.1:${tailscaleCliPort}`)
   throw new Error(`tailscale CLI public port did not override environment without changing the local port\n${tailscaleCliFailure}`);
 }
 
+const tailscaleHostname443Port = await getFreePort();
+const tailscaleHostname443Failure = runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tailscale',
+  fakeTailscale,
+  '--hostname',
+  'codexpro-config.tailnet.ts.net:443',
+  '--port',
+  String(tailscaleHostname443Port),
+  '--token',
+  'codexpro-tailscale-hostname-port-token',
+  '--no-copy-url'
+], { ...env, CODEXPRO_TAILSCALE_PORT: '10000' }, /Recent tailscale output/);
+if (
+  !tailscaleHostname443Failure.includes(`funnel|http://127.0.0.1:${tailscaleHostname443Port}`)
+  || tailscaleHostname443Failure.includes('--https=')
+) {
+  throw new Error(`explicit CLI hostname port did not override the environment port\n${tailscaleHostname443Failure}`);
+}
+
+const tailscaleShadowedEnvPort = await getFreePort();
+const tailscaleShadowedEnvFailure = runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tailscale',
+  fakeTailscale,
+  '--port',
+  String(tailscaleShadowedEnvPort),
+  '--tailscale-port',
+  '8443',
+  '--token',
+  'codexpro-tailscale-shadowed-env-token',
+  '--no-copy-url'
+], { ...env, CODEXPRO_TAILSCALE_PORT: '9999' }, /Recent tailscale output/);
+if (!tailscaleShadowedEnvFailure.includes(`funnel|--https=8443|http://127.0.0.1:${tailscaleShadowedEnvPort}`)) {
+  throw new Error(`valid CLI port did not shadow an invalid environment port\n${tailscaleShadowedEnvFailure}`);
+}
+
+const tailscaleShadowedSavedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-settings-tailscale-shadowed-saved-'));
+await writeRawProfile(tailscaleShadowedSavedRoot, home, {
+  tunnel: 'tailscale',
+  hostname: 'shadowed-saved.tailnet.ts.net',
+  tailscalePort: '9999',
+  port: '8787',
+  mode: 'agent',
+  token: 'codexpro-tailscale-shadowed-saved-token'
+});
+const tailscaleShadowedSavedPort = await getFreePort();
+const tailscaleShadowedSavedFailure = runFail([
+  'start',
+  '--root',
+  tailscaleShadowedSavedRoot,
+  '--tailscale',
+  fakeTailscale,
+  '--port',
+  String(tailscaleShadowedSavedPort),
+  '--token',
+  'codexpro-tailscale-shadowed-saved-token',
+  '--no-copy-url'
+], {
+  ...env,
+  CODEXPRO_PUBLIC_HOSTNAME: '',
+  CODEXPRO_HOSTNAME: '',
+  TAILSCALE_FUNNEL_HOSTNAME: '',
+  NGROK_DOMAIN: '',
+  CODEXPRO_TAILSCALE_PORT: '8443'
+}, /Recent tailscale output/);
+if (!tailscaleShadowedSavedFailure.includes(`funnel|--https=8443|http://127.0.0.1:${tailscaleShadowedSavedPort}`)) {
+  throw new Error(`valid environment port did not shadow an invalid saved port\n${tailscaleShadowedSavedFailure}`);
+}
+
 const invalidTailscaleMarker = path.join(home, 'invalid-tailscale-started');
 const invalidTailscale = await writeNodeExecutable(path.join(home, 'invalid-tailscale.mjs'), [
   '#!/usr/bin/env node',
@@ -1081,6 +1155,56 @@ runFail([
   'codexpro-tailscale-conflict-token',
   '--no-copy-url'
 ], { ...env, CODEXPRO_INVALID_TAILSCALE_MARKER: invalidTailscaleMarker }, /conflicting Tailscale Funnel ports/i);
+
+runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tailscale',
+  invalidTailscale,
+  '--hostname',
+  'codexpro-config.tailnet.ts.net:443',
+  '--tailscale-port',
+  '8443',
+  '--token',
+  'codexpro-tailscale-default-port-conflict-token',
+  '--no-copy-url'
+], { ...env, CODEXPRO_INVALID_TAILSCALE_MARKER: invalidTailscaleMarker }, /conflicting Tailscale Funnel ports/i);
+
+runFail([
+  'start',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tailscale',
+  invalidTailscale,
+  '--hostname',
+  'cli-hostname.tailnet.ts.net',
+  '--token',
+  'codexpro-tailscale-environment-conflict-token',
+  '--no-copy-url'
+], {
+  ...env,
+  CODEXPRO_PUBLIC_HOSTNAME: 'environment-hostname.tailnet.ts.net:8443',
+  CODEXPRO_TAILSCALE_PORT: '10000',
+  CODEXPRO_INVALID_TAILSCALE_MARKER: invalidTailscaleMarker
+}, /conflicting Tailscale Funnel ports/i);
+try {
+  await fs.access(invalidTailscaleMarker);
+  throw new Error('conflicting Tailscale public ports started a child process');
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+
+runFail([
+  'settings',
+  'set',
+  '--root',
+  tailscaleSettingsRoot,
+  '--tunnel',
+  'none',
+  '--tailscale-port',
+  '8443'
+], env, /--tailscale-port only applies to --tunnel tailscale/i);
 
 run([
   'settings',
