@@ -2,6 +2,8 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { analyse } from "chardet";
+import iconv from "iconv-lite";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
@@ -246,6 +248,36 @@ function trimOutput(value: string, maxBytes: number): { value: string; truncated
   return { value: `${sliced}\n...[output truncated to ${maxBytes} bytes]`, truncated: true };
 }
 
+export type BashEncodingCandidate = { name: string; confidence: number };
+export type BashEncodingDetector = (input: Buffer) => BashEncodingCandidate[];
+
+/** Decode one completed bash output stream without allowing a detected encoding to affect another stream. */
+export function decodeBashOutput(
+  bytes: Buffer,
+  platform: NodeJS.Platform = process.platform,
+  allowTrailingIncompleteUtf8 = false,
+  detect: BashEncodingDetector = analyse
+): string {
+  const utf8Fallback = () => bytes.toString("utf8");
+  if (platform !== "win32" || bytes.length === 0) return utf8Fallback();
+
+  try {
+    // Streaming validation accepts only an unfinished final sequence when the process was stopped mid-write.
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes, { stream: allowTrailingIncompleteUtf8 });
+    return utf8Fallback();
+  } catch {
+    // A non-UTF-8 stream may still be decodable using a high-confidence supported encoding.
+  }
+
+  try {
+    const candidate = detect(bytes)[0];
+    if (!candidate || candidate.confidence < 80 || !iconv.encodingExists(candidate.name)) return utf8Fallback();
+    return iconv.decode(bytes, candidate.name);
+  } catch {
+    return utf8Fallback();
+  }
+}
+
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   if (!child.pid) return;
   if (process.platform === "win32") {
@@ -288,9 +320,10 @@ export async function runBash(
       windowsHide: true
     });
 
-    let stdout = "";
-    let stderr = "";
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     let killedByTimeout = false;
+    let killedByOutputLimit = false;
     let closed = false;
     let terminationStarted = false;
     let killTimer: NodeJS.Timeout | undefined;
@@ -308,12 +341,14 @@ export async function runBash(
       killTimer = setTimeout(() => terminate("SIGKILL"), 1_500);
       killTimer.unref();
     };
-    const appendBounded = (current: string, chunk: unknown) => {
-      const bytes = Buffer.from(String(chunk), "utf8");
-      observedOutputBytes += bytes.byteLength;
-      const remaining = retainedOutputBytes - Buffer.byteLength(stdout, "utf8") - Buffer.byteLength(stderr, "utf8");
-      if (remaining <= 0) return current;
-      return current + bytes.subarray(0, remaining).toString("utf8");
+    let retainedBytes = 0;
+    const appendBounded = (chunks: Buffer[], chunk: Buffer) => {
+      observedOutputBytes += chunk.byteLength;
+      const remaining = retainedOutputBytes - retainedBytes;
+      if (remaining <= 0) return;
+      const retained = chunk.subarray(0, remaining);
+      chunks.push(retained);
+      retainedBytes += retained.byteLength;
     };
 
     const timer = setTimeout(() => {
@@ -323,18 +358,27 @@ export async function runBash(
     timer.unref();
 
     child.stdout.on("data", (chunk) => {
-      stdout = appendBounded(stdout, chunk);
-      if (observedOutputBytes > config.maxOutputBytes) terminateWithEscalation();
+      appendBounded(stdoutChunks, Buffer.from(chunk));
+      if (observedOutputBytes > config.maxOutputBytes) {
+        killedByOutputLimit = true;
+        terminateWithEscalation();
+      }
     });
     child.stderr.on("data", (chunk) => {
-      stderr = appendBounded(stderr, chunk);
-      if (observedOutputBytes > config.maxOutputBytes) terminateWithEscalation();
+      appendBounded(stderrChunks, Buffer.from(chunk));
+      if (observedOutputBytes > config.maxOutputBytes) {
+        killedByOutputLimit = true;
+        terminateWithEscalation();
+      }
     });
     child.on("error", reject);
     child.on("close", (exitCode, signal) => {
       closed = true;
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      const allowTrailingIncompleteUtf8 = killedByTimeout || killedByOutputLimit;
+      const stdout = decodeBashOutput(Buffer.concat(stdoutChunks), process.platform, allowTrailingIncompleteUtf8);
+      let stderr = decodeBashOutput(Buffer.concat(stderrChunks), process.platform, allowTrailingIncompleteUtf8);
       if (killedByTimeout) {
         stderr += `\n[codexpro] Command timed out after ${timeoutMs} ms.`;
       }
