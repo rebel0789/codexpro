@@ -2,6 +2,12 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { goalLiveProjectionSupported, goalOrchestrationSupported } from '../dist/server.js';
+
+if (goalOrchestrationSupported('win32') !== false || goalLiveProjectionSupported('win32') !== false || goalOrchestrationSupported(process.platform) !== (process.platform !== 'win32')) {
+  throw new Error('Goal platform capability reporting is inconsistent.');
+}
+const goalToolNames = new Set(['propose_goal', 'get_goal', 'list_goals', 'approve_goal', 'publish_goal_blackboard', 'start_goal', 'refresh_goal', 'integrate_goal_work', 'review_goal', 'project_goal', 'revert_goal_projection', 'pause_goal', 'resume_goal', 'cancel_goal', 'complete_goal', 'apply_goal']);
 
 function encode(message) {
   return `${JSON.stringify(message)}\n`;
@@ -236,10 +242,14 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context', 'propose_goal', 'get_goal', 'list_goals', 'approve_goal', 'publish_goal_blackboard', 'start_goal', 'refresh_goal', 'integrate_goal_work', 'review_goal', 'pause_goal', 'resume_goal', 'cancel_goal', 'complete_goal', 'apply_goal']) {
+for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context', 'propose_goal', 'get_goal', 'list_goals', 'approve_goal', 'publish_goal_blackboard', 'start_goal', 'refresh_goal', 'integrate_goal_work', 'review_goal', 'project_goal', 'revert_goal_projection', 'pause_goal', 'resume_goal', 'cancel_goal', 'complete_goal', 'apply_goal'].filter((name) => goalOrchestrationSupported() || !goalToolNames.has(name))) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
-const toolCardUri = 'ui://widget/codexpro-tool-card-v11.html';
+const goalPlatformConfig = await client.request('tools/call', { name: 'server_config', arguments: {} });
+if (goalPlatformConfig.structuredContent.goalOrchestration?.supported !== goalOrchestrationSupported() || goalPlatformConfig.structuredContent.goalLiveProjection?.supported !== goalLiveProjectionSupported()) {
+  throw new Error(`server_config did not report Goal platform capability: ${JSON.stringify(goalPlatformConfig.structuredContent)}`);
+}
+const toolCardUri = 'ui://widget/codexpro-tool-card-v13.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
@@ -301,6 +311,8 @@ const cardRenderToolNames = new Set([
   'refresh_goal',
   'integrate_goal_work',
   'review_goal',
+  'project_goal',
+  'revert_goal_projection',
   'pause_goal',
   'resume_goal',
   'cancel_goal',
@@ -317,6 +329,18 @@ for (const tool of cardTools.tools) {
   }
 }
 const cardOpened = await cardClient.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+const calledToolTemplateUri = cardTools.tools.find((tool) => tool.name === 'open_current_workspace')?._meta?.ui?.resourceUri;
+if (cardOpened.isError || calledToolTemplateUri !== toolCardUri) {
+  throw new Error(`card tool call did not retain its declared template: ${JSON.stringify({ calledToolTemplateUri, cardOpened })}`);
+}
+const calledToolTemplate = await cardClient.request('resources/read', { uri: calledToolTemplateUri });
+const calledToolTemplateContent = calledToolTemplate.contents?.[0];
+if (calledToolTemplateContent?.uri !== calledToolTemplateUri || calledToolTemplateContent?.mimeType !== 'text/html;profile=mcp-app' || !calledToolTemplateContent?.text?.includes('ui/notifications/tool-result')) {
+  throw new Error(`declared tool template was not fetchable through the intended MCP resource flow: ${JSON.stringify(calledToolTemplate)}`);
+}
+if (calledToolTemplateContent?._meta?.ui?.domain || calledToolTemplateContent?._meta?.['openai/widgetDomain']) {
+  throw new Error(`implicit documentation origin leaked into the component template: ${JSON.stringify(calledToolTemplateContent?._meta)}`);
+}
 const wrappedCardOpened = await cardClient.request('tools/call', {
   name: 'codexpro',
   arguments: { action: 'open_current_workspace', args: { include_tree: false } }
@@ -1244,7 +1268,7 @@ await handoffWriteClient.request('initialize', {
 handoffWriteClient.notify('notifications/initialized');
 const handoffWriteTools = await handoffWriteClient.request('tools/list', {});
 const handoffWriteToolNames = handoffWriteTools.tools.map((tool) => tool.name);
-for (const hiddenWriteTool of ['write', 'edit', 'apply_patch']) {
+for (const hiddenWriteTool of ['write', 'edit', 'apply_patch', 'project_goal', 'revert_goal_projection', 'apply_goal']) {
   if (handoffWriteToolNames.includes(hiddenWriteTool)) {
     throw new Error(`--write handoff should not advertise ${hiddenWriteTool} tool; got ${handoffWriteToolNames.join(', ')}`);
   }
@@ -1257,7 +1281,7 @@ const handoffSelfTest = await handoffWriteClient.request('tools/call', { name: '
 if (handoffSelfTest.structuredContent.status === 'fail') {
   throw new Error(`codexpro_self_test failed under --write handoff: ${JSON.stringify(handoffSelfTest.structuredContent)}`);
 }
-for (const hiddenWriteTool of ['write', 'edit', 'apply_patch']) {
+for (const hiddenWriteTool of ['write', 'edit', 'apply_patch', 'project_goal', 'revert_goal_projection', 'apply_goal']) {
   if (handoffSelfTest.structuredContent.expected_tools?.includes?.(hiddenWriteTool) || handoffSelfTest.structuredContent.registered_tools?.includes?.(hiddenWriteTool)) {
     throw new Error(`codexpro_self_test exposed ${hiddenWriteTool} under --write handoff: ${JSON.stringify(handoffSelfTest.structuredContent)}`);
   }
@@ -1279,9 +1303,17 @@ const noBashToolNames = noBashTools.tools.map((tool) => tool.name);
 if (noBashToolNames.includes('bash')) {
   throw new Error(`--bash off should not advertise bash tool; got ${noBashToolNames.join(', ')}`);
 }
+for (const sourceEffectTool of ['project_goal', 'revert_goal_projection', 'apply_goal']) {
+  if (goalOrchestrationSupported() && !noBashToolNames.includes(sourceEffectTool)) {
+    throw new Error(`--bash off must retain write-gated Goal source tool ${sourceEffectTool}; got ${noBashToolNames.join(', ')}`);
+  }
+}
 const noBashConfig = await noBashClient.request('tools/call', { name: 'server_config', arguments: {} });
 if (noBashConfig.structuredContent.bashMode !== 'off') {
   throw new Error(`server_config did not report bash off: ${JSON.stringify(noBashConfig.structuredContent)}`);
+}
+if (noBashConfig.structuredContent.goalLiveProjection?.requiresBashMode !== false || noBashConfig.structuredContent.goalLiveProjection?.sourceWritesEnabled !== true) {
+  throw new Error(`server_config did not report the Goal Live write-only gate: ${JSON.stringify(noBashConfig.structuredContent)}`);
 }
 noBashClient.close();
 

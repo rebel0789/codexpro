@@ -158,10 +158,12 @@ Tool cards are opt in:
 CODEXPRO_TOOL_CARDS=1 codexpro start
 ```
 
-The v11 cards cover selected workspace, analysis, change, Git, handoff,
+The v13 cards cover selected workspace, analysis, change, Git, handoff,
 CodingTask, Goal, and terminal results. Reads and searches stay in normal chat output. After updating
 the connector, refresh its ChatGPT plugin connection once so it loads the new
-widget resource.
+widget resource. The legacy implicit documentation-site domain is omitted so
+ChatGPT can use its default sandbox. Set `CODEXPRO_WIDGET_DOMAIN` only to a
+dedicated HTTPS component origin that you control.
 
 ## Public URL Options
 
@@ -305,6 +307,8 @@ CodingTask never commits, merges, pushes, opens a PR, or deletes its worktree au
 
 Use a Goal when Pro should decompose a larger request and supervise multiple isolated CodingTasks. The ordinary Chat flow is:
 
+Goal orchestration requires POSIX advisory locking. In this release every Goal tool is unsupported and intentionally hidden on Windows, and `server_config.goalOrchestration.supported` reports `false` with the platform reason. Windows users can continue to use Direct coding and independent CodingTasks, including Direct↔Codex ownership transfer.
+
 ```text
 propose_goal (inert plan + contract fingerprint)
   -> user reviews the Goal card
@@ -312,16 +316,19 @@ approve_goal (records approval; still starts nothing)
   -> start_goal (launches dependency-ready workers concurrently)
   -> get_goal / refresh_goal / publish_goal_blackboard
   -> integrate_goal_work for each Pro-reviewed worker result
-  -> review_goal
-  -> complete_goal (records Pro's evidence judgment; source still unchanged)
-  -> apply_goal (separate explicit source effect)
+  -> review_goal (returns the exact integration HEAD + review fingerprint)
+  -> project_goal (Live only; separate approval for that reviewed checkpoint)
+  -> complete_goal (records Pro's evidence judgment)
+  -> apply_goal (separate final source effect or zero-write Live adoption)
 ```
 
 Goal workers use the configured Codex model and reasoning effort, defaulting to `gpt-5.6-sol` and `high`. They always write isolated CodingTask worktrees. Pro controls work assignment and integration; worker Blackboard records can report discoveries, contracts, blockers, paths, and verification but cannot change the approved work graph or publish decisions.
 
-The current vertical slice deliberately accepts only `execution_policy=supervised`, `workspace_policy=isolated`, one turn per worker, and zero automatic retries. Parallel detached workers and their CodingTasks survive Chat or connector disconnects, but Pro must explicitly refresh, review, integrate, and start newly unblocked dependency work. Persistent autonomous scheduling, automatic multi-turn/retry behavior, and incremental Live projection are roadmap capabilities, not aliases for the current flow.
+The current unreleased slice accepts `execution_policy=supervised` with `workspace_policy=isolated` or `live`, one turn per worker, and zero automatic retries. Live changes only the separately approved source-effect step: workers and the private Pro integration worktree remain isolated. After `review_goal`, `project_goal` requires the exact returned integration HEAD and review fingerprint plus a stable idempotency key and explicit confirmation. It never projects unreviewed work. Parallel detached workers survive Chat or connector disconnects, but Pro must still refresh, review, integrate, and start newly unblocked dependency work. Persistent autonomous scheduling and automatic multi-turn/retry behavior remain roadmap capabilities.
 
-`complete_goal` does not modify the source repository. `apply_goal` additionally requires source-apply permission in the approved contract and explicit confirmation. It checks the original committed HEAD, rejects overlap with pre-existing dirty paths, preserves unrelated dirty files, never stages or commits, and records authoritative before/after state. Commit, push, draft PR, worker network access, and automatic cleanup are not implemented. The `commands` field records the approved verification protocol; because Goal execution intentionally requires trusted `bashMode=full`, it is not an OS command allowlist.
+Every Live projection holds a per-repository lock, checks the exact approved source HEAD and changed-path file/index state, and writes a durable journal before changing source. Unrelated pre-existing tracked, staged, and untracked work is preserved. A retry with the same key recovers from the journal; an external edit on a Goal-owned path is never overwritten and leaves the projection `recovery_required` for user action. Unsupported symlink, submodule, conflicted-index, or non-regular-file topology fails closed.
+
+`cancel_goal` stops Goal execution but never rolls source back. Reverting is a separate confirmed `revert_goal_projection`, allowed only for the latest applied projection first (explicit LIFO). It uses the same lock, path CAS, journal, and no-overwrite rule. After `complete_goal` records the final semantic judgment, `apply_goal` either applies an Isolated result or, when the exact final Live checkpoint is already present, adopts and seals it with zero source writes. None of these operations stage, commit, push, merge, open a PR, launch Codex, or clean up the retained worktrees automatically. Goal worker execution requires trusted `bashMode=full`; source-only project/revert/apply operations require workspace write mode but do not require bash or a Codex executable. The `commands` field is the approved verification protocol, not an OS command allowlist.
 
 ## Durable Background Jobs
 

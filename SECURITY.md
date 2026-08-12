@@ -30,7 +30,7 @@ CodexPro can expose:
 - optional shell command execution through the `bash` tool, hidden when bash mode is off
 - optional durable shell execution through `start_background_job`, governed by the same bash mode and stored under a private local CodexPro state directory
 - optional CodingTask worktrees with exclusive direct/Codex mutation ownership and private state outside allowed projects
-- optional supervised Goal orchestration with fingerprint-bound approval, parallel isolated CodingTasks, a private integration worktree, and separately confirmed source application
+- optional supervised Goal orchestration on supported POSIX hosts, with fingerprint-bound approval, parallel isolated CodingTasks, a private integration worktree, and separately confirmed source application
 - optional write/edit/apply_patch capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
 - optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
 - optional local execute/review looping through `codexpro loop-handoff`, run from the user's terminal only with a user-provided reviewer command and iteration limit
@@ -57,10 +57,17 @@ Review changes against these failure modes before release:
 | Direct coding and Codex write the same task concurrently | CodingTask transfers one exclusive mutation owner under revision/lease checks; conflicting or stale transitions fail closed. |
 | Codex requests broader authority during collaboration | CodingTask starts Codex with network disabled and approval policy `never`; approval and interactive-input requests fail closed. |
 | A task lifecycle mutates repository history or destroys review evidence | CodingTask does not commit, merge, push, open a PR, or delete its retained worktree automatically. Those actions require a separate explicit user decision. |
+| Goal orchestration runs on Windows without the required lock primitive | This release hides every Goal tool on Windows and rejects proposal before storing state. `server_config.goalOrchestration.supported=false` explains the platform boundary; Direct coding and standalone CodingTasks remain available. |
 | A Goal proposal or approval unexpectedly executes work | Proposal is inert and fingerprinted; approval only records authority. Worker launch is a separate execution-gated action with an idempotent key. |
 | A worker expands the Goal or overwrites another worker | Goal-owned CodingTasks have immutable membership and file scopes; only Pro can publish decisions or integrate a reviewed worker patch. Out-of-scope or blocked-path content is rejected. |
-| A Goal applies over the user's dirty work | Source apply is separate from completion, checks the approved base HEAD, rejects changed-path overlap, preserves unrelated dirty paths, and persists before/after readback without staging or committing. |
-| Unsupported autonomous or Live settings silently degrade to supervised execution | The current slice rejects persistent, Live, multi-turn, and automatic-retry contracts. Those modes remain roadmap work. |
+| A Live Goal writes unreviewed integration state | Workers and Pro integration remain isolated. `project_goal` is a separate confirmed source effect bound to `review_goal`'s exact integration HEAD and deterministic review fingerprint. |
+| A Goal overwrites unrelated dirty, staged, or untracked work | Source effects operate only on reviewed changed paths under exact HEAD/file/index CAS and preserve unrelated source state. Same-path index drift or content edits fail closed. |
+| Two Goals or retries race in the same repository | Source effects share a per-repository lock and durable immutable artifacts/journal. Stable keys bind retries to one exact contract and partial application is reconciled by authoritative path readback. |
+| Cancellation is mistaken for rollback | `cancel_goal` never reverts source. Revert requires its own confirmation and stable key, and only the latest applied projection can be reverted first (LIFO). |
+| A revert overwrites a user's later edit | External same-path edits are never overwritten. Apply or revert records `recovery_required` and requires user recovery instead of guessing. |
+| Final Live application writes the same checkpoint twice | When the completed integration checkpoint exactly matches the latest applied projection, `apply_goal` adopts and seals it with zero source writes. |
+| A projection crosses a symlink or submodule boundary | Live source effects accept only regular files/executable regular files with safe parent topology and stage-0 regular-file index entries; symlinks, submodules, conflicts, and non-regular files fail closed. |
+| Unsupported autonomous settings silently degrade to supervised execution | The current slice rejects persistent, multi-turn, and automatic-retry contracts. Those modes remain roadmap work. |
 | A Goal `commands` list is mistaken for an OS command sandbox | Goal execution requires trusted full-bash authority. The list is the approved verification protocol; network and writable paths are separately constrained, but arbitrary local command execution is possible inside the isolated worker workspace. |
 | Automatic `cloudflared` install trusts a mutable download | The installer uses a pinned release URL and verifies the platform asset SHA-256 before writing or extracting it. |
 | A handoff plan silently becomes agent execution | `handoff_to_agent` remains planning-only. Explicit full-bash/background commands are separate trusted command surfaces and must receive normal MCP write-action approval. |
@@ -151,8 +158,14 @@ codexpro start \
 - Pin service-managed installations with `--codex-bin` or `CODEXPRO_CODEX_BIN`; do not assume launchd/systemd inherits the same `PATH` as an interactive terminal.
 - Use `get_background_job` or `wait_for_background_job` after reconnecting. Do not invent a new key as an automatic retry, and cancel only with `cancel_background_job`.
 - Keep `CODEXPRO_TASK_DIR` outside every allowed project. Treat its retained worktrees, task state, prompts, and bounded logs as private source data.
-- Treat Goal state, worker worktrees, the Goal integration worktree, prompts, Blackboard records, and patches under `CODEXPRO_TASK_DIR` as private source data. The current Goal slice is supervised/isolated only; do not describe it as unattended autonomous execution.
-- Review the exact Goal fingerprint before approval. Approval does not start workers, completion does not apply source changes, and source application requires its own explicit confirmation.
+- Do not attempt to expose Goal tools manually on Windows. Goal orchestration requires the POSIX advisory-locking contract and is intentionally unavailable as a whole on that platform; use Direct coding or standalone CodingTasks instead.
+- Treat Goal state, worker worktrees, the Goal integration worktree, prompts, Blackboard records, projection manifests, journals, and patches under `CODEXPRO_TASK_DIR` as private source data. Live never makes worker or integration worktrees public source workspaces.
+- Review the exact Goal fingerprint before approval. Approval does not start workers, and Live projection still requires a separate explicit confirmation of `review_goal`'s exact integration HEAD and review fingerprint.
+- Do not treat cancel as undo. Use `revert_goal_projection` only after inspecting the latest applied projection; reverts are explicit LIFO source effects and completed/adopted projections are sealed.
+- If a projection reports `recovery_required`, stop source automation. Preserve the user's same-path edit and recover deliberately from the durable journal; do not invent a new key or overwrite the path.
+- Keep the source repository on the approved committed HEAD for every Goal source effect. Unrelated dirty/staged/untracked paths may remain, but changed-path file bytes, modes, and index entries are CAS-protected.
+- Fail closed on symlinks, submodules, conflicted index entries, renames/copies, and non-regular source topology. Do not broaden Live projection to cover them implicitly.
+- `complete_goal` records Pro's judgment. `apply_goal` is still the final explicit boundary; for a matching already-projected Live checkpoint it performs a zero-write adoption/seal rather than writing source again.
 - Enable CodingTask execution only by explicitly setting both `CODEXPRO_WRITE_MODE=workspace` and `CODEXPRO_BASH_MODE=full`. Setting only one must not weaken the gate.
 - Keep status, list, review, cancel, and Codex → Direct available under safer modes so an operator can inspect, stop, and recover existing tasks.
 - Review a CodingTask diff after every ownership return. Once explicitly enabled, Codex collaboration has workspace write and full command authority, but no network and no automatic approvals.

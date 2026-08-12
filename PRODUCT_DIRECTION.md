@@ -17,6 +17,8 @@ CodexPro is for an individual developer working in an existing Git repository wh
 
 Independent CodingTasks remain first-class. A Goal is added only when a request benefits from planning, decomposition, parallel work, or long-running recovery.
 
+Platform availability is part of the capability boundary. Goal orchestration requires POSIX advisory locking and is wholly unavailable/hidden on Windows in this release. Direct coding and independent CodingTasks remain supported there.
+
 ## Authority model
 
 | Actor | Authority |
@@ -48,10 +50,10 @@ Only Pro can create work, change scope, reassign responsibility, alter dependenc
 
 The same Goal engine supports two policies:
 
-- **Supervised:** the user approves the plan, observes the work, and approves the final source effect. Its default workspace policy is **Live**, so Pro-reviewed integration changes can appear promptly in the user's current workspace.
+- **Supervised:** the user approves the plan, observes the work, and approves each source effect. Its default workspace policy is **Live**, so an exact Pro-reviewed integration checkpoint can be projected promptly into the user's current workspace through a separate confirmed action.
 - **Persistent autonomous:** the user approves the goal, permissions, and resource envelope once. The engine continues planned Codex work without intermediate approval and pauses when fresh semantic judgment is required. Its default workspace policy is **Isolated**.
 
-Workers always execute in isolated worktrees. Only Pro's integration flow can move a reviewed result toward the source workspace. Live application must stop if source drift makes the approved baseline unsafe.
+Workers and Pro's integration worktree always remain isolated. `review_goal` attests an exact integration checkpoint; only the separate `project_goal` authority can move that reviewed checkpoint toward source. Live application must stop if source HEAD, changed-path content/index state, or repository topology makes the approved baseline unsafe.
 
 Persistent autonomy is bounded, not unlimited. The contract always retains file, command, network, concurrency, retry, time, and resource boundaries, plus explicit interruption and recovery.
 
@@ -75,9 +77,14 @@ A persistent Goal card shows overall state, current phase, approvals, worker sta
 
 - A Goal is anchored to an explicit committed base SHA even when the source workspace already contains unrelated uncommitted work.
 - Parallel worker results are integrated in a dedicated Goal worktree in dependency order.
-- Source drift and conflicts are checked before each Live application or final isolated application.
+- Source drift and conflicts are checked before each Live projection, projection revert, or final Isolated application. Unrelated tracked, staged, and untracked work is preserved.
+- Every Live projection is separately confirmed and bound to the exact integration HEAD and review fingerprint returned by `review_goal`.
+- Goal source effects serialize under a per-repository lock, use exact path/content/index CAS, and persist immutable manifests plus a durable journal for idempotent retry recovery.
+- Cancellation never implies source rollback. A revert is a separate latest-applied-first (LIFO) action and refuses to overwrite a user's later same-path edit; unresolved conflicts become `recovery_required`.
+- A completed Live Goal adopts and seals an already-projected matching final checkpoint without writing source twice.
 - The final review shows completion criteria, design decisions, worker results, combined diff, tests, skipped checks, risks, and source drift.
-- Apply, commit, push, and draft-PR effects are separate permissions. Push and PR creation require explicit remote authority.
+- Live projection and final apply are separate source permissions. The implemented slice never stages, commits, merges, pushes, or opens a PR.
+- Unsupported symlink, submodule, conflicted-index, rename/copy, and non-regular-file cases fail closed.
 - CodexPro never treats `git reset` as a safe generic undo for a dirty user workspace. Goal-owned changes require a bounded journal/checkpoint so pre-existing work is preserved.
 
 ## Distribution and trust
@@ -122,11 +129,14 @@ The primary metric is **Goal completion rate**: the share of representative Goal
 | --- | --- |
 | Direct ChatGPT coding | Implemented |
 | Independent persistent CodingTask and Direct↔Codex transfer | Implemented in the current working tree; unreleased |
-| Chat and Work task cards | Verified in the installed private plugin |
+| Chat and Work task cards | CodingTask and Isolated Goal cards verified; the Live v13 default sandbox-fallback card rendered in ordinary Chat without a new template error, while explicit endpoint-domain card fetches remain intermittently unreliable |
 | Durable Goal state and fingerprint-bound approval contract | Implemented in the current working tree; unreleased |
+| Goal platform availability | Supported on POSIX hosts; all Goal tools are hidden on Windows and `server_config.goalOrchestration.supported=false`; Direct/CodingTask remain available |
 | Parallel Goal workers and Pro-supervised Blackboard | Implemented for supervised execution; deterministic HTTP/MCP and real ordinary-Chat flows verified |
 | Pro integration worktree and final Isolated application | Implemented with drift/overlap checks and authoritative source readback |
-| Persistent autonomous scheduler, automatic retries/multi-turn work, and incremental Live projection | Planned; unsupported values fail closed rather than behaving like supervised Isolated mode |
-| Representative real Goal completion in Chat | Verified in ordinary Chat through the installed private plugin and real Codex App Server: two `gpt-5.6-sol`/`high` workers overlapped, Pro integrated/reviewed/completed, and source application remained unset |
+| Supervised Live reviewed-checkpoint projection and explicit LIFO revert | Implemented and verified through a representative ordinary-Chat happy path on a supported POSIX host with the installed plugin and real `gpt-5.6-sol`/`high` App Server; focused core/HTTP tests separately cover CAS, recovery, LIFO revert, and retry |
+| Persistent autonomous scheduler and automatic retries/multi-turn work | Planned; unsupported values fail closed rather than behaving like supervised execution |
+| Representative real Isolated Goal completion in Chat | Verified in ordinary Chat through the installed private plugin and real Codex App Server: two `gpt-5.6-sol`/`high` workers overlapped, Pro integrated/reviewed/completed, and source application remained unset |
+| Representative real Live Goal completion in Chat | Verified exact review → separate projection approval → completion → zero-write final adoption; projection `proj_32ac83deacc868d2f4799002` was adopted, source HEAD stayed unchanged, and only the approved 2-line/70-byte file was projected |
 
 This status table is part of the contract: documentation and tests must not present planned Goal behavior as a shipped capability.

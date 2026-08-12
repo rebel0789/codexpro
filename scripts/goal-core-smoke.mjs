@@ -10,6 +10,7 @@ import {
   proposeGoal,
   publishGoalBlackboard
 } from '../dist/goalOps.js';
+import { GoalStore } from '../dist/goalStore.js';
 
 function git(cwd, args) {
   return execFileSync('git', args, {
@@ -48,11 +49,22 @@ try {
   const sourceStatus = git(sourceRoot, ['status', '--porcelain=v1', '--untracked-files=all']);
 
   const config = { dataRoot };
+  const alternateDataRoot = path.join(fixture, 'alternate-state');
   const guard = {
     assertSourceWorkspace(root) {
       assert.equal(root, sourceRoot);
     }
   };
+  let activeSourceLocks = 0;
+  let maximumSourceLocks = 0;
+  const lockOperation = (store) => store.withSourceLock(sourceRoot, git(sourceRoot, ['rev-parse', '--path-format=absolute', '--git-common-dir']), async () => {
+    activeSourceLocks += 1;
+    maximumSourceLocks = Math.max(maximumSourceLocks, activeSourceLocks);
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    activeSourceLocks -= 1;
+  });
+  await Promise.all([lockOperation(new GoalStore(config)), lockOperation(new GoalStore({ dataRoot: alternateDataRoot }))]);
+  assert.equal(maximumSourceLocks, 1, 'same repository must serialize source effects across different Goal data roots');
   const input = {
     goalKey: 'parallel-auth-hardening-v1',
     title: 'Harden authentication boundaries',
@@ -149,7 +161,19 @@ try {
     ...input,
     goalKey: 'persistent-v1',
     executionPolicy: 'persistent'
-  }), /supports only supervised execution/);
+  }), /requires supervised execution/);
+  await expectReject(proposeGoal(config, { root: sourceRoot }, guard, {
+    ...input,
+    goalKey: 'live-without-apply-v1',
+    workspacePolicy: 'live'
+  }), /requires the existing sourceEffects.apply permission/);
+  const liveProposed = await proposeGoal(config, { root: sourceRoot }, guard, {
+    ...input,
+    goalKey: 'live-contract-v1',
+    workspacePolicy: 'live',
+    permissions: { ...input.permissions, sourceEffects: { ...input.permissions.sourceEffects, apply: true } }
+  });
+  assert.deepEqual(liveProposed.goal.live, { projectedIntegrationSha: baseSha, projections: [] });
   await expectReject(proposeGoal(config, { root: sourceRoot }, guard, {
     ...input,
     goalKey: 'automatic-retry-v1',

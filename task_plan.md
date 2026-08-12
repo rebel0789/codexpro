@@ -4,7 +4,7 @@
 Deliver the first real vertical slice in which ChatGPT Pro plans and supervises a durable local Goal, Codex workers execute isolated CodingTasks, and the user can observe, interrupt, resume, review, and apply an integrated result from ordinary Chat.
 
 ## Current Phase
-Phase 6
+Phase 7 complete
 
 ## Phases
 
@@ -31,8 +31,9 @@ Phase 6
 - [x] Publish structured Blackboard discoveries, contracts, blockers, file ownership, and test results
 - [x] Integrate worker results in a Goal worktree with Pro-controlled sequencing
 - [x] Implement the accepted supervised Isolated vertical slice without weakening source-workspace safety
-- [ ] Implement incremental supervised Live projection and the persistent autonomous scheduler
-- **Status:** complete for the accepted supervised Isolated slice; roadmap work remains
+- [x] Implement incremental supervised Live projection
+- [ ] Implement the persistent autonomous scheduler
+- **Status:** complete for the accepted supervised Isolated and Live slices; autonomous scheduling remains roadmap work
 
 ### Phase 5: Goal card and Chat control flow
 - [x] Render a persistent Goal snapshot with monotonic state version
@@ -46,6 +47,14 @@ Phase 6
 - [x] Verify reconnect recovery and authoritative source/worktree readback
 - [x] Update README, changelog, security guidance, and execution progress
 - **Status:** complete for the supervised Isolated MVP
+
+### Phase 7: Supervised Live projection
+- [x] Define the exact approved Live contract, source-mutation boundary, recovery journal, and rollback semantics
+- [x] Implement restart-safe, idempotent projection of Pro-reviewed integration checkpoints into the source workspace
+- [x] Preserve unrelated pre-existing work and fail closed on overlapping edits, HEAD drift, blocked paths, symlinks, or stale revisions
+- [x] Expose focused MCP actions and honest Goal-card state for project, inspect, recover, and revert
+- [x] Verify core, execution, HTTP/MCP, widget, and full release flows, then exercise a representative ordinary-Chat Live Goal with a real Codex worker
+- **Status:** complete
 
 ## Key Questions
 1. What is the smallest Goal contract that preserves the accepted final architecture instead of creating a throwaway orchestration layer?
@@ -64,12 +73,18 @@ Phase 6
 | Local engine is execution authority; Pro is semantic authority | Enables restart-safe execution without pretending the plugin can wake ChatGPT for fresh judgment |
 | Primary app archetype is interactive-decoupled | Goal cards require long-lived state, repeated actions, and retry-safe tool calls |
 | Local engine/plugin/Goal remain open source; future hosted/team convenience is the commercial boundary | Preserves local trust and adoption while keeping future business options |
+| Supervised Live source effects use a separate reviewed projection action | Keeps private integration, source mutation, idempotency, and recovery authorities explicit |
+| Live projection approval is carried by `workspacePolicy=live` plus the existing `sourceEffects.apply=true` contract | Avoids changing the meaning of existing Isolated approvals while keeping one source-effect permission |
+| Cancel never silently reverts projected source changes | Prevents cancellation from overwriting user edits; rollback is a separate latest-first confirmed action |
+| Live v1 supports only regular file add/modify/delete and executable-mode changes | Symlink, submodule, and unsafe topology changes fail closed until an equally safe manifest contract exists |
+| The implicit legacy widget domain is omitted from runtime metadata | It is a documentation origin, not a dedicated hosted component origin; omission lets ChatGPT use its sandbox while explicit custom domains remain available |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
 |-------|---------|------------|
 | Core review-metric regression expected 5 changed files although the fixture changes 6 | 1 | Corrected the test expectation; implementation output was authoritative |
 | Ordinary Chat tried to open the private Goal integration worktree after `review_goal` and treated the expected allowed-root denial as verification failure | 1 | Kept the isolation boundary, made `review_goal` run authoritative integrated `git diff --check`, and explicitly instructed Pro not to use generic workspace tools for private Goal worktrees |
+| Cards intermittently failed when the documentation-site legacy domain was forced as the iframe origin | 1 | Preserved explicit custom domains, omitted only the implicit legacy default, bumped the resource to v13, refreshed the plugin, and verified a completed Goal card through ChatGPT's default sandbox |
 
 ## Notes
 - Existing user and prior-worker changes are preserved. No reset, checkout, broad cleanup, commit, push, or PR is authorized.

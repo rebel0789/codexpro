@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { inspectCodingTaskSource, type CodingTaskSourceWorkspace, type CodingTaskWorkspaceGuard } from "./codingTaskWorktree.js";
 import { GoalStore, type GoalStoreConfig } from "./goalStore.js";
+import { verifyGoalLiveProjection } from "./goalProjection.js";
 import {
   GOAL_STATE_VERSION,
   assertGoalDag,
@@ -75,6 +76,8 @@ export interface CompleteGoalInput {
   summary: string;
   criteria: GoalEvidenceResult[];
   verification: GoalEvidenceResult[];
+  reviewFingerprint?: string;
+  isPathContentAllowed?: (relativePath: string) => boolean | Promise<boolean>;
 }
 
 function sha256(value: string): string {
@@ -155,8 +158,9 @@ export async function proposeGoal(
   guard: CodingTaskWorkspaceGuard | undefined,
   input: ProposeGoalInput
 ): Promise<{ goal: GoalState; reused: boolean }> {
-  if (input.executionPolicy !== "supervised" || input.workspacePolicy !== "isolated") {
-    throw new Error("The current Goal execution slice supports only supervised execution in an isolated integration worktree.");
+  if (process.platform === "win32") throw new Error("Goal orchestration requires POSIX advisory locking and is not supported on Windows by this release.");
+  if (input.executionPolicy !== "supervised" || !["isolated", "live"].includes(input.workspacePolicy)) {
+    throw new Error("Goal execution requires supervised execution in an isolated or Live integration worktree.");
   }
   const store = new GoalStore(config);
   await store.initialize();
@@ -166,6 +170,10 @@ export async function proposeGoal(
   const identity = await inspectCodingTaskSource(workspace, input.baseSha, guard);
   const goalId = `goal_${sha256(`${identity.commonDir}\0${goalKey}`).slice(0, 24)}`;
   const work = normalizeWork(input.work);
+  const permissions = normalizePermissions(input.permissions);
+  if (input.workspacePolicy === "live" && !permissions.sourceEffects.apply) {
+    throw new Error("A supervised Live Goal requires the existing sourceEffects.apply permission.");
+  }
   const immutable = {
     version: GOAL_STATE_VERSION,
     goalId,
@@ -180,7 +188,7 @@ export async function proposeGoal(
     workerModel: text(input.workerModel, "Goal worker model", 160),
     workerEffort: input.workerEffort,
     limits: normalizeLimits(input.limits),
-    permissions: normalizePermissions(input.permissions),
+    permissions,
     sourceRoot: identity.sourceRoot,
     sourceGitCommonDir: identity.commonDir,
     baseSha: identity.baseSha,
@@ -188,7 +196,8 @@ export async function proposeGoal(
     sourceStatusEntryCountAtCreation: identity.sourceStatusEntryCount,
     sourceUncommittedChangesIncluded: false as const,
     integrationWorktreeRoot: store.paths(goalId).integrationWorktreeRoot,
-    work
+    work,
+    ...(input.workspacePolicy === "live" ? { live: { projectedIntegrationSha: identity.baseSha, projections: [] } } : {})
   };
   if (!path.isAbsolute(immutable.integrationWorktreeRoot)) throw new Error("Goal integration worktree path must be absolute.");
   const contractFingerprint = sha256(`codexpro-goal-contract-v1\0${contractPayload(immutable)}`);
@@ -393,17 +402,18 @@ export async function markGoalCanceled(config: GoalStoreConfig, goalIdInput: str
   });
 }
 
-export async function completeGoal(config: GoalStoreConfig, goalIdInput: string, input: CompleteGoalInput): Promise<GoalState> {
+export async function completeGoal(config: GoalStoreConfig & { maxOutputBytes?: number }, goalIdInput: string, input: CompleteGoalInput): Promise<GoalState> {
   const store = new GoalStore(config);
   const goalId = validateGoalId(goalIdInput);
   const completionKey = text(input.completionKey, "Goal completion key", 160);
   const summary = text(input.summary, "Goal completion summary", 20_000);
   const criteria = normalizeEvidence(input.criteria, "Goal criteria evidence");
   const verification = normalizeEvidence(input.verification, "Goal verification evidence");
-  return store.withGoalLock(goalId, async () => {
+  const completeLocked = async (): Promise<GoalState> => store.withGoalLock(goalId, async () => {
     const state = await store.get(goalId);
+    const requestedReviewFingerprint = state.workspacePolicy === "live" ? input.reviewFingerprint?.trim().toLowerCase() : undefined;
     if (state.completion?.completionKey === completionKey) {
-      if (state.completion.summary !== summary || JSON.stringify(state.completion.criteria) !== JSON.stringify(criteria) || JSON.stringify(state.completion.verification) !== JSON.stringify(verification)) {
+      if (state.completion.summary !== summary || JSON.stringify(state.completion.criteria) !== JSON.stringify(criteria) || JSON.stringify(state.completion.verification) !== JSON.stringify(verification) || state.completion.reviewFingerprint !== requestedReviewFingerprint) {
         throw new Error("Goal completion key is already bound to different evidence.");
       }
       return state;
@@ -411,6 +421,16 @@ export async function completeGoal(config: GoalStoreConfig, goalIdInput: string,
     if (state.revision !== input.expectedRevision) throw new Error(`Goal revision conflict: expected ${input.expectedRevision}, found ${state.revision}.`);
     if (state.lifecycle !== "waiting_review" || !state.work.every((item) => item.status === "integrated")) {
       throw new Error("Goal completion requires every approved work item to be integrated and waiting for final review.");
+    }
+    if (state.workspacePolicy === "live") {
+      if (!state.live || !state.integrationHeadSha || state.live.projectedIntegrationSha !== state.integrationHeadSha || state.live.pendingProjectionId ||
+          state.live.projections.some((projection) => ["prepared", "applying", "reverting", "recovery_required"].includes(projection.status))) {
+        throw new Error("Live Goal completion requires the exact integration HEAD to be projected with no pending or recovery-required journal.");
+      }
+      const reviewFingerprint = requestedReviewFingerprint;
+      if (!reviewFingerprint || !/^[a-f0-9]{64}$/.test(reviewFingerprint)) throw new Error("Live Goal completion requires the exact authoritative review fingerprint.");
+      const verified = await verifyGoalLiveProjection({ ...config, maxOutputBytes: config.maxOutputBytes ?? 4 * 1024 * 1024 }, state, input.isPathContentAllowed);
+      if (verified.review.reviewFingerprint !== reviewFingerprint) throw new Error("Live Goal completion review fingerprint no longer matches authoritative projected source readback.");
     }
     if (criteria.length !== state.completionCriteria.length || criteria.some((result, index) => result.requirement !== state.completionCriteria[index])) {
       throw new Error("Goal completion evidence must cover the persisted completion criteria in contract order.");
@@ -425,7 +445,7 @@ export async function completeGoal(config: GoalStoreConfig, goalIdInput: string,
     const next: GoalState = {
       ...state,
       lifecycle: "completed",
-      completion: { completionKey, summary, criteria, verification, completedAt: now },
+      completion: { completionKey, summary, criteria, verification, completedAt: now, ...(requestedReviewFingerprint ? { reviewFingerprint: requestedReviewFingerprint } : {}) },
       revision: state.revision + 1,
       updatedAt: now,
       finishedAt: now,
@@ -434,4 +454,8 @@ export async function completeGoal(config: GoalStoreConfig, goalIdInput: string,
     await store.writeLocked(next);
     return next;
   });
+  const initial = await store.get(goalId);
+  return initial.workspacePolicy === "live"
+    ? store.withSourceLock(initial.sourceRoot, initial.sourceGitCommonDir, completeLocked)
+    : completeLocked();
 }

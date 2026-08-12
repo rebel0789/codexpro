@@ -125,24 +125,52 @@ export async function verifyGoalIntegrationDiff(
 export async function applyGoalWorkerPatch(
   goal: GoalState,
   workId: string,
+  integrationKey: string,
   diffSha256: string,
   patch: string,
+  changedPaths: string[],
   maxOutputBytes = 4 * 1024 * 1024
 ): Promise<{ beforeHead: string; commitSha: string }> {
   if (!patch.trim()) throw new Error(`Goal work ${workId} produced no patch to integrate.`);
   const root = await ensureGoalIntegrationWorktree(goal);
   const status = await runGit(root, ["status", "--porcelain=v1", "--untracked-files=all"], { maxBytes: maxOutputBytes });
-  if (status) throw new Error("Goal integration worktree is not clean; resolve the persisted integration state before continuing.");
   const beforeHead = (await runGit(root, ["rev-parse", "HEAD"])).toLowerCase();
   const patchInput = patch.endsWith("\n") ? patch : `${patch}\n`;
-  await runGit(root, ["apply", "--check", "--binary", "--whitespace=nowarn", "-"], { input: patchInput, maxBytes: maxOutputBytes });
-  await runGit(root, ["apply", "--index", "--binary", "--whitespace=nowarn", "-"], { input: patchInput, maxBytes: maxOutputBytes });
+  const expectedParent = goal.integrationHeadSha ?? goal.baseSha;
+  if (beforeHead !== expectedParent) {
+    if (status) throw new Error("Goal integration recovery refuses a divergent dirty checkpoint.");
+    const parents = (await runGit(root, ["show", "-s", "--format=%P", "HEAD"], { maxBytes: maxOutputBytes })).split(/\s+/).filter(Boolean);
+    const message = await runGit(root, ["show", "-s", "--format=%B", "HEAD"], { maxBytes: maxOutputBytes });
+    const trailer = (name: string): string | undefined => {
+      const matches = message.split(/\r?\n/).filter((line) => line.startsWith(`${name}: `));
+      return matches.length === 1 ? matches[0]!.slice(name.length + 2) : undefined;
+    };
+    if (parents.length !== 1 || parents[0] !== expectedParent || trailer("CodexPro-Goal") !== goal.goalId || trailer("CodexPro-Work") !== workId || trailer("CodexPro-Diff") !== diffSha256 || trailer("CodexPro-Integration-Key") !== integrationKey) {
+      throw new Error("Goal integration HEAD diverged from the exact journaled checkpoint authority.");
+    }
+    const committedPatch = await runGit(root, ["diff", "--binary", "--no-ext-diff", "--no-textconv", expectedParent, "HEAD", "--"], { maxBytes: maxOutputBytes });
+    const committedPaths = (await runGit(root, ["diff", "--name-only", "-z", expectedParent, "HEAD", "--"], { maxBytes: maxOutputBytes })).split("\0").filter(Boolean).sort();
+    if (committedPatch.trimEnd() !== patch.trimEnd() || JSON.stringify(committedPaths) !== JSON.stringify([...changedPaths].sort())) {
+      throw new Error("Goal integration tagged checkpoint tree does not match the exact journaled reviewed patch.");
+    }
+    return { beforeHead: expectedParent, commitSha: beforeHead };
+  }
+  if (status) {
+    const unstaged = await runGit(root, ["diff", "--binary", "--no-ext-diff", "--no-textconv", "--"], { maxBytes: maxOutputBytes });
+    const stagedPaths = (await runGit(root, ["diff", "--cached", "--name-only", "-z", "--"], { maxBytes: maxOutputBytes })).split("\0").filter(Boolean).sort();
+    if (unstaged || JSON.stringify(stagedPaths) !== JSON.stringify([...changedPaths].sort())) throw new Error("Goal integration recovery refuses non-journaled worktree or index changes.");
+    const stagedPatch = await runGit(root, ["diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "HEAD", "--"], { maxBytes: maxOutputBytes });
+    if (stagedPatch.trimEnd() !== patch.trimEnd()) throw new Error("Goal integration staged recovery patch does not match the journaled reviewed patch.");
+  } else {
+    await runGit(root, ["apply", "--check", "--binary", "--whitespace=nowarn", "-"], { input: patchInput, maxBytes: maxOutputBytes });
+    await runGit(root, ["apply", "--index", "--binary", "--whitespace=nowarn", "-"], { input: patchInput, maxBytes: maxOutputBytes });
+  }
   await runGit(root, [
     "-c", "user.name=CodexPro Goal",
     "-c", "user.email=goal@codexpro.local",
     "-c", `core.hooksPath=${path.join(os.tmpdir(), "codexpro-disabled-git-hooks")}`,
     "commit", "--no-gpg-sign", "-m", `CodexPro Goal checkpoint: ${workId}`,
-    "-m", `CodexPro-Goal: ${goal.goalId}\nCodexPro-Work: ${workId}\nCodexPro-Diff: ${diffSha256}`
+    "-m", `CodexPro-Goal: ${goal.goalId}\nCodexPro-Work: ${workId}\nCodexPro-Diff: ${diffSha256}\nCodexPro-Integration-Key: ${integrationKey}`
   ], { maxBytes: maxOutputBytes });
   const commitSha = (await runGit(root, ["rev-parse", "HEAD"])).toLowerCase();
   return { beforeHead, commitSha };

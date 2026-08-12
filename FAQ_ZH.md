@@ -140,9 +140,15 @@ codexpro start --root /path/to/repo --write workspace --bash full
 
 在普通 Chat 中提出较大的结果目标。Pro 可以先保存不执行的 `propose_goal` 契约并展示带指纹的 Goal 卡片；只有你接受该精确范围后才调用 `approve_goal`，而批准本身仍不会启动工作。`start_goal` 会并行启动依赖已满足的隔离 CodingTask，随后 Pro 刷新持久状态、审查证据、按依赖顺序集成结果，并根据每一条批准的标准判断是否完成。
 
-集成结果在单独确认 `apply_goal` 前不会进入源工作区。应用需要契约权限、原始 Git HEAD 与无脏路径重叠；它会保留无关的本地改动，也不会 stage、commit、push 或创建 PR。
+`workspace_policy=isolated` 会让所有集成 checkpoint 保持私有，直到单独确认 `apply_goal`。`workspace_policy=live` 下 worker 和 Pro integration 仍然隔离；`review_goal` 之后，只有单独确认的 `project_goal` 才能把返回的精确 integration HEAD/review fingerprint 投影到源工作区。批准、集成、审查、完成或取消都不会隐式投影。
 
-当前尚未发布的切片仅支持 supervised + isolated、每个 worker 一次 turn、无自动重试和无 worker 网络。独立 worker 可以跨断线继续，但没有在 Chat 关闭后做新设计判断的后台调度器。`commands` 列表是交给 Codex 的验证协议，不是更窄的命令沙箱；可信 Goal 执行因此同时要求 workspace write 和 full bash。
+Live 会保留既有且不相关的 tracked、staged、untracked 修改。每次 source effect 都检查批准的 HEAD 和目标路径 CAS，使用 per-repository lock，并先写 durable journal；相同 key 可恢复重试。若用户修改了同一路径，系统不会覆盖而进入 `recovery_required`。symlink、submodule、冲突 index 和非普通文件失败关闭。
+
+`cancel_goal` 不会回滚源码。回滚需单独确认 `revert_goal_projection`，且只允许 latest-applied-first（LIFO）。最终 checkpoint 已经投影时，`apply_goal` 会 zero-write 地采用并封存它。不会 stage、commit、merge、push 或创建 PR。当前切片仍是 supervised、每个 worker 一次 turn、无自动重试和无 worker 网络；worker 执行需要 workspace write + full bash，而 project/revert/apply 只需要 workspace write，不需要 bash 或 Codex。
+
+## Windows 支持 Goal 编排吗？
+
+本版本不支持。整个 Goal 功能面（不只是 Live 投影）都依赖由 POSIX advisory lock 支撑的 crash-safe GoalStore lock。因此 CodexPro 会在 Windows 上隐藏全部 Goal 工具，并返回 `server_config.goalOrchestration.supported=false`。Direct coding 和独立 CodingTask（包括 Direct↔Codex 切换）仍可使用。
 
 ## CodexPro 能运行超过 180 秒的 benchmark 吗？
 

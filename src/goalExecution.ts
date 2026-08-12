@@ -4,7 +4,15 @@ import { GoalStore, type GoalStoreConfig } from "./goalStore.js";
 import { applyGoalPatchToSource, applyGoalWorkerPatch, ensureGoalIntegrationWorktree, getGoalIntegrationHead, goalSourceDirtyPaths, reviewGoalIntegration, verifyGoalIntegrationDiff } from "./goalWorktree.js";
 import { validateGoalId, validateGoalWorkId, type GoalState, type GoalWorkItem } from "./goalState.js";
 import { markGoalCanceled } from "./goalOps.js";
+import { goalReviewFingerprint, verifyGoalLiveProjection } from "./goalProjection.js";
 import { minimatch } from "minimatch";
+import fsp from "node:fs/promises";
+import fs from "node:fs";
+import path from "node:path";
+import { secureCodingTaskDirectory } from "./codingTaskStore.js";
+
+export { projectGoal, revertGoalProjection } from "./goalProjection.js";
+export type { ProjectGoalInput, RevertGoalProjectionInput, GoalProjectionResult, GoalReviewAttestation } from "./goalProjection.js";
 
 export interface GoalExecutionConfig extends GoalStoreConfig {
   codexBinary: string;
@@ -308,7 +316,29 @@ export async function integrateGoalWork(
       return goal;
     }
     if (goal.revision !== input.expectedRevision) throw new Error(`Goal revision conflict: expected ${input.expectedRevision}, found ${goal.revision}.`);
-    const applied = await applyGoalWorkerPatch(goal, workId, review.visibleDiffSha256, review.diff, config.maxOutputBytes);
+    const expectedParent = goal.integrationHeadSha ?? goal.baseSha;
+    const journalPath = store.integrationJournalPath(goalId, workId);
+    const journalText = `${JSON.stringify({ version: 1, goalId, workId, integrationKey, expectedParent, reviewDiffSha256: review.visibleDiffSha256, changedPaths: review.changedPaths }, null, 2)}\n`;
+    if (review.changedPaths.length > 1_000 || Buffer.byteLength(journalText) > 64 * 1024) {
+      throw new Error("Goal integration journal exceeds the 1000-path or 64KiB safety bound.");
+    }
+    await fsp.mkdir(path.dirname(journalPath), { recursive: true, mode: 0o700 });
+    await secureCodingTaskDirectory(path.dirname(journalPath), "Goal integration journal");
+    const temporary = `${journalPath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      const handle = await fsp.open(temporary, "wx", 0o600);
+      try { await handle.writeFile(journalText); await handle.sync(); } finally { await handle.close(); }
+      try { await fsp.link(temporary, journalPath); } catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+    } finally { await fsp.unlink(temporary).catch(() => undefined); }
+    const journalHandle = await fsp.open(journalPath, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    let persistedJournal: string;
+    try {
+      const stat = await journalHandle.stat();
+      if (!stat.isFile() || stat.size > 64 * 1024 || (stat.mode & 0o077) !== 0) throw new Error("Goal integration journal is unsafe or exceeds its bound.");
+      persistedJournal = await journalHandle.readFile("utf8");
+    } finally { await journalHandle.close(); }
+    if (persistedJournal !== journalText) throw new Error("Goal integration journal is bound to a different immutable checkpoint contract.");
+    const applied = await applyGoalWorkerPatch(goal, workId, integrationKey, review.visibleDiffSha256, review.diff, review.changedPaths, config.maxOutputBytes);
     const now = new Date().toISOString();
     const updatedWork = goal.work.map((item): GoalWorkItem => item.workId === workId ? {
       ...item,
@@ -340,10 +370,23 @@ export async function reviewGoal(config: GoalIntegrationConfig, goalIdInput: str
   const goal = await new GoalStore(config).get(validateGoalId(goalIdInput));
   const review = await reviewGoalIntegration(goal, { maxOutputBytes: config.maxOutputBytes, contentPolicy });
   const verification = await verifyGoalIntegrationDiff(goal, review.headSha, config.maxOutputBytes);
+  const attestation = goalReviewFingerprint(goal, review, verification);
+  const projectionBlockers: string[] = [];
+  if (goal.executionPolicy !== "supervised" || goal.workspacePolicy !== "live" || !goal.permissions.sourceEffects.apply) projectionBlockers.push("not_approved_supervised_live");
+  if (!review.contentComplete) projectionBlockers.push("review_content_incomplete");
+  if (review.dirty) projectionBlockers.push("integration_worktree_dirty");
+  if (!goal.integrationHeadSha || goal.integrationHeadSha !== review.headSha) projectionBlockers.push("integration_head_mismatch");
+  if (goal.live?.pendingProjectionId) projectionBlockers.push("projection_pending");
+  if (goal.live?.projections.some((projection) => projection.status === "recovery_required")) projectionBlockers.push("projection_recovery_required");
+  if (goal.live?.adoptedAt || goal.lifecycle === "completed") projectionBlockers.push("goal_sealed");
+  if (goal.live?.projectedIntegrationSha === review.headSha) projectionBlockers.push("integration_head_already_projected");
   return {
     goal,
     review,
-    verification
+    verification,
+    ...attestation,
+    projectionEligible: projectionBlockers.length === 0,
+    projectionBlockers
   };
 }
 
@@ -403,6 +446,47 @@ export async function applyCompletedGoal(config: GoalIntegrationConfig, goalIdIn
   }
   if (goal.lifecycle !== "completed" || !goal.completion) throw new Error("Only a Pro-completed Goal can be applied to source.");
   if (!goal.permissions.sourceEffects.apply) throw new Error("This Goal contract did not approve source application.");
+  if (goal.workspacePolicy === "live") {
+    return store.withSourceLock(goal.sourceRoot, goal.sourceGitCommonDir, async () => store.withGoalLock(goalId, async () => {
+      const current = await store.get(goalId);
+      if (current.sourceApplication?.applicationKey === applicationKey && current.sourceApplication.status === "applied") return current;
+      if (current.sourceApplication && current.sourceApplication.applicationKey !== applicationKey) throw new Error("Goal source application is already bound to a different application key.");
+      if (current.revision !== input.expectedRevision) throw new Error(`Goal revision conflict: expected ${input.expectedRevision}, found ${current.revision}.`);
+      if (current.lifecycle !== "completed" || !current.completion || !current.live || current.live.adoptedAt) throw new Error("Only an unadopted completed Live Goal can be sealed.");
+      const verified = await verifyGoalLiveProjection(config, current, input.isPathContentAllowed);
+      const now = new Date().toISOString();
+      const adoptedProjection = { ...verified.projection, status: "adopted" as const };
+      const next: GoalState = {
+        ...current,
+        sourceApplication: {
+          applicationKey,
+          status: "applied",
+          patchSha256: verified.projection.cumulativePatchSha256,
+          sourceHeadSha: current.baseSha,
+          sourceDirtyPathsBefore: verified.sourceDirtyPaths,
+          sourceDirtyPathsAfter: verified.sourceDirtyPaths,
+          startedAt: now,
+          appliedAt: now,
+          zeroWrite: true,
+          adoptedProjectionId: verified.projection.projectionId,
+          reviewFingerprint: verified.review.reviewFingerprint
+        },
+        live: {
+          ...current.live,
+          adoptedAt: now,
+          adoptedProjectionId: verified.projection.projectionId,
+          adoptedReviewFingerprint: verified.review.reviewFingerprint,
+          projections: current.live.projections.map((projection) => projection.projectionId === adoptedProjection.projectionId ? adoptedProjection : projection)
+        },
+        revision: current.revision + 1,
+        updatedAt: now,
+        events: [...current.events, { at: now, kind: "projection_updated" as const, message: `Live projection ${verified.projection.projectionId} was sealed with zero source writes after authoritative readback.` }].slice(-500)
+      };
+      await store.writeLocked(next);
+      return next;
+    }));
+  }
+  return store.withSourceLock(goal.sourceRoot, goal.sourceGitCommonDir, async () => {
   const review = await reviewGoalIntegration(goal, { maxOutputBytes: config.maxOutputBytes, contentPolicy: input.isPathContentAllowed });
   if (!review.contentComplete) throw new Error(`Goal source application refuses blocked-path content: ${review.omittedPaths.join(", ")}`);
   const patchSha256 = createHash("sha256").update(review.diff).digest("hex");
@@ -476,5 +560,6 @@ export async function applyCompletedGoal(config: GoalIntegrationConfig, goalIdIn
     });
     throw error;
   }
+  });
 }
 import { createHash } from "node:crypto";

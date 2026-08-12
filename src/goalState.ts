@@ -8,7 +8,7 @@ export type GoalWorkspacePolicy = "live" | "isolated";
 export type GoalApprovalStatus = "pending" | "approved" | "rejected";
 export type GoalWorkStatus = "planned" | "ready" | "running" | "waiting_review" | "integrating" | "integrated" | "blocked" | "failed" | "canceled";
 export type GoalBlackboardKind = "discovery" | "contract" | "file_ownership" | "question" | "answer" | "blocker" | "verification" | "decision";
-export type GoalEventKind = "proposed" | "approved" | "approval_rejected" | "started" | "paused" | "resumed" | "canceled" | "work_updated" | "blackboard_published" | "integration_updated" | "completed" | "failed";
+export type GoalEventKind = "proposed" | "approved" | "approval_rejected" | "started" | "paused" | "resumed" | "canceled" | "work_updated" | "blackboard_published" | "integration_updated" | "projection_updated" | "completed" | "failed";
 
 export interface GoalResourceLimits {
   maxConcurrency: number;
@@ -95,6 +95,7 @@ export interface GoalCompletion {
   criteria: GoalEvidenceResult[];
   verification: GoalEvidenceResult[];
   completedAt: string;
+  reviewFingerprint?: string;
 }
 
 export interface GoalSourceApplication {
@@ -107,6 +108,44 @@ export interface GoalSourceApplication {
   startedAt: string;
   appliedAt?: string;
   error?: string;
+  zeroWrite?: boolean;
+  adoptedProjectionId?: string;
+  reviewFingerprint?: string;
+}
+
+export type GoalProjectionStatus = "prepared" | "applying" | "applied" | "reverting" | "reverted" | "recovery_required" | "adopted";
+
+export interface GoalProjection {
+  projectionId: string;
+  projectionKey: string;
+  fingerprint: string;
+  status: GoalProjectionStatus;
+  fromIntegrationSha: string;
+  toIntegrationSha: string;
+  reviewFingerprint: string;
+  deltaPatchSha256: string;
+  cumulativePatchSha256: string;
+  changedPaths: string[];
+  journalRelativePath: string;
+  sourceHeadSha: string;
+  sourceDirtyPathsBefore: string[];
+  sourceDirtyPathsAfter?: string[];
+  beforeManifestSha256: string;
+  afterManifestSha256: string;
+  preparedAt: string;
+  appliedAt?: string;
+  revertKey?: string;
+  revertedAt?: string;
+  error?: string;
+}
+
+export interface GoalLiveState {
+  projectedIntegrationSha: string;
+  pendingProjectionId?: string;
+  projections: GoalProjection[];
+  adoptedAt?: string;
+  adoptedProjectionId?: string;
+  adoptedReviewFingerprint?: string;
 }
 
 export interface GoalState {
@@ -151,12 +190,13 @@ export interface GoalState {
   error?: string;
   completion?: GoalCompletion;
   sourceApplication?: GoalSourceApplication;
+  live?: GoalLiveState;
 }
 
 const LIFECYCLES = new Set<GoalLifecycle>(["proposed", "approved", "running", "paused", "waiting_review", "completed", "failed", "canceled"]);
 const WORK_STATUSES = new Set<GoalWorkStatus>(["planned", "ready", "running", "waiting_review", "integrating", "integrated", "blocked", "failed", "canceled"]);
 const BLACKBOARD_KINDS = new Set<GoalBlackboardKind>(["discovery", "contract", "file_ownership", "question", "answer", "blocker", "verification", "decision"]);
-const EVENT_KINDS = new Set<GoalEventKind>(["proposed", "approved", "approval_rejected", "started", "paused", "resumed", "canceled", "work_updated", "blackboard_published", "integration_updated", "completed", "failed"]);
+const EVENT_KINDS = new Set<GoalEventKind>(["proposed", "approved", "approval_rejected", "started", "paused", "resumed", "canceled", "work_updated", "blackboard_published", "integration_updated", "projection_updated", "completed", "failed"]);
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
 
@@ -342,6 +382,7 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
       }
     }
     timestamp(value.completion.completedAt, "completion.completedAt");
+    if (value.completion.reviewFingerprint !== undefined && (typeof value.completion.reviewFingerprint !== "string" || !HASH.test(value.completion.reviewFingerprint))) invalid("completion.reviewFingerprint");
   }
   if (value.sourceApplication !== undefined) {
     if (!record(value.sourceApplication)) invalid("sourceApplication");
@@ -354,6 +395,43 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
     timestamp(value.sourceApplication.startedAt, "sourceApplication.startedAt");
     timestamp(value.sourceApplication.appliedAt, "sourceApplication.appliedAt", true);
     stringField(value.sourceApplication.error, "sourceApplication.error", 20_000, true);
+    if (value.sourceApplication.zeroWrite !== undefined && typeof value.sourceApplication.zeroWrite !== "boolean") invalid("sourceApplication.zeroWrite");
+    stringField(value.sourceApplication.adoptedProjectionId, "sourceApplication.adoptedProjectionId", 80, true);
+    if (value.sourceApplication.reviewFingerprint !== undefined && (typeof value.sourceApplication.reviewFingerprint !== "string" || !HASH.test(value.sourceApplication.reviewFingerprint))) invalid("sourceApplication.reviewFingerprint");
+  }
+  if (value.live !== undefined) {
+    if (!record(value.live)) invalid("live");
+    if (typeof value.live.projectedIntegrationSha !== "string" || !FULL_SHA.test(value.live.projectedIntegrationSha)) invalid("live.projectedIntegrationSha");
+    stringField(value.live.pendingProjectionId, "live.pendingProjectionId", 80, true);
+    if (!Array.isArray(value.live.projections) || value.live.projections.length > 500) invalid("live.projections");
+    const projectionIds = new Set<string>();
+    for (const [index, projection] of value.live.projections.entries()) {
+      if (!record(projection)) invalid(`live.projections[${index}]`);
+      const id = stringField(projection.projectionId, `live.projections[${index}].projectionId`, 80)!;
+      if (!/^proj_[a-f0-9]{24}$/.test(id) || projectionIds.has(id)) invalid(`live.projections[${index}].projectionId`);
+      projectionIds.add(id);
+      stringField(projection.projectionKey, `live.projections[${index}].projectionKey`, 160);
+      for (const name of ["fingerprint", "reviewFingerprint", "deltaPatchSha256", "cumulativePatchSha256", "beforeManifestSha256", "afterManifestSha256"] as const) {
+        if (typeof projection[name] !== "string" || !HASH.test(projection[name] as string)) invalid(`live.projections[${index}].${name}`);
+      }
+      for (const name of ["fromIntegrationSha", "toIntegrationSha", "sourceHeadSha"] as const) {
+        if (typeof projection[name] !== "string" || !FULL_SHA.test(projection[name] as string)) invalid(`live.projections[${index}].${name}`);
+      }
+      if (!["prepared", "applying", "applied", "reverting", "reverted", "recovery_required", "adopted"].includes(String(projection.status))) invalid(`live.projections[${index}].status`);
+      stringArray(projection.changedPaths, `live.projections[${index}].changedPaths`, 5_000, 4_096);
+      stringField(projection.journalRelativePath, `live.projections[${index}].journalRelativePath`, 1_000);
+      stringArray(projection.sourceDirtyPathsBefore, `live.projections[${index}].sourceDirtyPathsBefore`, 5_000, 4_096);
+      if (projection.sourceDirtyPathsAfter !== undefined) stringArray(projection.sourceDirtyPathsAfter, `live.projections[${index}].sourceDirtyPathsAfter`, 5_000, 4_096);
+      timestamp(projection.preparedAt, `live.projections[${index}].preparedAt`);
+      timestamp(projection.appliedAt, `live.projections[${index}].appliedAt`, true);
+      stringField(projection.revertKey, `live.projections[${index}].revertKey`, 160, true);
+      timestamp(projection.revertedAt, `live.projections[${index}].revertedAt`, true);
+      stringField(projection.error, `live.projections[${index}].error`, 20_000, true);
+    }
+    if (value.live.pendingProjectionId && !projectionIds.has(value.live.pendingProjectionId as string)) invalid("live.pendingProjectionId identity");
+    timestamp(value.live.adoptedAt, "live.adoptedAt", true);
+    stringField(value.live.adoptedProjectionId, "live.adoptedProjectionId", 80, true);
+    if (value.live.adoptedReviewFingerprint !== undefined && (typeof value.live.adoptedReviewFingerprint !== "string" || !HASH.test(value.live.adoptedReviewFingerprint))) invalid("live.adoptedReviewFingerprint");
   }
 }
 

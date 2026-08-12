@@ -194,9 +194,15 @@ The older `.ai-bridge` handoff commands remain available for compatibility and p
 
 Ask for a larger outcome in ordinary Chat. Pro can persist an inert `propose_goal` contract, show its fingerprinted Goal card, and call `approve_goal` only after you accept that exact scope. Approval does not execute anything. `start_goal` launches dependency-ready isolated CodingTasks concurrently; Pro then refreshes their persisted state, reviews worker evidence, integrates accepted patches in dependency order, and records completion against every approved criterion.
 
-The integrated result remains outside the source workspace until a separate confirmed `apply_goal`. Source apply requires contract permission, the original Git HEAD, and no overlap with pre-existing dirty paths; it preserves unrelated dirt and does not stage, commit, push, or open a PR.
+Choose `workspace_policy=isolated` to keep every integrated checkpoint private until a separately confirmed `apply_goal`. With `workspace_policy=live`, workers and Pro integration still stay isolated; after `review_goal`, a separate confirmed `project_goal` may copy only the exact returned integration HEAD/review fingerprint into source. Approval, integration, review, completion, and cancellation never imply projection.
 
-The current unreleased slice is supervised and isolated: one turn per worker, no automatic retries, no worker network, and no background scheduler that makes fresh design decisions while Chat is closed. Detached workers survive reconnects, but Pro remains responsible for refresh, integration, and newly unblocked work. The Goal `commands` list is a verification protocol shown to Codex, not a narrower command sandbox; trusted Goal execution therefore requires both workspace writes and full bash.
+Live source effects preserve unrelated tracked, staged, and untracked changes. They use the approved base HEAD, per-path content/index CAS, a per-repository lock, and a durable journal so same-key retries can recover. An overlapping user edit is not overwritten; the projection becomes `recovery_required`. Symlinks, submodules, conflicted indexes, and non-regular files fail closed.
+
+`cancel_goal` never reverts source. `revert_goal_projection` is a separately confirmed, latest-applied-first (LIFO) operation with the same no-overwrite rules. Once the final projected checkpoint is complete, `apply_goal` adopts and seals that exact checkpoint with zero source writes. No Goal source effect stages, commits, pushes, merges, or opens a PR. The current slice remains supervised, one turn per worker, with no automatic retries or worker network; trusted worker execution requires workspace writes and full bash, while project/revert/final apply are source-only and require workspace write mode, not bash or Codex.
+
+## Does Goal orchestration work on Windows?
+
+Not in this release. The complete Goal surface—not only Live projection—depends on a crash-safe GoalStore lock backed by POSIX advisory locking. CodexPro therefore hides all Goal tools on Windows and reports `server_config.goalOrchestration.supported=false`. Direct coding and standalone CodingTasks, including Direct↔Codex transitions, remain available.
 
 ## Can CodexPro run a benchmark longer than 180 seconds?
 

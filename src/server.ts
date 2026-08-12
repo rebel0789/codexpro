@@ -50,7 +50,7 @@ import {
 import { resolveCodingTaskBaseSha } from "./codingTaskWorktree.js";
 import { approveGoal, completeGoal, getGoal, listGoals, pauseGoal, proposeGoal, publishGoalBlackboard, resumeGoal } from "./goalOps.js";
 import type { GoalState } from "./goalState.js";
-import { applyCompletedGoal, cancelGoal, integrateGoalWork, refreshGoal, reviewGoal, startGoal } from "./goalExecution.js";
+import { applyCompletedGoal, cancelGoal, integrateGoalWork, projectGoal, refreshGoal, revertGoalProjection, reviewGoal, startGoal } from "./goalExecution.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -145,6 +145,20 @@ function goalStoreConfig(config: CodexProConfig): { dataRoot: string } {
   return { dataRoot: config.codingTaskDir };
 }
 
+export function goalOrchestrationSupported(platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== "win32";
+}
+
+export function goalLiveProjectionSupported(platform: NodeJS.Platform = process.platform): boolean {
+  return goalOrchestrationSupported(platform);
+}
+
+function assertGoalLiveProjectionSupported(): void {
+  if (!goalLiveProjectionSupported()) {
+    throw new CodexProError("Goal orchestration is unavailable on Windows because the required crash-safe locking and no-follow source-write primitives are not supported. Use Direct coding or a standalone CodingTask; no Goal or projection state was changed.");
+  }
+}
+
 function assertGoalSourceAllowed(config: CodexProConfig, goal: GoalState): void {
   if (!config.allowedRoots.some((allowedRoot) => {
     const relative = path.relative(allowedRoot, goal.sourceRoot);
@@ -158,7 +172,32 @@ async function allowedGoal(config: CodexProConfig, goalId: string): Promise<Goal
   return goal;
 }
 
+async function goalMutationErrorResult(config: CodexProConfig, goalId: string, error: unknown): Promise<any> {
+  const message = errorText(error);
+  try {
+    const goal = await allowedGoal(config, goalId);
+    const projection = goal.live?.pendingProjectionId
+      ? goal.live.projections.find((item) => item.projectionId === goal.live?.pendingProjectionId)
+      : goal.live?.projections.at(-1);
+    return {
+      isError: true,
+      content: [{ type: "text", text: message }],
+      structuredContent: redactStructured({
+        ...goalStructured(goal),
+        error: message,
+        projection: projection ?? null,
+        projection_id: projection?.projectionId ?? null,
+        projection_status: projection?.status ?? null,
+        recovery_required: projection?.status === "recovery_required"
+      })
+    };
+  } catch {
+    return errorResult(error);
+  }
+}
+
 function goalStructured(goal: GoalState): Record<string, unknown> {
+  const live = (goal as GoalState & { live?: unknown }).live ?? null;
   return {
     goal,
     goal_id: goal.goalId,
@@ -172,6 +211,11 @@ function goalStructured(goal: GoalState): Record<string, unknown> {
     base_sha: goal.baseSha,
     source_root: goal.sourceRoot,
     integration_worktree_root: goal.integrationWorktreeRoot,
+    integration_head_sha: goal.integrationHeadSha ?? null,
+    live_projection_allowed: goal.workspacePolicy === "live" && goal.permissions.sourceEffects.apply,
+    live_projection_supported: goalLiveProjectionSupported(),
+    live,
+    source_application: goal.sourceApplication ?? null,
     work: goal.work,
     work_count: goal.work.length,
     completed_work_count: goal.work.filter((item) => ["integrated", "waiting_review"].includes(item.status)).length,
@@ -251,6 +295,12 @@ function codingTaskStructured(task: CodingTaskState): Record<string, unknown> {
 function assertCodingTaskExecutionEnabled(config: CodexProConfig): void {
   if (config.writeMode !== "workspace" || config.bashMode !== "full") {
     throw new CodexProError("CodingTask creation and Codex execution require writeMode=workspace and bashMode=full for this trusted local workspace. These controls are never broadened automatically.");
+  }
+}
+
+function assertGoalSourceWriteEnabled(config: CodexProConfig): void {
+  if (config.writeMode !== "workspace") {
+    throw new CodexProError("Goal source projection, projection revert, and final source application require writeMode=workspace. They do not require bashMode=full and never resolve or launch a Codex executable.");
   }
 }
 
@@ -430,6 +480,27 @@ const TOOL_CARD_RENDER_TOOL_NAMES = new Set<string>([
   "refresh_goal",
   "integrate_goal_work",
   "review_goal",
+  "project_goal",
+  "revert_goal_projection",
+  "pause_goal",
+  "resume_goal",
+  "cancel_goal",
+  "complete_goal",
+  "apply_goal"
+]);
+
+const GOAL_TOOL_NAMES = new Set<string>([
+  "propose_goal",
+  "get_goal",
+  "list_goals",
+  "approve_goal",
+  "publish_goal_blackboard",
+  "start_goal",
+  "refresh_goal",
+  "integrate_goal_work",
+  "review_goal",
+  "project_goal",
+  "revert_goal_projection",
   "pause_goal",
   "resume_goal",
   "cancel_goal",
@@ -472,6 +543,20 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
   }
 
   const registerUri = (uri: string, name: string): void => {
+    // The historical default is the CodexPro documentation site, not a dedicated
+    // component host. Advertising it as ui.domain makes hosts mount the cached MCP
+    // template against that unrelated origin. Omit the implicit legacy value so the
+    // MCP Apps host uses its sandbox; preserve explicitly configured custom origins.
+    const widgetDomainMeta = config.widgetDomain === "https://rebel0789.github.io"
+      ? {}
+      : {
+          domain: config.widgetDomain
+        };
+    const openAiWidgetDomainMeta = config.widgetDomain === "https://rebel0789.github.io"
+      ? {}
+      : {
+          "openai/widgetDomain": config.widgetDomain
+        };
     s.registerResource(
       name,
       uri,
@@ -489,7 +574,7 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
             _meta: {
               ui: {
                 prefersBorder: true,
-                domain: config.widgetDomain,
+                ...widgetDomainMeta,
                 csp: {
                   connectDomains: [],
                   resourceDomains: []
@@ -497,7 +582,7 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
               },
               "openai/widgetDescription": "Renders CodexPro workspace orientation, CodingTasks, Goals, diagnostics, file diffs, change reviews, terminal checks, Pro context exports, and handoff plans as compact developer cards with bounded previews.",
               "openai/widgetPrefersBorder": true,
-              "openai/widgetDomain": config.widgetDomain,
+              ...openAiWidgetDomainMeta,
               "openai/widgetCSP": {
                 connect_domains: [],
                 resource_domains: []
@@ -552,6 +637,8 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
   goal_refresh: "refresh_goal",
   goal_integrate: "integrate_goal_work",
   goal_review: "review_goal",
+  goal_project: "project_goal",
+  goal_revert: "revert_goal_projection",
   goal_pause: "pause_goal",
   goal_resume: "resume_goal",
   goal_cancel: "cancel_goal",
@@ -673,6 +760,8 @@ const MINIMAL_TOOL_NAMES = [
   "refresh_goal",
   "integrate_goal_work",
   "review_goal",
+  "project_goal",
+  "revert_goal_projection",
   "pause_goal",
   "resume_goal",
   "cancel_goal",
@@ -735,6 +824,8 @@ const FULL_TOOL_NAMES = [
   "refresh_goal",
   "integrate_goal_work",
   "review_goal",
+  "project_goal",
+  "revert_goal_projection",
   "pause_goal",
   "resume_goal",
   "cancel_goal",
@@ -780,6 +871,8 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   "refresh_goal",
   "integrate_goal_work",
   "review_goal",
+  "project_goal",
+  "revert_goal_projection",
   "pause_goal",
   "resume_goal",
   "cancel_goal",
@@ -811,8 +904,14 @@ function toolNamesForMode(config: CodexProConfig): string[] {
     }
   }
   if (config.writeMode !== "workspace") {
-    for (const writeTool of ["write", "edit", "apply_patch"]) {
+    for (const writeTool of ["write", "edit", "apply_patch", "project_goal", "revert_goal_projection", "apply_goal"]) {
       const toolIndex = names.indexOf(writeTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
+  }
+  if (!goalOrchestrationSupported()) {
+    for (const unsupportedTool of GOAL_TOOL_NAMES) {
+      const toolIndex = names.indexOf(unsupportedTool);
       if (toolIndex !== -1) names.splice(toolIndex, 1);
     }
   }
@@ -850,9 +949,10 @@ function registeredToolNames(server: McpServer): string[] {
 
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
+  if (GOAL_TOOL_NAMES.has(name) && !goalOrchestrationSupported()) return false;
   if (name === "bash" && config.bashMode === "off") return false;
   if (name === "start_background_job" && config.bashMode === "off") return false;
-  if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
+  if (["write", "edit", "apply_patch", "project_goal", "revert_goal_projection", "apply_goal"].includes(name) && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
   if (name === "inspect_workspace" && !config.analysisEnabled) return false;
@@ -900,7 +1000,9 @@ function serverInstructions(config: CodexProConfig): string {
     editInstruction,
     bashInstruction,
     "6. For isolated implementation work, create one persistent CodingTask. Creation and Codex execution require explicit writeMode=workspace plus bashMode=full because App Server can execute beyond safe-bash commands. Use its taskws_* workspace for direct coding, or transition ownership to Codex and run/follow up there. Never mutate a CodingTask worktree unless the persisted executor is direct and no operation owns it.",
-    "7. For complex multi-part work, Pro may call propose_goal with a complete bounded work graph. A proposal is inert. Show the returned contract and fingerprint to the user; call approve_goal only after explicit approval, and never imply that approval started workers. Start, refresh, review, and integrate through Goal tools; only Pro may publish decisions or change scope. Goal worker worktrees are inspected with review_coding_task and the private integration worktree is inspected only with review_goal; never pass either internal path to open_workspace, read, or bash. An open_workspace denial for a Goal worktree is the expected isolation boundary, not a Goal verification failure. review_goal returns the authoritative combined patch and runs the approved integrated git diff --check. complete_goal records Pro's final evidence judgment and still does not affect source. apply_goal is a separate user-approved source effect.",
+    goalOrchestrationSupported()
+      ? "7. For complex multi-part work, Pro may call propose_goal with a complete bounded work graph. A proposal is inert. Show the returned contract and fingerprint to the user; call approve_goal only after explicit approval, and never imply that approval started workers. Start, refresh, review, and integrate through Goal tools; only Pro may publish decisions or change scope. Goal worker worktrees are inspected with review_coding_task and the private integration worktree is inspected only with review_goal; never pass either internal path to open_workspace, read, or bash. An open_workspace denial for a Goal worktree is the expected isolation boundary, not a Goal verification failure. review_goal returns the authoritative combined patch and review fingerprint. For a supervised Live Goal, project only that exact reviewed integration checkpoint with project_goal; reverting is a separate explicit revert_goal_projection action. complete_goal records Pro's final evidence judgment. apply_goal is the separate final source-effect boundary and adopts an already-current Live projection without writing it twice."
+      : "7. Goal orchestration is unavailable on Windows because the required crash-safe GoalStore locking contract is not supported. Use Direct coding or standalone CodingTasks; Goal tools are intentionally not advertised.",
     "8. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
       ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
@@ -1492,6 +1594,18 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         codingTaskDir: config.codingTaskDir,
         codingTaskDefaultTimeoutMs: config.codingTaskDefaultTimeoutMs,
         codingTaskMaxLogBytes: config.codingTaskMaxLogBytes,
+        goalOrchestration: {
+          supported: goalOrchestrationSupported(),
+          unsupportedReason: goalOrchestrationSupported() ? null : "Windows does not provide the required GoalStore locking safety contract. Direct coding and CodingTasks remain available."
+        },
+        goalLiveProjection: {
+          supported: goalLiveProjectionSupported(),
+          unsupportedReason: goalLiveProjectionSupported() ? null : "Windows does not provide the required no-follow source-write safety primitive.",
+          sourceWritesEnabled: goalLiveProjectionSupported() && config.writeMode === "workspace",
+          requiresWriteMode: "workspace",
+          requiresBashMode: false,
+          requiresCodexExecutable: false
+        },
         blockedGlobs: config.blockedGlobs,
         registeredTools: registeredToolNames(server),
         registeredToolCount: registeredToolNames(server).length
@@ -3822,7 +3936,7 @@ ${result.prompt}
         completion_criteria: z.array(z.string().min(1).max(2_000)).min(1).max(100),
         verification: z.array(z.string().min(1).max(2_000)).max(100).optional(),
         execution_policy: z.literal("supervised").optional().describe("Current vertical slice: supervised only."),
-        workspace_policy: z.literal("isolated").optional().describe("Current vertical slice: isolated integration only."),
+        workspace_policy: z.enum(["isolated", "live"]).optional().describe("Use isolated to keep reviewed checkpoints private until final apply, or live to allow separately confirmed projection of reviewed checkpoints into source."),
         worker_model: z.string().min(1).max(160).optional(),
         worker_effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
         limits: z.object({
@@ -3837,7 +3951,7 @@ ${result.prompt}
           commands: z.array(z.string().min(1).max(1_000)).max(100).optional(),
           network: z.literal(false).optional(),
           source_effects: z.object({
-            apply: z.boolean().optional(),
+            apply: z.boolean().optional().describe("Permit source effects. Must be true for workspace_policy=live and for final apply_goal."),
             commit: z.literal(false).optional(),
             push: z.literal(false).optional(),
             draft_pr: z.literal(false).optional()
@@ -3859,10 +3973,12 @@ ${result.prompt}
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Persisting Goal proposal...", "openai/toolInvocation/invoked": "Goal proposal ready for review" }
     },
     async (args) => {
+      const requestedWorkspacePolicy = args.workspace_policy ?? "isolated";
+      if (requestedWorkspacePolicy === "live") assertGoalLiveProjectionSupported();
       const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       if (workspace.codingTaskId) throw new CodexProError("Propose a Goal from its allowed source repository, not from a CodingTask worktree.");
       const executionPolicy = args.execution_policy ?? "supervised";
-      const workspacePolicy = args.workspace_policy ?? "isolated";
+      const workspacePolicy = requestedWorkspacePolicy;
       const sourceEffects = args.permissions.source_effects ?? {};
       const proposed = await proposeGoal(
         goalStoreConfig(config),
@@ -3981,7 +4097,7 @@ ${result.prompt}
     "approve_goal",
     {
       title: "Approve Goal",
-      description: "Bind explicit user approval to the exact persisted Goal contract fingerprint. Call only after the user has reviewed and approved this plan. Approval itself does not start workers.",
+      description: "Bind explicit user approval to the exact persisted Goal contract fingerprint. For a Live contract, the card must clearly show that separately confirmed reviewed checkpoints may change the source working tree. Approval itself does not start workers or project changes.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),
@@ -4170,6 +4286,9 @@ ${result.prompt}
         `Changed files: ${review.changedFileCount}; visible additions: ${review.additions}; visible deletions: ${review.deletions}`,
         `Content complete: ${review.contentComplete ? "yes" : "no"}`,
         `Integrated verification: PASSED (${result.verification.command})`,
+        `Review fingerprint: ${result.reviewFingerprint}`,
+        `Live projection eligible: ${result.projectionEligible ? "yes" : "no"}`,
+        result.projectionBlockers.length ? `Projection blockers: ${result.projectionBlockers.join(", ")}` : "",
         review.omittedPathCount ? `Omitted blocked paths: ${review.omittedPaths.join(", ")}` : "",
         review.diff ? diffBlock(review.diff) : "\nNo integrated changes."
       ].filter(Boolean).join("\n");
@@ -4177,11 +4296,116 @@ ${result.prompt}
         ...goalStructured(result.goal),
         review,
         verification: result.verification,
+        integration_head_sha: result.integrationHeadSha,
+        review_fingerprint: result.reviewFingerprint,
+        projection_eligible: result.projectionEligible,
+        projection_blockers: result.projectionBlockers,
         verification_passed: true,
         integrated_changes_present: review.changedFileCount > 0,
         integration_worktree_clean: !review.dirty,
         content_complete: review.contentComplete,
         omitted_paths: review.omittedPaths
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "project_goal",
+    {
+      title: "Project Reviewed Goal Checkpoint",
+      description: "Project one exact review_goal-approved integration checkpoint from a supervised Live Goal into its allowed source working tree. This is a separately confirmed, journaled source effect; it never stages, commits, pushes, launches Codex, or projects unreviewed work.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        projection_key: z.string().min(1).max(160).describe("Stable idempotency key for this exact reviewed checkpoint."),
+        integration_head_sha: z.string().regex(/^[0-9a-f]{40}$/).describe("Exact integration checkpoint returned by review_goal."),
+        review_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).describe("Deterministic review fingerprint returned by review_goal."),
+        confirm: z.literal(true).describe("True only after the user explicitly approves projecting this exact reviewed checkpoint into source.")
+      },
+      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Projecting reviewed Goal checkpoint...", "openai/toolInvocation/invoked": "Goal checkpoint projected" }
+    },
+    async (args) => {
+      assertGoalLiveProjectionSupported();
+      assertGoalSourceWriteEnabled(config);
+      const current = await allowedGoal(config, args.goal_id);
+      if (!["running", "waiting_review", "paused"].includes(current.lifecycle)) {
+        throw new CodexProError("Goal projection and projection recovery require a nonterminal running, paused, or review-waiting Goal. Canceled, failed, completed, or merely approved Goals cannot resume projection work.");
+      }
+      let result: Awaited<ReturnType<typeof projectGoal>>;
+      try {
+        result = await projectGoal(
+          { dataRoot: config.codingTaskDir, maxOutputBytes: config.maxOutputBytes },
+          args.goal_id,
+          {
+            expectedRevision: args.expected_revision,
+            projectionKey: args.projection_key,
+            integrationHeadSha: args.integration_head_sha,
+            reviewFingerprint: args.review_fingerprint,
+            isPathContentAllowed: (relativePath) => !guard.isBlockedRelativePath(relativePath)
+          }
+        );
+      } catch (error) {
+        return goalMutationErrorResult(config, args.goal_id, error);
+      }
+      assertGoalSourceAllowed(config, result.goal);
+      return textResult(`${goalText("Goal Checkpoint Projected", result.goal)}\n\nProjection: ${result.projection.projectionId} [${result.projection.status}]. No stage, commit, push, or Codex process was created.`, {
+        ...goalStructured(result.goal),
+        projection: result.projection,
+        projection_id: result.projection.projectionId,
+        projection_status: result.projection.status,
+        reused: result.reused,
+        recovered: result.recovered
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "revert_goal_projection",
+    {
+      title: "Revert Goal Projection",
+      description: "Revert the latest unapplied Live projection owned by this Goal while preserving unrelated source changes. This is a separately confirmed, journaled source effect; external same-path edits fail closed and completed/adopted projections cannot be reverted.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        projection_id: z.string().regex(/^proj_[a-f0-9]{24}$/),
+        revert_key: z.string().min(1).max(160).describe("Stable idempotency key for this exact projection revert."),
+        confirm: z.literal(true).describe("True only after the user explicitly approves reverting this exact Goal-owned projection.")
+      },
+      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Reverting Goal projection...", "openai/toolInvocation/invoked": "Goal projection reverted" }
+    },
+    async (args) => {
+      assertGoalLiveProjectionSupported();
+      assertGoalSourceWriteEnabled(config);
+      await allowedGoal(config, args.goal_id);
+      let result: Awaited<ReturnType<typeof revertGoalProjection>>;
+      try {
+        result = await revertGoalProjection(
+          { dataRoot: config.codingTaskDir, maxOutputBytes: config.maxOutputBytes },
+          args.goal_id,
+          {
+            expectedRevision: args.expected_revision,
+            projectionId: args.projection_id,
+            revertKey: args.revert_key,
+            isPathContentAllowed: (relativePath) => !guard.isBlockedRelativePath(relativePath)
+          }
+        );
+      } catch (error) {
+        return goalMutationErrorResult(config, args.goal_id, error);
+      }
+      assertGoalSourceAllowed(config, result.goal);
+      return textResult(`${goalText("Goal Projection Reverted", result.goal)}\n\nProjection: ${result.projection.projectionId} [${result.projection.status}]. Unrelated source changes were preserved.`, {
+        ...goalStructured(result.goal),
+        projection: result.projection,
+        projection_id: result.projection.projectionId,
+        projection_status: result.projection.status,
+        reused: result.reused,
+        recovered: result.recovered
       });
     }
   );
@@ -4266,7 +4490,7 @@ ${result.prompt}
     "complete_goal",
     {
       title: "Complete Goal",
-      description: "Record Pro's final semantic judgment against every persisted completion criterion and verification requirement. Requires all work integrated; never applies the result to source.",
+      description: "Record Pro's final semantic judgment against every persisted completion criterion and verification requirement. Isolated Goals remain source-neutral. Live Goals require the exact review fingerprint and authoritatively verify that the completed integration checkpoint is already projected; completion never rewrites source.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),
@@ -4282,6 +4506,7 @@ ${result.prompt}
           status: z.enum(["passed", "failed", "skipped"]),
           evidence: z.string().min(1).max(4_000)
         })).max(100),
+        review_fingerprint: z.string().regex(/^[0-9a-f]{64}$/).optional().describe("Required for Live Goals: the exact fingerprint returned by review_goal for the projected integration checkpoint."),
         confirm: z.literal(true).describe("True only after Pro reviewed the integrated diff and evidence.")
       },
       annotations: GOAL_APPROVAL_ANNOTATIONS,
@@ -4289,15 +4514,19 @@ ${result.prompt}
     },
     async (args) => {
       await allowedGoal(config, args.goal_id);
-      const goal = await completeGoal(goalStoreConfig(config), args.goal_id, {
+      const goal = await completeGoal({ dataRoot: config.codingTaskDir, maxOutputBytes: config.maxOutputBytes }, args.goal_id, {
         expectedRevision: args.expected_revision,
         completionKey: args.completion_key,
         summary: args.summary,
         criteria: args.criteria,
-        verification: args.verification
+        verification: args.verification,
+        reviewFingerprint: args.review_fingerprint
       });
       assertGoalSourceAllowed(config, goal);
-      return textResult(`${goalText("Goal Completed", goal)}\n\nThe result is accepted but remains isolated until a separately authorized apply_goal call.`, goalStructured(goal));
+      const completionNote = goal.workspacePolicy === "live"
+        ? "The result is accepted. Any already-projected checkpoint remains in source; apply_goal finalizes that exact projection without writing it twice when it matches the completed integration checkpoint."
+        : "The result is accepted but remains isolated until a separately authorized apply_goal call.";
+      return textResult(`${goalText("Goal Completed", goal)}\n\n${completionNote}`, goalStructured(goal));
     }
   );
 
@@ -4318,7 +4547,7 @@ ${result.prompt}
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Applying completed Goal to source...", "openai/toolInvocation/invoked": "Goal applied to source" }
     },
     async (args) => {
-      assertCodingTaskExecutionEnabled(config);
+      assertGoalSourceWriteEnabled(config);
       await allowedGoal(config, args.goal_id);
       const goal = await applyCompletedGoal(
         { dataRoot: config.codingTaskDir, maxOutputBytes: config.maxOutputBytes },
@@ -4330,7 +4559,10 @@ ${result.prompt}
         }
       );
       assertGoalSourceAllowed(config, goal);
-      return textResult(`${goalText("Goal Applied", goal)}\n\nSource application: ${goal.sourceApplication?.status}. No commit, push, or PR was created.`, goalStructured(goal));
+      const applicationNote = goal.sourceApplication?.zeroWrite
+        ? `The already-current Live projection ${goal.sourceApplication.adoptedProjectionId ?? ""} was finalized without rewriting source.`
+        : `Source application: ${goal.sourceApplication?.status}.`;
+      return textResult(`${goalText("Goal Applied", goal)}\n\n${applicationNote} No stage, commit, push, or PR was created.`, goalStructured(goal));
     }
   );
 

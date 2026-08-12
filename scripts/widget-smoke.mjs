@@ -267,6 +267,119 @@ assert.match(approvedGoal.root.innerHTML, /Approved/);
 assert.match(approvedGoal.root.innerHTML, /remains inert until an explicit execution action/i);
 assert.match(approvedGoal.root.innerHTML, /Blackboard/);
 
+const liveGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "project_goal",
+      goal: {
+        goalId: "goal_0123456789abcdef01234567",
+        title: "Supervised Live implementation",
+        lifecycle: "completed",
+        revision: 8,
+        executionPolicy: "supervised",
+        workspacePolicy: "live",
+        permissions: { sourceEffects: { apply: true, commit: false, push: false, draftPr: false } },
+        baseSha: "a".repeat(40),
+        integrationHeadSha: "c".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "approved" },
+        live: { projectedIntegrationSha: "c".repeat(40), adoptedAt: "2026-08-12T00:00:00.000Z", projections: [{ status: "adopted", toIntegrationSha: "c".repeat(40), projectionId: "proj_0123456789abcdef01234567" }] },
+        sourceApplication: { status: "applied", zeroWrite: true, adoptedProjectionId: "proj_0123456789abcdef01234567" },
+        completionCriteria: ["Live checkpoint is reviewed"],
+        blackboard: [],
+        work: [{ workId: "work_live", title: "Implement live flow", status: "integrated", dependsOn: [] }]
+      },
+      projection: { status: "adopted", to_integration_sha: "c".repeat(40) }
+    }
+  }
+});
+assert.match(liveGoal.root.innerHTML, /Live permission/);
+assert.match(liveGoal.root.innerHTML, /Approved source projection/);
+assert.match(liveGoal.root.innerHTML, /Delivery stages/);
+assert.match(liveGoal.root.innerHTML, /Integration checkpoint/);
+assert.match(liveGoal.root.innerHTML, /Live projection/);
+assert.match(liveGoal.root.innerHTML, /Adopted/);
+assert.match(liveGoal.root.innerHTML, /Final application/);
+assert.match(liveGoal.root.innerHTML, /adopted without rewrite/);
+
+const passiveLiveGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "get_goal",
+      goal: {
+        goalId: "goal_0123456789abcdef01234567",
+        title: "Passive Live Goal",
+        lifecycle: "running",
+        revision: 7,
+        executionPolicy: "supervised",
+        workspacePolicy: "live",
+        permissions: { sourceEffects: { apply: true } },
+        baseSha: "a".repeat(40),
+        integrationHeadSha: "c".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "approved" },
+        live: { projectedIntegrationSha: "c".repeat(40), projections: [{ status: "applied", toIntegrationSha: "c".repeat(40), projectionId: "proj_0123456789abcdef01234567" }] },
+        work: [{ workId: "work_live", title: "Implement live flow", status: "integrated", dependsOn: [] }]
+      }
+    }
+  }
+});
+assert.match(passiveLiveGoal.root.innerHTML, /Live projection/);
+assert.match(passiveLiveGoal.root.innerHTML, /Applied/);
+assert.match(passiveLiveGoal.root.innerHTML, new RegExp("c{20}"));
+
+const unsupportedLiveGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "get_goal",
+      live_projection_supported: false,
+      goal: {
+        goalId: "goal_0123456789abcdef01234567",
+        title: "Existing Windows Live Goal",
+        lifecycle: "paused",
+        revision: 4,
+        executionPolicy: "supervised",
+        workspacePolicy: "live",
+        permissions: { sourceEffects: { apply: true } },
+        baseSha: "a".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "approved" },
+        live: { projectedIntegrationSha: "a".repeat(40), projections: [] },
+        work: [{ workId: "work_live", title: "Keep state passive", status: "planned", dependsOn: [] }]
+      }
+    }
+  }
+});
+assert.match(unsupportedLiveGoal.root.innerHTML, /Unavailable on this platform/);
+assert.match(unsupportedLiveGoal.root.innerHTML, /inspect existing state without attempting a source mutation/i);
+
+const liveRecoveryGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "project_goal",
+      error: "Goal source contains an external same-path edit.",
+      goal: {
+        goalId: "goal_0123456789abcdef01234567",
+        title: "Recover Live projection",
+        lifecycle: "running",
+        revision: 9,
+        executionPolicy: "supervised",
+        workspacePolicy: "live",
+        permissions: { sourceEffects: { apply: true } },
+        baseSha: "a".repeat(40),
+        integrationHeadSha: "c".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "approved" },
+        live: { projectedIntegrationSha: "a".repeat(40), pendingProjectionId: "proj_0123456789abcdef01234567", projections: [{ status: "recovery_required", toIntegrationSha: "c".repeat(40), projectionId: "proj_0123456789abcdef01234567" }] },
+        work: [{ workId: "work_live", title: "Implement live flow", status: "integrated", dependsOn: [] }]
+      }
+    }
+  }
+});
+assert.match(liveRecoveryGoal.root.innerHTML, /Recovery required/);
+assert.match(liveRecoveryGoal.root.innerHTML, /external same-path edit/);
+assert.match(liveRecoveryGoal.root.innerHTML, /retry only with the same key or explicitly revert/i);
+
 const transitionTask = mount({
   toolOutput: {
     structuredContent: {

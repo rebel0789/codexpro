@@ -1,5 +1,7 @@
-export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v11.html";
+export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v13.html";
 export const TOOL_CARD_LEGACY_URIS = [
+  "ui://widget/codexpro-tool-card-v12.html",
+  "ui://widget/codexpro-tool-card-v11.html",
   "ui://widget/codexpro-tool-card-v10.html",
   "ui://widget/codexpro-tool-card-v9.html",
   "ui://widget/codexpro-tool-card-v8.html"
@@ -569,7 +571,7 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
       const GOAL_TOOLS = [
         "propose_goal", "get_goal", "list_goals", "approve_goal", "publish_goal_blackboard",
         "start_goal", "refresh_goal", "integrate_goal_work", "review_goal",
-        "pause_goal", "resume_goal", "cancel_goal", "complete_goal", "apply_goal"
+        "project_goal", "revert_goal_projection", "pause_goal", "resume_goal", "cancel_goal", "complete_goal", "apply_goal"
       ];
 
       function normalizedCodingTask(data) {
@@ -838,6 +840,17 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const blocked = optionalNumber(data.blocked_work_count) ?? work.filter((item) => ["blocked", "failed"].includes(asText(item.status))).length;
         const goalId = asText(goal.goal_id || goal.goalId, "Goal");
         const approvalStatus = asText(approval.status, "pending").toLowerCase();
+        const workspacePolicy = asText(goal.workspacePolicy || goal.workspace_policy, "isolated").toLowerCase();
+        const permissions = record(goal.permissions);
+        const sourceEffects = record(permissions.sourceEffects || permissions.source_effects);
+        const liveAllowed = workspacePolicy === "live" && sourceEffects.apply === true;
+        const liveSupported = data.live_projection_supported !== false;
+        const live = record(goal.live || data.live);
+        const liveProjections = toArray(live.projections).filter((item) => item && typeof item === "object");
+        const projection = record(data.projection || liveProjections[liveProjections.length - 1] || goal.liveProjection || goal.live_projection);
+        const projectionStatus = asText(projection.status, liveAllowed ? "not projected" : "not enabled").toLowerCase();
+        const integrationHead = asText(goal.integrationHeadSha || goal.integration_head_sha || data.integration_head_sha, "Not integrated");
+        const projectedHead = asText(live.projectedIntegrationSha || live.projected_integration_sha || projection.toIntegrationSha || projection.to_integration_sha || projection.integrationHeadSha || projection.integration_head_sha || projection.targetIntegrationHeadSha || projection.target_integration_head_sha, "");
         const state = '<div class="task-state"><span class="task-state-mark" aria-hidden="true"></span><div class="task-state-copy"><div class="task-mode">Pro orchestration</div><div class="task-activity">' +
           escapeHtml(approvalStatus === "pending" ? "The persisted contract is waiting for explicit approval." : lifecycle === "approved" ? "The exact contract is approved; no implicit execution occurs." : "The local engine is reporting authoritative Goal state.") + '</div></div></div>';
         const metrics = '<div class="metrics">' + metric(completed + "/" + work.length, "work ready") + metric(running, "running") + metric(blocked, "blocked") + metric(number(data.blackboard_count, toArray(goal.blackboard).length), "records") + '</div>';
@@ -850,7 +863,8 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const workBlock = rows ? '<ul class="task-list">' + rows + '</ul>' : '<div class="empty">No work items.</div>';
         const context = factRows([
           ["Approval", friendly(approvalStatus)],
-          ["Policy", friendly(asText(goal.executionPolicy || goal.execution_policy, "supervised")) + " · " + friendly(asText(goal.workspacePolicy || goal.workspace_policy, "isolated"))],
+          ["Policy", friendly(asText(goal.executionPolicy || goal.execution_policy, "supervised")) + " · " + friendly(workspacePolicy)],
+          ["Live permission", !liveSupported ? "Unavailable on this platform" : liveAllowed ? "Approved source projection" : "Not approved"],
           ["Revision", goal.revision],
           ["Base", '<span class="mono">' + escapeHtml(truncate(goal.baseSha || goal.base_sha, 120)) + '</span>', true],
           ["Contract", '<span class="mono">' + escapeHtml(truncate(goal.contractFingerprint || goal.contract_fingerprint, 120)) + '</span>', true]
@@ -863,17 +877,31 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const criteria = toArray(goal.completionCriteria || goal.completion_criteria).map(asText).filter(Boolean);
         const criteriaFold = criteria.length ? fold("Completion criteria", list(criteria), false) : "";
         const application = record(goal.sourceApplication || goal.source_application);
+        const projectionError = asText(data.error || projection.error || goal.error, "");
+        const projectionErrorBlock = projectionError ? '<div class="notice bad">' + escapeHtml(projectionError) + '</div>' : "";
+        const liveProjectionFact = !liveSupported ? "Unavailable on this platform" : liveAllowed
+          ? escapeHtml(friendly(projectionStatus)) + (projectedHead ? ' · <span class="mono">' + escapeHtml(truncate(projectedHead, 80)) + '</span>' : "")
+          : "Not approved";
+        const stages = fold("Delivery stages", factRows([
+          ["Integration checkpoint", '<span class="mono">' + escapeHtml(truncate(integrationHead, 120)) + '</span>', true],
+          ["Live projection", liveProjectionFact, true],
+          ["Final application", friendly(asText(application.status, "not applied")) + (application.zeroWrite === true ? " · adopted without rewrite" : "")]
+        ]), true);
         const next = lifecycle === "proposed" ? "Review the complete contract and fingerprint; approve only after the user explicitly agrees."
           : lifecycle === "approved" ? "The contract is approved and remains inert until an explicit execution action."
+          : !liveSupported && workspacePolicy === "live" ? "Live projection is unavailable on this platform; inspect existing state without attempting a source mutation."
           : lifecycle === "paused" ? "Scheduling is paused; already-running workers retain only their approved leases."
           : lifecycle === "canceled" ? "The Goal is canceled; review any isolated partial work before deciding on a new Goal."
-          : lifecycle === "completed" && application.status === "applied" ? "The completed Goal patch is applied to source with persisted readback."
+          : lifecycle === "completed" && application.status === "applied" ? "The completed Goal result is finalized in source with persisted readback."
+          : lifecycle === "completed" && liveAllowed && /projected|applied/.test(projectionStatus) ? "The completed checkpoint is already projected; final application should adopt it without writing the source twice."
           : lifecycle === "completed" ? "The integrated result is complete; source application still requires its separate approved action."
+          : liveAllowed && /failed|conflict|recovery/.test(projectionStatus) ? "Live projection needs recovery; retry only with the same key or explicitly revert the recorded projection."
+          : liveAllowed && integrationHead !== "Not integrated" && !/projected|applied/.test(projectionStatus) ? "Review the exact integration checkpoint, then explicitly project its fingerprint into source."
           : /review/.test(lifecycle) ? "Review worker evidence, integration, and completion criteria before applying anything to source."
           : /failed|blocked/.test(lifecycle) ? "Inspect the blocker and let Pro decide whether a bounded replan is required."
           : "Use authoritative Goal status for the next Pro-supervised action.";
         return card(truncate(asText(goal.title, "Goal"), 180), goalId + " · " + friendly(approvalStatus), friendly(lifecycle), taskTone(lifecycle),
-          state + metrics + context + workBlock + criteriaFold + recordsFold + reviewFold + '<div class="task-next"><span>' + escapeHtml(next) + '</span></div>', "task-card goal-card");
+          state + metrics + context + stages + projectionErrorBlock + workBlock + criteriaFold + recordsFold + reviewFold + '<div class="task-next"><span>' + escapeHtml(next) + '</span></div>', "task-card goal-card");
       }
 
       function renderGeneric(data) {

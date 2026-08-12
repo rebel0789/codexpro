@@ -79,6 +79,22 @@
   - Verified source non-application after completion: source HEAD, status hash, and refs hash match the pre-execution readback; both Goal probe files remain absent from source and `sourceApplication` is unset.
   - Corrected an actual Chat usability defect: private Goal worktrees remain intentionally inaccessible through `open_workspace`, while `review_goal` now owns the combined diff plus integrated `git diff --check` evidence and tells Pro that an allowed-root denial is not a Goal failure.
 
+### Phase 7: Supervised Live source effects
+- **Status:** complete for implementation, focused core/built HTTP-MCP verification, and one representative ordinary-Chat Live happy path
+- Actions taken:
+  - Kept every Goal worker and the Pro integration worktree isolated; Live begins only at a separately confirmed `project_goal` after `review_goal` returns an exact integration HEAD and deterministic review fingerprint.
+  - Added authoritative review re-attestation, expected-revision/idempotency fencing, exact source HEAD and changed-path content/index CAS, per-repository locking, immutable manifests, and durable apply/revert journals.
+  - Preserved unrelated pre-existing tracked, staged, and untracked work while rejecting same-path user edits without overwrite and persisting `recovery_required` for deliberate recovery.
+  - Added explicit latest-applied-first `revert_goal_projection`; `cancel_goal` never reverts source.
+  - Added zero-write final adoption/sealing when a completed Live Goal's final integration checkpoint is already projected.
+  - Kept stage, commit, merge, push, and PR effects out of every Goal source operation; unsupported symlink, submodule, conflicted-index, rename/copy, and non-regular topology fail closed.
+  - Passed the focused core matrix and the built HTTP/MCP flow: sequential same-path projections, same-key and post-restart idempotency, unrelated worktree/index preservation, latest-first revert, user-edit conflict recovery without overwrite, blocked/symlink fail-closed behavior, passive safer modes, and final zero-write adoption. Deterministic workers supplied the test edits; the source projection/revert path was production code.
+  - Confirmed TypeScript build, Goal core/execution regressions, widget rendering, and general smoke remain green.
+  - Made platform capability explicit: the whole Goal surface is hidden on Windows because the required crash-safe GoalStore locking contract is unavailable; proposal also rejects before persisting state, while Direct coding and standalone CodingTasks remain supported.
+  - Completed the intended flow in [ordinary Chat](https://chatgpt.com/c/6a7c7597-7e44-83ee-b412-4248eea6202e): Pro used the installed plugin and a real `gpt-5.6-sol`/`high` Codex App Server turn, reviewed integration `a4f0277f6822754ba0b9931b7a77e51ee36eb175`, separately approved Live projection, completed Goal `goal_660f5139b15aae20456ed421` at revision 13, and finalized with a zero-write apply that adopted `proj_32ac83deacc868d2f4799002`.
+  - Authoritative identity was CodingTask `task_aa18164b7d2a7357a6270545`, thread `019ff637-6f0f-75c0-b40f-e3d6f28ca8c6`, turn `019ff637-6fd9-7652-8835-aec10bc230f1`, and review fingerprint `b6025428e44e79c0cd28770274fb9feda2bf68a571e31aeb5ea0547371c5068c`. Source HEAD was unchanged, with the reported pre/post prefix `037e…`; the approved 2-line/70-byte file was the only projected source change, with no stage, commit, push, or PR.
+  - The v13 default sandbox-fallback card rendered in the real web flow and the template error count did not increase. Explicit endpoint-domain runs intermittently failed to fetch the card, so that alternate delivery path remains a separate reliability limitation rather than verified coverage.
+
 ## Test Results
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
@@ -92,7 +108,12 @@
 | Real parallelism | Two approved independent work items with max concurrency 2 | Both worker intervals overlap | Starts 51 ms apart; both completed after ~27 s | PASS |
 | Source non-application | Compare source HEAD/status/refs and target paths before/after Goal | Byte-identical Git readback and no Goal probe files | HEAD `3dafb839...`, status hash `dc0faed...`, refs hash `cacfd97...`; target paths absent | PASS |
 | Full release smoke | `npm run smoke` | Every configured regression exits successfully | Full chain exited 0, including release guard | PASS |
-| Package dry run | `npm pack --dry-run --json` | Goal runtime and product contract ship in the artifact | 138 entries; all five Goal runtime modules plus `PRODUCT_DIRECTION.md` present | PASS |
+| Package dry run | `npm pack --dry-run --json` | Goal runtime and product contract ship in the artifact | 140 entries; `dist/goalProjection.js`, Goal execution/store runtime, and `PRODUCT_DIRECTION.md` present | PASS |
+| Supervised Live source effects | Core + built HTTP/MCP projection/revert/recovery/final-adoption matrix | Preserve unrelated dirt; exact review/HEAD/path CAS; journal/restart recovery; LIFO revert; zero-write adoption | Passed sequential same-path projection, stable-key retry/restart, worktree/index preservation, conflict no-overwrite, latest revert, fail-closed topology, passive-mode, and zero-write adoption checks; source HEAD/refs/log were unchanged | PASS |
+| Real ordinary-Chat Live Goal | ChatGPT Pro → installed plugin → real App Server → integration review → separately approved projection → completion → final apply | Exact reviewed checkpoint projected once, then adopted without a second write or Git side effects | Goal `goal_660f5139b15aae20456ed421` revision 13 completed; projection `proj_32ac83deacc868d2f4799002` adopted; source HEAD unchanged (reported pre/post prefix `037e…`); only one 2-line/70-byte file projected | PASS |
+| Real Live v13 default card | Ordinary Chat default sandbox-fallback rendering | Goal card renders without adding a template error | Card rendered and template error count did not increase | PASS |
+| Explicit endpoint-domain card delivery | Repeated ordinary-Chat runs using an explicit endpoint domain | Card fetch remains reliable | Intermittent card fetch errors observed; core Goal and source-effect state were unaffected | OPEN |
+| Windows Goal capability gate | Tool inventory/registration, `server_config`, and core proposal guard | No Goal tools or Goal state creation without the required POSIX locking contract; Direct/CodingTask unaffected | All Goal tools hidden on Windows; `goalOrchestration.supported=false`; pre-store proposal rejection covered | PASS |
 
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |
@@ -113,8 +134,8 @@
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Supervised Isolated Goal MVP is complete and verified through ordinary Chat |
-| Where am I going? | Incremental Live projection, persistent scheduling, multi-turn workers, and bounded retries remain roadmap work |
+| Where am I? | Supervised Isolated and one representative Supervised Live happy path are verified through ordinary Chat on a supported POSIX host; deterministic core/HTTP coverage verifies Live recovery and conflict behavior |
+| Where am I going? | Stabilize explicit endpoint-domain card delivery; persistent scheduling, multi-turn workers, and bounded retries remain roadmap work, and Goal orchestration remains unavailable on Windows |
 | What's the goal? | Deliver a real Pro-orchestrated local Goal vertical slice |
 | What have I learned? | See `findings.md` |
-| What have I done? | Product contract, real CodingTask flow, Goal state/execution/integration, v11 cards, deterministic E2E, and a real two-worker ordinary-Chat Goal are complete |
+| What have I done? | Product contract, real CodingTask flow, Goal state/execution/integration, deterministic Live safety coverage, real ordinary-Chat Isolated and Live Goals, and the v13 default Live card path are complete |
