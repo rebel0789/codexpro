@@ -64,7 +64,7 @@ fingerprinted contract.
 The same Goal engine supports two policies:
 
 - **Supervised:** the user approves the plan, observes the work, and approves each source effect. Its default workspace policy is **Live**, so an exact Pro-reviewed integration checkpoint can be projected promptly into the user's current workspace through a separate confirmed action.
-- **Persistent (Phase 8 scheduler, Phase 9 continuations):** the user separately proposes, approves, and starts a strict **Isolated** contract. The engine launches dependency-ready Codex workers and mechanically integrates verified final terminal patches in its private worktree, then stops at `waiting_review` / `semantic_review`. The Goal `commands` list is empty, network and every source-effect permission are false, each worker has 1–4 total turns including its initial turn, and there are zero fresh automatic retries. Any turns after the first are mandatory ordered `continuation_intents` whose exact prompts are fingerprinted at approval.
+- **Persistent (Phase 8 scheduler, Phase 9 continuations, Phase 10 retries):** the user separately proposes, approves, and starts a strict **Isolated** contract. The engine launches dependency-ready Codex workers and mechanically integrates verified final terminal patches in its private worktree, then stops at `waiting_review` / `semantic_review`. The Goal `commands` list is empty, network and every source-effect permission are false, each worker has 1–4 semantic turns including its initial turn, and an aggregate 0–2 fresh retries across all turns (default 0). Any turns after the first are mandatory ordered `continuation_intents`; retry authority is the separate fingerprinted `infra-pre-turn-v1` policy.
 
 Workers and Pro's integration worktree always remain isolated. `review_goal` attests an exact integration checkpoint; only the separate `project_goal` authority can move that reviewed checkpoint toward source. Live application must stop if source HEAD, changed-path content/index state, or repository topology makes the approved baseline unsafe.
 
@@ -74,21 +74,35 @@ authorize source actions. A continuation resumes the same CodingTask, worktree,
 Codex thread, and session as a distinct operation. Intermediate success is
 `continuing`: it remains private, cannot integrate, and cannot unlock a
 dependency. Only the exact final authorized successful turn may integrate the
-cumulative patch once. A continuation is not a retry, and a failed or canceled
-turn does not advance. Recovering the same reserved operation after a crash or
-reconnect preserves its identity; fresh retries remain a later contract.
-Abnormal worker termination, stale terminal provenance, out-of-scope or blocked
-content, and scheduler safety/reconciliation errors stop or fail execution
-closed; they never trigger an autonomous replan or replacement attempt.
+cumulative patch once. A continuation is a new approved semantic turn. A fresh
+retry repeats the same semantic prompt/scope/task/worktree/model/effort under a
+new deterministic operation without consuming a turn, preserving the
+thread/session if already established. Same-operation recovery preserves the
+original operation and consumes no retry.
+
+Fresh retry authority is deliberately narrow: only positively structured
+`app_server_startup / infrastructure / runner_start` or
+`app_server_initialize_transport / infrastructure / app_server_initialize`
+failures with a known outcome, no returned identity for that failed attempt, no
+written thread-establish/turn-start request, and exact unchanged authoritative
+Git observation may use the aggregate budget. A thread/session established by
+an earlier semantic turn remains the immutable resume target. The fixed
+backoff is 1 second then 5 seconds. Timeout,
+model/tool/input/approval, policy/path/content/provenance/validation/identity
+conflict, cancellation, any partial change, ambiguous response loss, and
+unknown outcome stop without retry. This is a CodexPro safety contract, not an
+inference from App Server's transport behavior. Official App Server semantics
+only establish that `thread/resume` reopens a thread and later `turn/start`
+appends a turn.
 
 Pause, resume, and cancel are durable authorities. Once pause takes effect, no
-new worker launch, integration, or dependency advancement begins; already
+new worker launch, backoff retry, integration, or dependency advancement begins; already
 running worker processes may finish without being integrated. Resume is an
 explicit idempotent execution action against the same fingerprint and resource
 envelope, and completed work is not rerun. Cancel fences active workers and is
 terminal, but never reverts source or deletes retained worktrees. Passive
 `get_goal`, `list_goals`, and `review_goal` calls—and store-only
-`refresh_goal`—never launch or resume execution.
+`refresh_goal`—never launch a retry or resume execution.
 
 Tool metadata follows the same boundary. `start_goal` is execution-bearing and
 still requires explicit start plus workspace-write/full-bash authority, but its
@@ -111,13 +125,16 @@ The approved plan is a structured execution contract containing:
 - integration and source-application policy.
 
 A persistent Goal card shows overall state, current phase, approvals, scheduler
-lease/stop reason, worker status, authorized/completed/remaining turn counts,
-bounded intent summaries and fingerprints, per-turn identity/status/stop reason,
-blockers, verification, final-only integration state, authoritative changed-file
-count, and bounded drill-down into each CodingTask. `list_goals` stays compact;
-exact prompts, raw state, full ledgers, and Blackboard evidence remain private.
+lease/stop reason, worker status, authorized/completed/remaining semantic turn
+counts, distinct attempt number and aggregate retries used/limit, deterministic
+backoff deadline, bounded safe failure/Git attestation, intent summaries and
+fingerprints, per-turn identity/status/stop reason, blockers, verification,
+final-only integration state, authoritative changed-file count, and bounded
+drill-down into each CodingTask. `list_goals` stays compact; exact prompts, raw
+errors/logs, private paths, raw state, full ledgers, and Blackboard evidence
+remain private.
 Server state, not hidden widget state or chat history, is authoritative. The
-current card resource is v16; v15 through v8 remain compatibility resources.
+current card resource is v17; v16 through v8 remain compatibility resources.
 Renderer changes always receive a new URI so a stale Chat cache cannot preserve
 old semantics.
 
@@ -177,7 +194,7 @@ The primary metric is **Goal completion rate**: the share of representative Goal
 | --- | --- |
 | Direct ChatGPT coding | Implemented |
 | Independent persistent CodingTask and Direct↔Codex transfer | Implemented in the current working tree; unreleased |
-| Chat and Work task cards | Current resource is v16 with v15–v8 compatibility. Ordinary Chat mounted the v14 Phase 8 reconnect card; the changed-file-count UI required v15, and the bounded Phase 9 turn-history renderer required v16. A real Phase 9 get/review mounted v16 with 2/2 turns, stable identities, stop reason, and final-only integration. A stale v13 cache established the versioned-URI rule. |
+| Chat and Work task cards | Current resource is v17 with v16–v8 compatibility. Ordinary Chat mounted v14 for Phase 8, v16 for Phase 9 turn history, and v17 for Phase 10's separate semantic-turn/attempt/retry ledger. The real v17 card showed 1/1 turn, two attempts, retries 1/1, and one changed file. A stale v13 cache established the versioned-URI rule. |
 | Durable Goal state and fingerprint-bound approval contract | Implemented in the current working tree; unreleased |
 | Goal platform availability | Supported on POSIX hosts; all Goal tools are hidden on Windows and `server_config.goalOrchestration.supported=false`; Direct/CodingTask remain available |
 | Parallel Goal workers and Pro-supervised Blackboard | Implemented for supervised and Persistent execution; deterministic HTTP/MCP and real ordinary-Chat flows verified |
@@ -186,11 +203,13 @@ The primary metric is **Goal completion rate**: the share of representative Goal
 | Persistent Isolated scheduler | Implemented in the current working tree and verified through ordinary Chat plus installed-real-Codex HTTP/MCP: explicit start, disconnect, dependency-safe parallel workers, mechanical private integration, passive reconnect, and `waiting_review` / `semantic_review` stop |
 | Persistent interruption and recovery | Pause/resume/cancel fencing, same-attempt reservation/lease recovery, restart idempotency, and process cleanup pass focused core/HTTP regressions; native Windows was not run and Goal orchestration remains hidden there by contract |
 | Bounded multi-turn Persistent workers | Implemented and verified through built public HTTP/MCP, an installed real Codex App Server, and canonical ordinary Chat: 1–4 total approved turns, immutable ordered continuation intents, same task/worktree/thread/session, intermediate integration/dependency gate, and one final cumulative integration. |
-| Fresh automatic worker retries | Planned; current Persistent permits zero fresh retries, while same-operation crash recovery preserves identity |
+| Bounded fresh infrastructure retries | Implemented for Persistent only: aggregate 0–2 per work item (default 0), fingerprinted `infra-pre-turn-v1`, fixed 1s/5s backoff, positive pre-turn infrastructure proof plus exact unchanged Git, full attempt retention, and no semantic-turn consumption. Same-operation recovery remains distinct. |
 | Representative real Isolated Goal completion in Chat | Verified in ordinary Chat through the installed private plugin and real Codex App Server: two `gpt-5.6-sol`/`high` workers overlapped, Pro integrated/reviewed/completed, and source application remained unset |
 | Representative real Live Goal completion in Chat | Verified exact review → separate projection approval → completion → zero-write final adoption; projection `proj_32ac83deacc868d2f4799002` was adopted, source HEAD stayed unchanged, and only the approved 2-line/70-byte file was projected |
 | Representative real Persistent Goal stop in Chat | Verified Goal `goal_cd1d3bf868c2bdade5b1c7af` through explicit propose/approve/start, navigation away, real parallel `gpt-5.6-sol`/`high` A/B workers followed by a summary dependency, and reconnect at revision 20. Exactly `a.md`, `b.md`, and `summary.md` reached private integration HEAD prefix `e05a497…`; source HEAD/index/refs and the source target path were unchanged at the semantic-review stop. |
 | Representative real-Codex bounded continuation | Verified through built HTTP/MCP with Goal `goal_f18e1e62ec5797e868fd6421`, CodingTask `task_8eb28bf1e327e3cbb2ac2a92`, thread `019ff6ef-94b9-7bc3-adbb-ced648a29472`, two distinct turns, one final integration commit, and exact source authority preservation. |
 | Representative ordinary-Chat bounded continuation | Verified Goal `goal_d96c4d1de3d6382cc4ebcc86` revision 15 through the installed plugin: one task/thread/session, operations `run:1` / `run:2`, no intermediate integration, exactly one final commit `124787d868b3d89a1191d394192831cd3fb5c46e`, exact two-line path, byte-identical passive reconnect/source readback, and a fully rendered v16 2/2 card. The source's unrelated `cd0f3e18…` commit predated start; Goal base remained `ce4421d…`. |
+| Representative real-Codex infrastructure retry | Verified through built HTTP/MCP with Goal `goal_b134f2acc8a910aedd6d31d5`: injected initialize failure, then real `gpt-5.6-sol`/`high` success on attempt 1, one private integration commit, source unchanged. |
+| Representative ordinary-Chat infrastructure retry | Verified Goal `goal_855e97294fe7d3a8f25a06fe` revision 14 through the installed plugin: allowed initialize-transport failure with no turn/changes, exact 1s backoff, real Codex success on attempt 1, one private integration commit, unchanged source authority, byte-identical duplicate passive reads, and a fully rendered v17 1-turn/2-attempt/retries-1-of-1 card. |
 
 This status table is part of the contract: documentation and tests must not present planned Goal behavior as a shipped capability.

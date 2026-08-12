@@ -47,9 +47,9 @@ import {
   submitCodingTaskFollowup,
   type CodingTaskRunView
 } from "./codingTaskRunner.js";
-import { resolveCodingTaskBaseSha } from "./codingTaskWorktree.js";
+import { resolveCodingTaskBaseSha, type CodingTaskReviewSnapshot } from "./codingTaskWorktree.js";
 import { approveGoal, completeGoal, getGoal, listGoals, pauseGoal, proposeGoal, publishGoalBlackboard, resumeGoal } from "./goalOps.js";
-import type { GoalState } from "./goalState.js";
+import { GOAL_RETRYABLE_FAILURES_V1, type GoalState, type GoalWorkTurnObservation } from "./goalState.js";
 import { createGoalContentPolicySnapshot } from "./goalPolicy.js";
 import {
   getPersistentGoalScheduler,
@@ -194,7 +194,7 @@ async function goalMutationErrorResult(config: CodexProConfig, goalId: string, e
       structuredContent: redactStructured({
         ...goalStructured(goal),
         error: message,
-        projection: projection ?? null,
+        projection: projection ? publicGoalProjection(projection) : null,
         projection_id: projection?.projectionId ?? null,
         projection_status: projection?.status ?? null,
         recovery_required: projection?.status === "recovery_required"
@@ -213,6 +213,48 @@ function boundedGoalText(value: string | undefined, max = 500): string | undefin
 function safeGoalSummary(value: string | undefined, max = 500): string | undefined {
   const bounded = boundedGoalText(value, max);
   return bounded === undefined ? undefined : redactSensitiveText(bounded);
+}
+
+function publicGoalError(value: string | undefined): { hasError: boolean; errorSha256: string | null } {
+  return {
+    hasError: Boolean(value),
+    errorSha256: value ? createHash("sha256").update(value).digest("hex") : null
+  };
+}
+
+function publicGoalObservation(observation: GoalWorkTurnObservation | undefined): Record<string, unknown> | null {
+  if (!observation) return null;
+  return {
+    capturedAt: observation.capturedAt,
+    headSha: observation.headSha,
+    statusSha256: observation.statusSha256 ?? null,
+    diffStatSha256: observation.diffStatSha256 ?? null,
+    diffSha256: observation.diffSha256,
+    dirty: observation.dirty,
+    changedPathsSha256: observation.changedPathsSha256 ?? null,
+    changedPathCount: observation.changedPathCount ?? observation.changedPaths.length
+  };
+}
+
+function publicGoalReview(review: CodingTaskReviewSnapshot): Omit<CodingTaskReviewSnapshot, "worktreeRoot"> {
+  const { worktreeRoot: _privateWorktreeRoot, ...publicReview } = review;
+  return publicReview;
+}
+
+function publicGoalProjection(projection: NonNullable<GoalState["live"]>["projections"][number]): Record<string, unknown> {
+  return {
+    projectionId: projection.projectionId,
+    status: projection.status,
+    fromIntegrationSha: projection.fromIntegrationSha,
+    toIntegrationSha: projection.toIntegrationSha,
+    reviewFingerprint: projection.reviewFingerprint,
+    changedPaths: projection.changedPaths.slice(),
+    changedPathCount: projection.changedPaths.length,
+    preparedAt: projection.preparedAt,
+    appliedAt: projection.appliedAt ?? null,
+    revertedAt: projection.revertedAt ?? null,
+    ...publicGoalError(projection.error)
+  };
 }
 
 function publicGoalWork(goal: GoalState, work: GoalState["work"][number]): Record<string, unknown> {
@@ -234,18 +276,46 @@ function publicGoalWork(goal: GoalState, work: GoalState["work"][number]): Recor
     resultSummary: safeGoalSummary(turn.resultSummary, 1_000) ?? null,
     resultSha256: turn.resultSha256 ?? null,
     stopReason: turn.stopReason ?? null,
-    terminalObservation: turn.terminalObservation ? {
-      capturedAt: turn.terminalObservation.capturedAt,
-      headSha: turn.terminalObservation.headSha,
-      diffSha256: turn.terminalObservation.diffSha256,
-      dirty: turn.terminalObservation.dirty,
-      changedPathCount: turn.terminalObservation.changedPaths.length
-    } : null,
+    attempts: (turn.attempts ?? []).slice(-3).map((attempt) => ({
+      attemptIndex: attempt.attemptIndex,
+      attemptNumber: attempt.attemptIndex + 1,
+      operationId: attempt.operationId,
+      status: attempt.status,
+      runFingerprint: attempt.runFingerprint ?? null,
+      runStatus: attempt.runStatus ?? null,
+      threadId: attempt.threadId ?? null,
+      sessionId: attempt.sessionId ?? null,
+      turnId: attempt.turnId ?? null,
+      scheduledAt: attempt.scheduledAt,
+      notBefore: attempt.notBefore,
+      startedAt: attempt.startedAt ?? null,
+      finishedAt: attempt.finishedAt ?? null,
+      startObservation: publicGoalObservation(attempt.startObservation),
+      terminalObservation: publicGoalObservation(attempt.terminalObservation),
+      failure: attempt.failure ? {
+        code: attempt.failure.code,
+        category: attempt.failure.category,
+        phase: attempt.failure.phase,
+        retryable: attempt.failure.retryable,
+        outcomeKnown: attempt.failure.outcomeKnown,
+        turnStarted: attempt.failure.turnStarted,
+        summarySha256: attempt.failure.summarySha256,
+        occurredAt: attempt.failure.occurredAt
+      } : null
+    })),
+    attemptCount: turn.attempts?.length ?? (turn.operationId ? 1 : 0),
+    currentAttemptNumber: turn.attempts?.length ? (turn.attempts.at(-1)?.attemptIndex ?? 0) + 1 : (turn.operationId ? 1 : null),
+    retriesUsed: Math.max(0, (turn.attempts?.length ?? 1) - 1),
+    retryNotBefore: turn.attempts?.at(-1)?.status === "backoff" ? turn.attempts.at(-1)?.notBefore ?? null : null,
+    terminalObservation: publicGoalObservation(turn.terminalObservation),
     reservedAt: turn.reservedAt,
     startedAt: turn.startedAt ?? null,
     finishedAt: turn.finishedAt ?? null
   }));
   const completedTurnCount = turns.filter((turn) => turn.status === "succeeded").length;
+  const attemptCount = (work.turns ?? []).reduce((count, turn) => count + (turn.attempts?.length ?? (turn.operationId ? 1 : 0)), 0);
+  const retriesUsed = (work.turns ?? []).reduce((count, turn) => count + Math.max(0, (turn.attempts?.length ?? 1) - 1), 0);
+  const currentAttempt = turns.at(-1)?.attempts.at(-1);
   return {
     workId: work.workId,
     title: work.title,
@@ -266,6 +336,11 @@ function publicGoalWork(goal: GoalState, work: GoalState["work"][number]): Recor
     completedTurnCount,
     remainingTurnCount: Math.max(0, goal.limits.maxTurnsPerWorker - completedTurnCount),
     currentTurnIndex: turns.at(-1)?.turnIndex ?? null,
+    attemptCount,
+    currentAttemptNumber: currentAttempt?.attemptNumber ?? null,
+    retriesUsed,
+    retriesRemaining: Math.max(0, goal.limits.maxRetriesPerWorker - retriesUsed),
+    retryNotBefore: currentAttempt?.status === "backoff" ? currentAttempt.notBefore : null,
     finalTurnAuthorized: turns.length === goal.limits.maxTurnsPerWorker && turns.at(-1)?.status === "succeeded",
     integrationBlockedUntilFinalTurn: goal.executionPolicy === "persistent" && work.status === "continuing",
     codingTaskId: work.codingTaskId ?? null,
@@ -273,7 +348,7 @@ function publicGoalWork(goal: GoalState, work: GoalState["work"][number]): Recor
     reviewDiffSha256: work.reviewDiffSha256 ?? null,
     integratedCommitSha: work.integratedCommitSha ?? null,
     summary: safeGoalSummary(work.summary, 1_000) ?? null,
-    error: safeGoalSummary(work.error, 1_000) ?? null,
+    ...publicGoalError(work.error),
     startedAt: work.startedAt ?? null,
     finishedAt: work.finishedAt ?? null
   };
@@ -283,18 +358,7 @@ function publicGoal(goal: GoalState): Record<string, unknown> {
   const publicLive = goal.live ? {
     projectedIntegrationSha: goal.live.projectedIntegrationSha,
     pendingProjectionId: goal.live.pendingProjectionId ?? null,
-    projections: goal.live.projections.slice(-20).map((projection) => ({
-      projectionId: projection.projectionId,
-      status: projection.status,
-      fromIntegrationSha: projection.fromIntegrationSha,
-      toIntegrationSha: projection.toIntegrationSha,
-      reviewFingerprint: projection.reviewFingerprint,
-      changedPathCount: projection.changedPaths.length,
-      preparedAt: projection.preparedAt,
-      appliedAt: projection.appliedAt ?? null,
-      revertedAt: projection.revertedAt ?? null,
-      error: safeGoalSummary(projection.error, 1_000) ?? null
-    })),
+    projections: goal.live.projections.slice(-20).map(publicGoalProjection),
     adoptedAt: goal.live.adoptedAt ?? null,
     adoptedProjectionId: goal.live.adoptedProjectionId ?? null,
     adoptedReviewFingerprint: goal.live.adoptedReviewFingerprint ?? null
@@ -308,12 +372,20 @@ function publicGoal(goal: GoalState): Record<string, unknown> {
     reviewFingerprint: goal.completion.reviewFingerprint ?? null
   } : null;
   const publicSourceApplication = goal.sourceApplication ? {
-    ...goal.sourceApplication,
+    applicationKey: goal.sourceApplication.applicationKey,
+    status: goal.sourceApplication.status,
+    patchSha256: goal.sourceApplication.patchSha256,
+    sourceHeadSha: goal.sourceApplication.sourceHeadSha,
     sourceDirtyPathsBefore: goal.sourceApplication.sourceDirtyPathsBefore.slice(0, 100),
     sourceDirtyPathCountBefore: goal.sourceApplication.sourceDirtyPathsBefore.length,
     sourceDirtyPathsAfter: goal.sourceApplication.sourceDirtyPathsAfter?.slice(0, 100),
     sourceDirtyPathCountAfter: goal.sourceApplication.sourceDirtyPathsAfter?.length ?? null,
-    error: safeGoalSummary(goal.sourceApplication.error, 1_000)
+    startedAt: goal.sourceApplication.startedAt,
+    appliedAt: goal.sourceApplication.appliedAt ?? null,
+    zeroWrite: goal.sourceApplication.zeroWrite ?? false,
+    adoptedProjectionId: goal.sourceApplication.adoptedProjectionId ?? null,
+    reviewFingerprint: goal.sourceApplication.reviewFingerprint ?? null,
+    ...publicGoalError(goal.sourceApplication.error)
   } : null;
   return {
     goalId: goal.goalId,
@@ -334,6 +406,13 @@ function publicGoal(goal: GoalState): Record<string, unknown> {
       network: goal.permissions.network,
       sourceEffects: goal.permissions.sourceEffects
     },
+    retryPolicy: goal.retryPolicy ? {
+      version: goal.retryPolicy.version,
+      algorithm: goal.retryPolicy.algorithm,
+      backoffMs: goal.retryPolicy.backoffMs,
+      retryableFailures: goal.retryPolicy.retryableFailures,
+      fingerprint: goal.retryPolicy.fingerprint
+    } : null,
     approval: goal.approval,
     baseSha: goal.baseSha,
     integrationHeadSha: goal.integrationHeadSha ?? null,
@@ -350,11 +429,22 @@ function publicGoal(goal: GoalState): Record<string, unknown> {
       summary: safeGoalSummary(record.summary, 500),
       createdAt: record.createdAt
     })),
-    scheduler: goal.scheduler ? { ...goal.scheduler, error: safeGoalSummary(goal.scheduler.error, 1_000) } : null,
+    scheduler: goal.scheduler ? {
+      epoch: goal.scheduler.epoch,
+      leaseId: goal.scheduler.leaseId,
+      startKey: goal.scheduler.startKey,
+      definitionFingerprint: goal.scheduler.definitionFingerprint,
+      status: goal.scheduler.status,
+      requestedAt: goal.scheduler.requestedAt,
+      acquiredAt: goal.scheduler.acquiredAt ?? null,
+      stoppedAt: goal.scheduler.stoppedAt ?? null,
+      stopReason: goal.scheduler.stopReason ?? null,
+      ...publicGoalError(goal.scheduler.error)
+    } : null,
     live: publicLive,
     completion: publicCompletion,
     sourceApplication: publicSourceApplication,
-    error: safeGoalSummary(goal.error, 1_000) ?? null,
+    ...publicGoalError(goal.error),
     createdAt: goal.createdAt,
     updatedAt: goal.updatedAt,
     startedAt: goal.startedAt ?? null,
@@ -363,6 +453,9 @@ function publicGoal(goal: GoalState): Record<string, unknown> {
 }
 
 function goalListSummary(goal: GoalState, schedulerFields: Record<string, unknown>): Record<string, unknown> {
+  const scheduler = schedulerFields.scheduler && typeof schedulerFields.scheduler === "object" && !Array.isArray(schedulerFields.scheduler)
+    ? schedulerFields.scheduler as Record<string, unknown>
+    : undefined;
   return {
     goalId: goal.goalId,
     title: goal.title,
@@ -381,9 +474,19 @@ function goalListSummary(goal: GoalState, schedulerFields: Record<string, unknow
       status: work.status,
       authorizedTurnCount: goal.limits.maxTurnsPerWorker,
       completedTurnCount: (work.turns ?? []).filter((turn) => turn.status === "succeeded").length,
-      remainingTurnCount: Math.max(0, goal.limits.maxTurnsPerWorker - (work.turns ?? []).filter((turn) => turn.status === "succeeded").length)
+      remainingTurnCount: Math.max(0, goal.limits.maxTurnsPerWorker - (work.turns ?? []).filter((turn) => turn.status === "succeeded").length),
+      attemptCount: (work.turns ?? []).reduce((count, turn) => count + (turn.attempts?.length ?? (turn.operationId ? 1 : 0)), 0),
+      retriesUsed: (work.turns ?? []).reduce((count, turn) => count + Math.max(0, (turn.attempts?.length ?? 1) - 1), 0),
+      retriesRemaining: Math.max(0, goal.limits.maxRetriesPerWorker - (work.turns ?? []).reduce((count, turn) => count + Math.max(0, (turn.attempts?.length ?? 1) - 1), 0)),
+      backoffAttemptCount: (work.turns ?? []).reduce((count, turn) => count + (turn.attempts ?? []).filter((attempt) => attempt.status === "backoff").length, 0)
     })),
-    scheduler: schedulerFields.scheduler ?? null,
+    scheduler: scheduler ? {
+      status: scheduler.status ?? null,
+      runner_alive: scheduler.runner_alive ?? false,
+      stranded: scheduler.stranded ?? false,
+      recovery_needed: scheduler.recovery_needed ?? false,
+      stop_reason: scheduler.stop_reason ?? null
+    } : null,
     scheduler_alive: schedulerFields.scheduler_alive ?? false,
     recovery_needed: schedulerFields.recovery_needed ?? false,
     updatedAt: goal.updatedAt
@@ -404,8 +507,6 @@ function goalStructured(goal: GoalState): Record<string, unknown> {
     execution_policy: goal.executionPolicy,
     workspace_policy: goal.workspacePolicy,
     base_sha: goal.baseSha,
-    source_root: goal.sourceRoot,
-    integration_worktree_root: goal.integrationWorktreeRoot,
     integration_head_sha: goal.integrationHeadSha ?? null,
     live_projection_allowed: goal.workspacePolicy === "live" && goal.permissions.sourceEffects.apply,
     live_projection_supported: goalLiveProjectionSupported(),
@@ -460,7 +561,8 @@ function goalSchedulerStructured(view: GoalSchedulerView | undefined): Record<st
       heartbeat_at: runtime?.heartbeatAt ?? null,
       stopped_at: runtime?.stoppedAt ?? authority?.stoppedAt ?? null,
       stop_reason: runtime?.stopReason ?? authority?.stopReason ?? null,
-      error: runtime?.error ?? authority?.error ?? null,
+      has_error: publicGoalError(runtime?.error ?? authority?.error).hasError,
+      error_sha256: publicGoalError(runtime?.error ?? authority?.error).errorSha256,
       stranded: schedulerStranded,
       recovery_needed: recoveryNeeded,
       recovery_action: recoveryNeeded ? "start_goal" : null,
@@ -1274,7 +1376,7 @@ function serverInstructions(config: CodexProConfig): string {
     bashInstruction,
     "6. For isolated implementation work, create one persistent CodingTask. Creation and Codex execution require explicit writeMode=workspace plus bashMode=full because App Server can execute beyond safe-bash commands. Use its taskws_* workspace for direct coding, or transition ownership to Codex and run/follow up there. Never mutate a CodingTask worktree unless the persisted executor is direct and no operation owns it.",
     goalOrchestrationSupported()
-      ? "7. For complex multi-part work, Pro may call propose_goal with a complete bounded work graph. A proposal is inert. Supervised Goals keep one-turn worker launch and private integration as explicit Pro actions. Persistent Goals are isolated, command-free, zero-retry contracts with 1-4 upfront-approved turns including the initial turn. Ordered continuation prompts are immutable contract authority: the scheduler never invents or mutates them, and every turn stays on the same CodingTask, worktree, model, effort, Codex thread, and session. Intermediate successful turns are re-attested but remain private and non-integrable; dependencies unlock and deterministic private integration occur only after the final authorized turn passes exact terminal, provenance, path, and content checks. Persistent Goals never project/apply source changes or complete themselves. Show the returned summaries and fingerprints before approve_goal, and never imply approval started workers. get/list/review are passive. refresh is store-only and never spawns or integrates. start and persistent resume require the explicit execution gate. Only Pro may review, publish decisions, change scope, complete, or apply. Goal worktrees remain private and must not be passed to open_workspace, read, or bash."
+      ? "7. For complex multi-part work, Pro may call propose_goal with a complete bounded work graph. A proposal is inert. Supervised Goals keep one-turn, zero-retry worker launch and private integration as explicit Pro actions. Persistent Goals are isolated, command-free contracts with 1-4 upfront-approved semantic turns including the initial turn and 0-2 total fresh retries per work item. Ordered continuation prompts are immutable contract authority: the scheduler never invents or mutates them, and every turn stays on the same CodingTask, worktree, model, effort, Codex thread, and session. A fresh retry repeats the exact approved prompt under a new operation ID after the fingerprinted infra-pre-turn-v1 allowlist and 1s/5s backoff; it does not consume a semantic turn. Same-operation recovery is not a retry. Intermediate successful turns are re-attested but remain private and non-integrable; dependencies unlock and deterministic private integration occur only after the final authorized turn passes exact terminal, provenance, path, and content checks. Persistent Goals never project/apply source changes or complete themselves. Show the returned turn, retry-policy, continuation, and contract fingerprints before approve_goal, and never imply approval started workers. get/list/review are passive. refresh is store-only and never spawns or integrates. start and persistent resume require the explicit execution gate; scheduler-owned retries remain within that approved start authority. Only Pro may review, publish decisions, change scope, complete, or apply. Goal worktrees remain private and must not be passed to open_workspace, read, or bash."
       : "7. Goal orchestration is unavailable on Windows because the required crash-safe GoalStore locking contract is not supported. Use Direct coding or standalone CodingTasks; Goal tools are intentionally not advertised.",
     "8. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
@@ -1898,7 +2000,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
             sourceEffects: false,
             commands: false,
             maxTurnsPerWorker: "1-4 total turns, including the initial turn",
-            maxRetriesPerWorker: 0,
+            maxRetriesPerWorker: "0-2 total fresh retries per work item",
+            retryAlgorithm: "infra-pre-turn-v1",
+            retryBackoffMs: [1000, 5000],
+            retryableFailures: GOAL_RETRYABLE_FAILURES_V1,
+            retrySemantics: "same-operation recovery is not a retry; a fresh retry uses a new operation ID, repeats the exact approved semantic prompt, and does not consume a turn",
             continuationIntents: "persistent-only, ordered, mandatory, and contract-fingerprinted",
             automaticPrivateIntegration: true,
             integrationRequiresFinalAuthorizedTurn: true,
@@ -4234,7 +4340,7 @@ ${result.prompt}
     "propose_goal",
     {
       title: "Propose Goal",
-      description: "Persist an inert, fingerprinted Pro orchestration contract. supervised keeps one-turn launch and integration under explicit Pro actions. persistent may include up to three ordered, mandatory Pro-approved continuation intents per work item (four total turns including the initial turn). The scheduler executes only those exact prompts on the same task/thread and cannot invent or mutate prompts; intermediate successful turns stay private and non-integrable, and deterministic private integration waits for the final authorized turn. Neither policy starts Codex, changes source, or completes during proposal.",
+      description: "Persist an inert, fingerprinted Pro orchestration contract. supervised keeps one semantic turn, zero retries, and integration under explicit Pro actions. persistent may include up to three ordered mandatory continuation intents (four semantic turns total) plus 0-2 total fresh retries per work item. A fresh retry repeats the exact approved prompt under a new operation ID after the fixed fingerprinted infra-pre-turn-v1 backoff; same-operation recovery is not a retry, and retries do not consume turns. The scheduler cannot invent or mutate prompts. Intermediate successful turns stay private and non-integrable; deterministic private integration waits for the final authorized turn. Proposal starts nothing.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Allowed source Git workspace. Omit to use the selected workspace."),
         goal_key: z.string().min(1).max(160).describe("Stable idempotency key for this exact proposal."),
@@ -4251,7 +4357,7 @@ ${result.prompt}
           max_concurrency: z.number().int().min(1).max(8).optional(),
           timeout_ms: z.number().int().min(1_000).max(86_400_000).optional(),
           max_turns_per_worker: z.number().int().min(1).max(4).optional().describe("Total authorized turns including the initial turn. supervised requires 1; persistent requires 1-4 and exactly one fewer continuation_intents on every work item."),
-          max_retries_per_worker: z.literal(0).optional().describe("Current vertical slice: no automatic retries."),
+          max_retries_per_worker: z.number().int().min(0).max(2).optional().describe("Persistent-only total fresh retry budget per work item across all semantic turns. Fixed infra-pre-turn-v1 policy; supervised requires 0."),
           max_log_bytes: z.number().int().min(65_536).max(104_857_600).optional()
         }).optional(),
         permissions: z.object({
@@ -4299,15 +4405,12 @@ ${result.prompt}
         if (sourceEffects.apply || sourceEffects.commit || sourceEffects.push || sourceEffects.draft_pr) {
           throw new CodexProError("Persistent Goals require every source effect to be false.");
         }
-        if ((args.limits?.max_retries_per_worker ?? 0) !== 0) {
-          throw new CodexProError("Persistent Goals support zero automatic retries.");
-        }
         const mismatchedWork = args.work.find((item: any) => (item.continuation_intents?.length ?? 0) !== maxTurnsPerWorker - 1);
         if (mismatchedWork) {
           throw new CodexProError(`Persistent Goal work ${mismatchedWork.work_id} must provide exactly ${maxTurnsPerWorker - 1} ordered continuation_intents for ${maxTurnsPerWorker} total authorized turn(s).`);
         }
-      } else if (maxTurnsPerWorker !== 1 || args.work.some((item: any) => (item.continuation_intents?.length ?? 0) > 0)) {
-        throw new CodexProError("Supervised Goals support exactly one turn and do not accept continuation_intents.");
+      } else if (maxTurnsPerWorker !== 1 || (args.limits?.max_retries_per_worker ?? 0) !== 0 || args.work.some((item: any) => (item.continuation_intents?.length ?? 0) > 0)) {
+        throw new CodexProError("Supervised Goals support exactly one semantic turn, zero retries, and no continuation_intents.");
       }
       const proposed = await proposeGoal(
         goalStoreConfig(config),
@@ -4385,7 +4488,7 @@ ${result.prompt}
     "get_goal",
     {
       title: "Get Goal",
-      description: "Read the authoritative persisted Goal contract, approval, work graph, and Blackboard. This status tool never starts or resumes workers.",
+      description: "Passively read the authoritative persisted Goal contract, approval, work graph, bounded semantic-turn/attempt history, and Blackboard summaries. Retry classifications and not-before times are persisted engine authority. This status tool never starts, resumes, reconciles, or relaunches workers.",
       inputSchema: { goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/) },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Reading Goal...", "openai/toolInvocation/invoked": "Goal status ready" }
@@ -4406,7 +4509,7 @@ ${result.prompt}
     "list_goals",
     {
       title: "List Goals",
-      description: "List durable Goals whose source repositories remain inside this server's allowed roots.",
+      description: "Passively list compact durable Goal summaries inside allowed roots, including only aggregate semantic-turn, attempt, retry, and backoff counts. Never returns exact prompts, raw errors, full attempt evidence, or full Goal state, and never starts work.",
       inputSchema: { limit: z.number().int().min(1).max(100).optional() },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Listing Goals...", "openai/toolInvocation/invoked": "Goal list ready" }
@@ -4521,7 +4624,7 @@ ${result.prompt}
     "start_goal",
     {
       title: "Start Goal",
-      description: "Start an approved Goal or recover it with the same start_key. supervised launches the currently dependency-ready workers for explicit Pro review/integration. persistent starts or recovers a detached shell-free scheduler that automatically launches dependencies and deterministically integrates only verified terminal patches into the private integration worktree. Never projects, applies, completes, commits, pushes, or opens a PR.",
+      description: "Start an approved Goal or recover it with the same start_key. supervised launches dependency-ready one-turn workers for explicit Pro review/integration. persistent starts or recovers a detached shell-free scheduler; its approved authority includes only the fixed fingerprinted retry policy, and same-operation recovery is not a fresh retry. The scheduler automatically launches dependencies and integrates only final-turn verified patches into the private integration worktree. Never projects, applies, completes, commits, pushes, or opens a PR.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),
@@ -4644,7 +4747,7 @@ ${result.prompt}
     "review_goal",
     {
       title: "Review Goal",
-      description: "Authoritatively review the private Goal integration worktree against its approved committed base and run integrated git diff --check. Use this result for Pro's final evidence judgment; do not try to open the private worktree with open_workspace, read, or bash because that expected isolation denial is not a Goal failure. Blocked path content remains omitted. This never applies, commits to source, pushes, or creates a PR.",
+      description: "Passively review the private Goal integration worktree against its approved committed base, run integrated git diff --check, and return the same bounded persisted semantic-turn/attempt authority as get_goal. Use this result for Pro's final evidence judgment; do not open the private worktree with open_workspace, read, or bash. Blocked path content remains omitted. This never starts or reconciles workers, applies, commits to source, pushes, or creates a PR.",
       inputSchema: { goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/) },
       annotations: READ_ONLY_ANNOTATIONS,
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Reviewing integrated Goal...", "openai/toolInvocation/invoked": "Goal review ready" }
@@ -4659,6 +4762,7 @@ ${result.prompt}
       assertGoalSourceAllowed(config, result.goal);
       const schedulerView = await passiveGoalSchedulerView(config, result.goal);
       const review = result.review;
+      const publicReview = publicGoalReview(review);
       const text = [
         goalText("Goal Review", result.goal),
         "",
@@ -4676,7 +4780,7 @@ ${result.prompt}
       return textResult(text, {
         ...goalStructured(result.goal),
         ...goalSchedulerStructured(schedulerView),
-        review,
+        review: publicReview,
         changed_files_count: review.changedFileCount,
         verification: result.verification,
         integration_head_sha: result.integrationHeadSha,
@@ -4736,7 +4840,7 @@ ${result.prompt}
       assertGoalSourceAllowed(config, result.goal);
       return textResult(`${goalText("Goal Checkpoint Projected", result.goal)}\n\nProjection: ${result.projection.projectionId} [${result.projection.status}]. No stage, commit, push, or Codex process was created.`, {
         ...goalStructured(result.goal),
-        projection: result.projection,
+        projection: publicGoalProjection(result.projection),
         projection_id: result.projection.projectionId,
         projection_status: result.projection.status,
         reused: result.reused,
@@ -4784,7 +4888,7 @@ ${result.prompt}
       assertGoalSourceAllowed(config, result.goal);
       return textResult(`${goalText("Goal Projection Reverted", result.goal)}\n\nProjection: ${result.projection.projectionId} [${result.projection.status}]. Unrelated source changes were preserved.`, {
         ...goalStructured(result.goal),
-        projection: result.projection,
+        projection: publicGoalProjection(result.projection),
         projection_id: result.projection.projectionId,
         projection_status: result.projection.status,
         reused: result.reused,
@@ -4799,7 +4903,7 @@ ${result.prompt}
     "pause_goal",
     {
       title: "Pause Goal Scheduling",
-      description: "Pause new Goal scheduling while allowing already-running workers to finish under their existing approved leases. Persistent Goals can pause only while running; once automatic private integration reaches waiting_review, the stopped scheduler remains available for Pro review and cannot be paused/resumed back into execution. This is not a worker interrupt; use cancel_goal to stop active workers.",
+      description: "Pause new Goal scheduling while allowing an already-running attempt to finish and publish evidence under its approved lease. Persistent pause prevents every backoff retry, next semantic turn, dependency launch, and private integration until explicit resume. Once automatic private integration reaches waiting_review, the stopped scheduler remains available for Pro review and cannot be paused/resumed back into execution. This is not a worker interrupt; use cancel_goal to stop active workers.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),
@@ -4832,7 +4936,7 @@ ${result.prompt}
     "resume_goal",
     {
       title: "Resume Goal Scheduling",
-      description: "Resume a paused Goal inside the unchanged approved contract. supervised only reopens scheduling state and still needs start_goal for worker launch. persistent explicitly wakes or recovers its detached scheduler, so this tool requires the same execution gate as start_goal.",
+      description: "Resume a paused Goal inside the unchanged approved contract. supervised only reopens scheduling state and still needs start_goal for worker launch. persistent explicitly wakes or recovers its detached scheduler; due fixed-policy retries may then launch within the already-approved start authority. This tool requires the same execution gate as start_goal.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),
@@ -4880,7 +4984,7 @@ ${result.prompt}
     "cancel_goal",
     {
       title: "Cancel Goal",
-      description: "Durably cancel every active Goal-owned worker before marking the Goal terminal. Does not require or resolve a Codex executable and never relaunches work.",
+      description: "Durably cancel every active Goal-owned worker and any scheduled backoff retry before marking the Goal terminal. Does not require or resolve a Codex executable and never launches or relaunches work.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),

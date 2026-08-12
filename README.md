@@ -158,14 +158,14 @@ Tool cards are opt in:
 CODEXPRO_TOOL_CARDS=1 codexpro start
 ```
 
-The current v16 cards cover selected workspace, analysis, change, Git, handoff,
+The current v17 cards cover selected workspace, analysis, change, Git, handoff,
 CodingTask, Goal, and terminal results. Reads and searches stay in normal chat
-output. v15 through v8 remain compatibility resources. ChatGPT may cache a UI
+output. v16 through v8 remain compatibility resources. ChatGPT may cache a UI
 resource by URI, so every renderer-payload change gets a new URI: a stale v13
 cache prompted v14, and the later authoritative changed-file-count UI required
-v15. The bounded Persistent turn-history renderer therefore uses v16. After
-updating the connector, refresh its ChatGPT plugin connection once so it loads
-the current widget resource. The legacy implicit documentation-site
+v15. Bounded Persistent turn history required v16; the distinct attempt/retry
+ledger requires v17. After updating the connector, refresh its ChatGPT plugin
+connection once so it loads the current widget resource. The legacy implicit documentation-site
 domain is omitted so ChatGPT can use its default sandbox. Set
 `CODEXPRO_WIDGET_DOMAIN` only to a dedicated HTTPS component origin that you
 control.
@@ -345,11 +345,15 @@ stable idempotency key and explicit confirmation. It never projects unreviewed
 work.
 
 `persistent` is a stricter Isolated-only contract: its Goal `commands` list is
-empty, network is disabled, every source-effect permission is false, and there
-are zero fresh automatic retries. Each worker has 1–4 total turns, including
-the initial turn. A proposal with more than one turn must contain exactly one
-fewer ordered `continuation_intents` (at most three); their prompts and order are
-immutable once approved. After explicit propose → approve → start, the detached
+empty, network is disabled, and every source-effect permission is false. Each
+worker has 1–4 semantic turns, including the initial turn, plus an aggregate
+0–2 fresh-retry budget across all of those turns; the public proposal fields
+are `limits.max_turns_per_worker` and `limits.max_retries_per_worker`, and the
+retry default is zero.
+Supervised remains exactly one turn and zero retries. A Persistent proposal with
+more than one turn must contain exactly one fewer ordered
+`continuation_intents` (at most three); their prompts and order are immutable
+once approved. After explicit propose → approve → start, the detached
 local scheduler launches dependency-ready workers in parallel. It resumes each
 approved continuation on the same CodingTask, worktree, Codex thread, and
 session, but as a distinct operation and turn. An intermediate success remains
@@ -363,6 +367,8 @@ propose_goal (persistent + isolated)
   -> approve_goal
   -> start_goal
   -> local scheduler runs each initial turn
+  -> if and only if a pre-turn infrastructure failure is proven with zero Git change:
+       wait 1s / 5s and repeat the same semantic turn under a new operation
   -> mandatory ordered same-thread continuation turns, if approved
   -> one cumulative private integration after each worker's final turn
   -> waiting_review (stop reason: semantic_review)
@@ -375,16 +381,28 @@ offline Pro judgment. The computer and detached scheduler process must remain
 running while work progresses; the CodexPro server must be available to start,
 control, or reconnect to it. The scheduler cannot invent work, reinterpret completion
 criteria, complete a Goal, project/apply source changes, stage, commit, merge,
-push, or open a PR. An approved continuation is not a retry: it is a mandatory
-new turn in the original approved budget. A failed or canceled turn does not
-advance, and the scheduler never creates an unapproved replacement turn.
-Recovering the same reserved operation after a crash or reconnect is also not a
-fresh retry. Same-thread execution means that Codex appends turns to the
+push, or open a PR. A continuation, fresh retry, and same-operation recovery are
+three different things. A continuation is a mandatory new semantic turn in the
+approved budget. A fresh retry does not consume a semantic turn: it repeats the
+exact approved prompt, scope, task, worktree, model, and effort under a new
+deterministic operation, preserving the same thread/session if already
+established. Recovering the same reserved operation after a crash or lost
+response is not a retry and consumes no retry budget. Same-thread execution means that Codex appends turns to the
 persisted thread identity; it does not promise that every earlier token remains
-verbatim in the model context after compaction. Worker failure/cancellation,
-stale terminal provenance, out-of-scope or blocked content, and scheduler
-safety errors stop or fail execution closed. Fresh automatic retries remain
-roadmap work.
+verbatim in the model context after compaction.
+
+Fresh retries use the immutable fingerprinted `infra-pre-turn-v1` policy and
+fixed backoff `[1000, 5000]` ms. The runner must positively attest one of only
+two tuples—App Server startup at runner start, or App Server initialize
+transport at initialization—with category `infrastructure`,
+`outcomeKnown=true`, `turnStarted=false`, no returned identity for that failed
+attempt, no written thread-establish or turn-start request, and an exactly
+unchanged authoritative Git observation. A thread/session already established
+by an earlier semantic turn remains the retry's immutable resume target. Every failed attempt remains
+in the durable ledger. Timeout, model/tool/input/approval failures, policy/path/
+content/provenance/validation/identity conflicts, cancellation, partial Git
+change, ambiguous response loss, or unknown outcome never qualify. Uncertainty
+fails closed.
 
 `pause_goal` durably closes the scheduling gate: already-running worker
 processes may finish, but no new launch, integration, or dependency advancement
@@ -392,9 +410,11 @@ begins after the pause linearizes. `resume_goal` is an explicit, idempotent
 execution action against the same approved fingerprint and resource envelope;
 it does not rerun completed work. `cancel_goal` fences and terminates active
 workers and becomes terminal, but never reverts source, deletes worktrees, or
-performs another source effect. `get_goal`, `list_goals`, and `review_goal` are
-passive; `refresh_goal` is store-only. Reading or reconnecting never silently
-resumes execution.
+performs another source effect. Pause and cancel also dominate a pending retry;
+no backoff attempt launches until an explicit resume after pause, and none
+launches after cancel. `get_goal`, `list_goals`, and `review_goal` are passive;
+`refresh_goal` is store-only. Reading or reconnecting never silently launches
+a retry or resumes execution.
 
 This Phase 8 path is verified on a supported POSIX host through actual ordinary
 Chat: Goal `goal_cd1d3bf868c2bdade5b1c7af` continued after navigation away,
@@ -446,6 +466,36 @@ private worktrees and has no source effect. After correcting that hint to
 `false`, rebuilding, restarting, and refreshing the plugin, the canonical
 `start_goal` call succeeded. Source projection/application remain separately
 confirmed actions.
+
+Phase 10's bounded retry contract passed the full deterministic npm smoke and
+the built production HTTP/MCP entry point, including the exact 1s/5s schedule,
+aggregate budget across semantic turns, exhaustion, restart-safe backoff,
+concurrency-slot release, pause/cancel dominance, the full non-retry matrix, one
+final private integration, and unchanged source. An installed real Codex HTTP
+run also passed: Goal `goal_b134f2acc8a910aedd6d31d5` received one injected
+initialize-transport failure, then its second attempt ran real
+`gpt-5.6-sol`/`high` Codex successfully, produced one private integration
+commit, and left source unchanged.
+
+The canonical [ordinary-Chat retry flow](https://chatgpt.com/c/6a7cc1a8-bd5c-83ee-9779-7e032776dadd)
+also passed. Goal `goal_855e97294fe7d3a8f25a06fe` reached revision 14
+`waiting_review` / `semantic_review`, anchored at
+`f77e993103a54d4c6f0573d429aaa5f78cd68136`, with contract fingerprint
+`273019c6d5f124f87d6240be9997b1571c9f73445839b941d449e6ffa3759578`.
+CodingTask `task_5fe51f8b7cf5b5911361e416` retained failed attempt 0
+(`app_server_initialize_transport / infrastructure / app_server_initialize`,
+retryable, outcome known, turn not started, zero changed paths); 1s later,
+attempt 1 succeeded with real Codex on thread/session
+`019ff759-a258-7480-9765-c075c6f867a3` and turn
+`019ff759-a318-7283-83d4-c0d2477a42eb`. Private integration
+`b1fe3f18e44601ebbc7c9af42e144e95fa77c1f9` contained exactly one commit.
+Source HEAD/ref stayed at `f77e…`, write-tree at `2a1e80…`, and file-byte
+hash at `f34848…`, with empty status/diff. The final v17 get card mounted with
+1/1 semantic turn, two attempts, retries 1/1, and one changed file. Chat
+duplicated passive get/review calls, but state SHA-256 stayed `5fd32c…` and no
+launch or write occurred. Initial approve/start cards briefly failed to fetch
+during the live endpoint swap; freshly read resources and the final v17 card
+rendered correctly.
 
 Every Live projection holds a per-repository lock, checks the exact approved source HEAD and changed-path file/index state, and writes a durable journal before changing source. Unrelated pre-existing tracked, staged, and untracked work is preserved. A retry with the same key recovers from the journal; an external edit on a Goal-owned path is never overwritten and leaves the projection `recovery_required` for user action. Unsupported symlink, submodule, conflicted-index, or non-regular-file topology fails closed.
 

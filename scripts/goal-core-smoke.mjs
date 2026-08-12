@@ -196,7 +196,7 @@ try {
     ...input,
     goalKey: 'automatic-retry-v1',
     limits: { ...input.limits, maxRetriesPerWorker: 1 }
-  }), /does not support automatic retries/);
+  }), /one-turn contract|retry/i);
 
   await expectReject(approveGoal(config, proposed.goal.goalId, {
     expectedRevision: 1,

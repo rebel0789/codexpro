@@ -11,6 +11,7 @@ const temp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-task-runner-'));
 let dataRoot = path.join(temp, 'data');
 let worktree = path.join(dataRoot, 'worktrees', 'task_0123456789abcdef01234567');
 const fakeCodex = path.join(temp, 'fake-codex');
+const fakeCodexInitFail = path.join(temp, 'fake-codex-init-fail');
 const fakeLaunchCount = path.join(temp, 'fake-launch-count');
 
 const fakeSource = `#!/usr/bin/env node
@@ -28,9 +29,15 @@ function handle(message) {
   if (message.method === 'initialized') return;
   if (message.method === 'thread/start' || message.method === 'thread/resume') return send({ id: message.id, result: { thread: { id: message.params.threadId || threadId, sessionId, ephemeral: false } } });
   if (message.method === 'turn/start') {
-    turnId = message.params.clientUserMessageId === 'run-two' ? 'turn-two' : 'turn-smoke';
+    turnId = message.params.clientUserMessageId === 'run-two' ? 'turn-two' :
+      message.params.clientUserMessageId === 'continuation-retry-success' ? 'turn-retry' :
+      message.params.clientUserMessageId === 'continuation-duplicate-turn' ? 'turn-retry' :
+      message.params.clientUserMessageId === 'failure-after-turn' ? 'turn-failed' :
+      message.params.clientUserMessageId === 'failure-timeout' ? 'turn-timeout' : 'turn-smoke';
+    if (message.params.clientUserMessageId === 'failure-unknown') process.exit(87);
     send({ id: message.id, result: { turn: turn() } });
-    if (turnId === 'turn-two') setTimeout(() => send({ method: 'turn/completed', params: { threadId, turn: turn('completed') } }), 10);
+    if (turnId === 'turn-two' || turnId === 'turn-retry') setTimeout(() => send({ method: 'turn/completed', params: { threadId, turn: turn('completed') } }), 10);
+    if (turnId === 'turn-failed') setTimeout(() => send({ method: 'turn/completed', params: { threadId, turn: turn('failed') } }), 10);
     return;
   }
   if (message.method === 'turn/steer') {
@@ -53,6 +60,10 @@ process.stdin.on('data', (chunk) => {
   }
 });
 `;
+const fakeInitFailSource = `#!/usr/bin/env node
+process.stdin.once('data', () => process.exit(86));
+process.stdin.resume();
+`;
 
 try {
   await fs.mkdir(dataRoot, { recursive: true });
@@ -72,6 +83,7 @@ try {
   execFileSync('git', ['worktree', 'add', '--detach', worktree, baseSha], { cwd: source, stdio: 'ignore' });
   const commonDir = await fs.realpath(path.join(source, '.git'));
   await fs.writeFile(fakeCodex, fakeSource, { mode: 0o755 });
+  await fs.writeFile(fakeCodexInitFail, fakeInitFailSource, { mode: 0o755 });
   const { CodingTaskStore } = await import(pathToFileURL(path.join(root, 'dist', 'codingTaskStore.js')).href);
   const { beginCodingTaskOperation, requestCodingTaskCancellation } = await import(pathToFileURL(path.join(root, 'dist', 'codingTaskOps.js')).href);
   const { launchCodingTaskRun, waitForCodingTaskRun, submitCodingTaskFollowup, submitCodingTaskContinuation, getCodingTaskContinuation, getCodingTaskSteer, getCodingTaskRun, reconcileCodingTaskRun, cancelQueuedCodingTaskRun, holdCodingTaskRunLockForTest } = await import(
@@ -261,6 +273,7 @@ try {
     (value) => { value.threadId = 'thread-tampered'; },
     (value) => { value.expectedSessionId = 'session-tampered'; },
     (value) => { value.continuationFingerprint = 'a'.repeat(64); },
+    (value) => { value.expectedPreviousTurnId = 'turn-tampered'; },
     (value) => { value.expectedRevision += 1; },
     (value) => { value.executorEpoch += 1; },
     (value) => { value.leaseId = 'lease-tampered'; },
@@ -412,6 +425,9 @@ try {
   const canceledTimeoutRun = await cancelQueuedCodingTaskRun({ dataRoot }, taskId, timeoutCancelOperation,
     'cancel wins after child handoff timeout');
   assert.equal(canceledTimeoutRun.status, 'canceled');
+  assert.equal(canceledTimeoutRun.failure.code, 'canceled');
+  assert.equal(canceledTimeoutRun.failure.retryable, false);
+  assert.equal(canceledTimeoutRun.failure.outcomeKnown, true);
   const canceledRunBytes = await fs.readFile(path.join(timeoutCancelDir, 'state.json'));
   const canceledTaskBytes = await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json'));
   await timeoutBarrier;
@@ -440,6 +456,254 @@ try {
   }), /contains ambiguous artifacts/);
   assert.equal(await fs.readFile(path.join(ambiguousDir, 'unknown-artifact'), 'utf8'), 'preserve me');
   assert.equal(await readLaunchCount(), launchesBeforeAmbiguous);
+
+  // Structured retry authority: only a runner-proven failure before initialize/thread/turn request
+  // publication is retryable. The attempt-start Git observation is persisted by the runner.
+  const retryableTask = await store.get(taskId);
+  const retryableOperation = 'failure-before-initialize';
+  await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodexInitFail }, taskId, {
+    operationId: retryableOperation, prompt: 'Fail before initialize request publication.',
+    expectedRevision: retryableTask.revision, executorEpoch: retryableTask.executorLease.epoch,
+    leaseId: retryableTask.executorLease.leaseId, threadId: retryableTask.codexThreadId,
+    expectedSessionId: retryableTask.codexSessionId, timeoutMs: 5_000
+  });
+  const retryableFailureRun = await waitForCodingTaskRun({ dataRoot }, taskId, retryableOperation, { timeoutMs: 5_000 });
+  assert.equal(retryableFailureRun.status, 'failed');
+  assert.equal(retryableFailureRun.failure.code, 'app_server_initialize_transport');
+  assert.equal(retryableFailureRun.failure.category, 'infrastructure');
+  assert.equal(retryableFailureRun.failure.retryable, true);
+  assert.equal(retryableFailureRun.failure.outcomeKnown, true);
+  assert.equal(retryableFailureRun.failure.turnStarted, false);
+  assert.equal(retryableFailureRun.failure.summarySha256,
+    createHash('sha256').update(retryableFailureRun.failure.summary).digest('hex'));
+  assert.equal(retryableFailureRun.threadEstablishRequestedAt, undefined);
+  assert.equal(retryableFailureRun.turnStartRequestedAt, undefined);
+  assert(retryableFailureRun.attemptStartGitObservation?.headSha);
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+  assert.equal((await store.get(taskId)).lastGitObservation.diffSha256,
+    retryableFailureRun.attemptStartGitObservation.diffSha256,
+    'retryable pre-turn infrastructure failure must leave the attempt Git observation unchanged');
+  const retryableRunDir = path.join(taskDirFor(taskId, dataRoot), 'runs',
+    `run_${createHash('sha256').update(retryableOperation).digest('hex').slice(0, 32)}`);
+  const retryableStatePath = path.join(retryableRunDir, 'state.json');
+  const pristineFailureState = await fs.readFile(retryableStatePath, 'utf8');
+  const tamperedFailureState = JSON.parse(pristineFailureState);
+  tamperedFailureState.failure.retryable = false;
+  await fs.writeFile(retryableStatePath, JSON.stringify(tamperedFailureState), { mode: 0o600 });
+  await assert.rejects(getCodingTaskRun({ dataRoot }, taskId, retryableOperation), /failure classification is invalid or tampered/);
+  tamperedFailureState.failure.retryable = true;
+  tamperedFailureState.failure.category = 'model_or_tool';
+  await fs.writeFile(retryableStatePath, JSON.stringify(tamperedFailureState), { mode: 0o600 });
+  await assert.rejects(getCodingTaskRun({ dataRoot }, taskId, retryableOperation), /failure classification is invalid or tampered/);
+  tamperedFailureState.failure.category = 'infrastructure';
+  tamperedFailureState.failure.phase = 'turn_active';
+  await fs.writeFile(retryableStatePath, JSON.stringify(tamperedFailureState), { mode: 0o600 });
+  await assert.rejects(getCodingTaskRun({ dataRoot }, taskId, retryableOperation), /failure classification is invalid or tampered/);
+  await fs.writeFile(retryableStatePath, pristineFailureState, { mode: 0o600 });
+  const retryTask = await store.get(taskId);
+  const launchesBeforeRetryMismatch = await readLaunchCount();
+  await assert.rejects(launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    operationId: 'failure-before-initialize-retry-wrong-thread', prompt: 'Fail before initialize request publication.',
+    expectedRevision: retryTask.revision, executorEpoch: retryTask.executorLease.epoch,
+    leaseId: retryTask.executorLease.leaseId, threadId: 'thread-wrong',
+    expectedSessionId: retryTask.codexSessionId, model: 'gpt-5.6-sol', effort: 'high', timeoutMs: 5_000
+  }), /thread does not match/);
+  assert.equal(await readLaunchCount(), launchesBeforeRetryMismatch, 'retry authority mismatch must launch nothing');
+  const priorAttemptBytes = await fs.readFile(retryableStatePath);
+  await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    operationId: 'failure-before-initialize-retry', prompt: 'Fail before initialize request publication.',
+    expectedRevision: retryTask.revision, executorEpoch: retryTask.executorLease.epoch,
+    leaseId: retryTask.executorLease.leaseId, threadId: retryTask.codexThreadId,
+    expectedSessionId: retryTask.codexSessionId, model: 'gpt-5.6-sol', effort: 'high', timeoutMs: 5_000
+  });
+  await waitFor(async () => (await store.get(taskId)).activeOperation?.operationId === 'failure-before-initialize-retry' &&
+    (await store.get(taskId)).codexTurnActive);
+  await submitCodingTaskFollowup({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    requestKey: 'finish-fresh-retry', prompt: 'Finish the distinct retry operation.', timeoutMs: 5_000
+  });
+  const freshRetryRun = await waitForCodingTaskRun({ dataRoot }, taskId, 'failure-before-initialize-retry', { timeoutMs: 5_000 });
+  assert.equal(freshRetryRun.status, 'waiting_review');
+  assert.equal(freshRetryRun.threadId, retryTask.codexThreadId);
+  assert.equal(freshRetryRun.sessionId, retryTask.codexSessionId);
+  assert.deepEqual(await fs.readFile(retryableStatePath), priorAttemptBytes,
+    'fresh retry must preserve the prior failed attempt artifact');
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+
+  // Continuation attempt retry preserves the semantic predecessor while binding the immediate
+  // failed attempt and its immutable continuation decision.
+  const semanticTask = await store.get(taskId);
+  const failedContinuationInput = {
+    requestKey: 'continuation-retry-attempt-zero', operationId: 'continuation-retry-failed', turnOrdinal: 3,
+    previousOperationId: 'failure-before-initialize-retry', prompt: 'Retry this exact semantic continuation.',
+    expectedRevision: semanticTask.revision, executorEpoch: semanticTask.executorLease.epoch,
+    leaseId: semanticTask.executorLease.leaseId, expectedThreadId: semanticTask.codexThreadId,
+    expectedSessionId: semanticTask.codexSessionId, expectedPreviousTurnId: semanticTask.codexTurnId,
+    model: 'gpt-5.6-sol', effort: 'high', timeoutMs: 5_000
+  };
+  await submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodexInitFail }, taskId, failedContinuationInput);
+  const failedContinuation = await waitForCodingTaskRun({ dataRoot }, taskId, 'continuation-retry-failed', { timeoutMs: 5_000 });
+  assert.equal(failedContinuation.failure.retryable, true);
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+  const retryContinuationTask = await store.get(taskId);
+  const retryContinuationInput = {
+    ...failedContinuationInput, requestKey: 'continuation-retry-attempt-one',
+    operationId: 'continuation-retry-success', expectedRevision: retryContinuationTask.revision,
+    retryPreviousAttemptOperationId: 'continuation-retry-failed'
+  };
+  const launchesBeforeRetryAuthority = await readLaunchCount();
+  await assert.rejects(submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId,
+    { ...retryContinuationInput, requestKey: 'continuation-retry-wrong', retryPreviousAttemptOperationId: 'failure-unknown' }),
+  /retry predecessor identity changed|unchanged canonical pre-turn/);
+  assert.equal(await readLaunchCount(), launchesBeforeRetryAuthority);
+  await assert.rejects(submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId,
+    { ...retryContinuationInput, requestKey: 'continuation-retry-missing', retryPreviousAttemptOperationId: undefined }),
+  /previous operation identity changed/);
+  assert.equal(await readLaunchCount(), launchesBeforeRetryAuthority);
+
+  const failedContinuationToken = `run_${createHash('sha256').update('continuation-retry-failed').digest('hex').slice(0, 32)}`;
+  const failedContinuationStatePath = path.join(taskDirFor(taskId, dataRoot), 'runs', failedContinuationToken, 'state.json');
+  const pristineFailedContinuationState = await fs.readFile(failedContinuationStatePath, 'utf8');
+  const nonretryableFailedContinuation = JSON.parse(pristineFailedContinuationState);
+  Object.assign(nonretryableFailedContinuation.failure, {
+    code: 'unknown', category: 'unknown', phase: 'unknown', retryable: false
+  });
+  await fs.writeFile(failedContinuationStatePath, JSON.stringify(nonretryableFailedContinuation), { mode: 0o600 });
+  const nonretryableRequest = { ...retryContinuationInput, requestKey: 'continuation-retry-nonretryable' };
+  await assert.rejects(submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId, nonretryableRequest),
+    /unchanged canonical pre-turn infrastructure failure/);
+  assert.equal(await readLaunchCount(), launchesBeforeRetryAuthority,
+    'a canonical nonretryable predecessor must launch nothing');
+  assert.equal(await fs.stat(continuationLedgerPath(taskId, dataRoot, nonretryableRequest.requestKey)).catch(() => undefined),
+    undefined, 'nonretryable predecessor must fail before decision publication');
+
+  const dirtyFailedContinuation = JSON.parse(pristineFailedContinuationState);
+  dirtyFailedContinuation.attemptStartGitObservation.diffSha256 =
+    dirtyFailedContinuation.attemptStartGitObservation.diffSha256 === 'f'.repeat(64) ? 'e'.repeat(64) : 'f'.repeat(64);
+  await fs.writeFile(failedContinuationStatePath, JSON.stringify(dirtyFailedContinuation), { mode: 0o600 });
+  const dirtyRequest = { ...retryContinuationInput, requestKey: 'continuation-retry-dirty' };
+  await assert.rejects(submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId, dirtyRequest),
+    /unchanged canonical pre-turn infrastructure failure/);
+  assert.equal(await readLaunchCount(), launchesBeforeRetryAuthority,
+    'a predecessor with changed Git authority must launch nothing');
+  assert.equal(await fs.stat(continuationLedgerPath(taskId, dataRoot, dirtyRequest.requestKey)).catch(() => undefined),
+    undefined, 'dirty predecessor must fail before decision publication');
+  await fs.writeFile(failedContinuationStatePath, pristineFailedContinuationState, { mode: 0o600 });
+
+  const taskStatePath = path.join(taskDirFor(taskId, dataRoot), 'state.json');
+  const pristineRetryTaskState = await fs.readFile(taskStatePath, 'utf8');
+  const activeRetryTaskState = JSON.parse(pristineRetryTaskState);
+  const activeAt = new Date().toISOString();
+  activeRetryTaskState.activeOperation = {
+    operationId: 'continuation-retry-active-blocker', executor: 'codex', kind: 'codex_run',
+    startedAt: activeAt, heartbeatAt: activeAt, pid: process.pid, requestFingerprint: 'a'.repeat(64)
+  };
+  await fs.writeFile(taskStatePath, JSON.stringify(activeRetryTaskState), { mode: 0o600 });
+  const activeRequest = { ...retryContinuationInput, requestKey: 'continuation-retry-active' };
+  await assert.rejects(submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId, activeRequest),
+    /requires an idle task/);
+  assert.equal(await readLaunchCount(), launchesBeforeRetryAuthority,
+    'an active predecessor task must launch nothing');
+  assert.equal(await fs.stat(continuationLedgerPath(taskId, dataRoot, activeRequest.requestKey)).catch(() => undefined),
+    undefined, 'active predecessor must fail before decision publication');
+  await fs.writeFile(taskStatePath, pristineRetryTaskState, { mode: 0o600 });
+
+  const continuationAttemptRetry = await submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId,
+    retryContinuationInput);
+  assert.equal(continuationAttemptRetry.decision.retryPreviousAttemptOperationId, 'continuation-retry-failed');
+  const continuationRetryRun = await waitForCodingTaskRun({ dataRoot }, taskId, 'continuation-retry-success', { timeoutMs: 5_000 });
+  assert.equal(continuationRetryRun.status, 'waiting_review');
+  assert.equal(continuationRetryRun.threadId, retryContinuationInput.expectedThreadId);
+  assert.equal(continuationRetryRun.sessionId, retryContinuationInput.expectedSessionId);
+  const retryDecisionPath = path.join(continuationLedgerPath(taskId, dataRoot, retryContinuationInput.requestKey), 'decision.json');
+  const pristineRetryDecision = await fs.readFile(retryDecisionPath, 'utf8');
+  const tamperedRetryDecision = JSON.parse(pristineRetryDecision);
+  tamperedRetryDecision.retryPreviousAttemptOperationId = 'continuation-retry-tampered';
+  await fs.writeFile(retryDecisionPath, JSON.stringify(tamperedRetryDecision), { mode: 0o600 });
+  const launchesBeforeRetryDecisionTamper = await readLaunchCount();
+  await assert.rejects(submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId,
+    retryContinuationInput), /continuation decision identity or fingerprint mismatch/);
+  assert.equal(await readLaunchCount(), launchesBeforeRetryDecisionTamper,
+    'a tampered retry decision must launch nothing');
+  await fs.writeFile(retryDecisionPath, pristineRetryDecision, { mode: 0o600 });
+  const continuationRetryReplay = await submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId,
+    retryContinuationInput);
+  assert.equal(continuationRetryReplay.reused, true);
+  assert.equal(continuationRetryReplay.decision.fingerprint, continuationAttemptRetry.decision.fingerprint);
+  assert.equal(await readLaunchCount(), launchesBeforeRetryAuthority + 1);
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+
+  const duplicateTurnTask = await store.get(taskId);
+  const duplicateTurnInput = {
+    requestKey: 'continuation-duplicate-turn-request', operationId: 'continuation-duplicate-turn', turnOrdinal: 4,
+    previousOperationId: 'continuation-retry-success', prompt: 'Return a distinct continuation turn identity.',
+    expectedRevision: duplicateTurnTask.revision, executorEpoch: duplicateTurnTask.executorLease.epoch,
+    leaseId: duplicateTurnTask.executorLease.leaseId, expectedThreadId: duplicateTurnTask.codexThreadId,
+    expectedSessionId: duplicateTurnTask.codexSessionId, expectedPreviousTurnId: duplicateTurnTask.codexTurnId,
+    model: 'gpt-5.6-sol', effort: 'high', timeoutMs: 5_000
+  };
+  assert.equal(duplicateTurnInput.expectedPreviousTurnId, 'turn-retry');
+  const duplicateTurnLaunches = await readLaunchCount();
+  await submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId, duplicateTurnInput);
+  const duplicateTurnRun = await waitForCodingTaskRun({ dataRoot }, taskId, 'continuation-duplicate-turn', { timeoutMs: 5_000 });
+  assert.equal(duplicateTurnRun.status, 'failed', 'a replayed prior turn ID must not become semantic success');
+  assert.equal(duplicateTurnRun.failure.code, 'identity_mismatch');
+  assert.equal(duplicateTurnRun.failure.category, 'identity');
+  assert.equal(duplicateTurnRun.failure.retryable, false);
+  assert.equal(duplicateTurnRun.failure.turnStarted, true);
+  assert.equal(duplicateTurnRun.turnId, duplicateTurnInput.expectedPreviousTurnId);
+  assert.equal(await readLaunchCount(), duplicateTurnLaunches + 1);
+  await waitFor(async () => {
+    const state = await store.get(taskId);
+    return state.activeOperation === undefined && state.lifecycle === 'failed' &&
+      state.lastCompletedOperation?.operationId === 'continuation-duplicate-turn';
+  });
+
+  const afterTurnTask = await store.get(taskId);
+  await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    operationId: 'failure-after-turn', prompt: 'Return an authoritative failed turn.',
+    expectedRevision: afterTurnTask.revision, executorEpoch: afterTurnTask.executorLease.epoch,
+    leaseId: afterTurnTask.executorLease.leaseId, threadId: afterTurnTask.codexThreadId,
+    expectedSessionId: afterTurnTask.codexSessionId, timeoutMs: 5_000
+  });
+  const afterTurnFailure = await waitForCodingTaskRun({ dataRoot }, taskId, 'failure-after-turn', { timeoutMs: 5_000 });
+  assert.equal(afterTurnFailure.status, 'failed');
+  assert.equal(afterTurnFailure.failure.code, 'turn_failed');
+  assert.equal(afterTurnFailure.failure.retryable, false);
+  assert.equal(afterTurnFailure.failure.outcomeKnown, true);
+  assert.equal(afterTurnFailure.failure.turnStarted, true);
+  assert(afterTurnFailure.turnStartRequestedAt);
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+
+  const timeoutTask = await store.get(taskId);
+  await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    operationId: 'failure-timeout', prompt: 'Time out after an authoritative turn start.',
+    expectedRevision: timeoutTask.revision, executorEpoch: timeoutTask.executorLease.epoch,
+    leaseId: timeoutTask.executorLease.leaseId, threadId: timeoutTask.codexThreadId,
+    expectedSessionId: timeoutTask.codexSessionId, timeoutMs: 1_000
+  });
+  const timeoutFailure = await waitForCodingTaskRun({ dataRoot }, taskId, 'failure-timeout', { timeoutMs: 5_000 });
+  assert.equal(timeoutFailure.status, 'failed');
+  assert.equal(timeoutFailure.failure.code, 'turn_timeout');
+  assert.equal(timeoutFailure.failure.retryable, false);
+  assert.equal(timeoutFailure.failure.outcomeKnown, false);
+  assert.equal(timeoutFailure.failure.turnStarted, true);
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+
+  const unknownTask = await store.get(taskId);
+  await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    operationId: 'failure-unknown', prompt: 'Lose transport after turn request publication.',
+    expectedRevision: unknownTask.revision, executorEpoch: unknownTask.executorLease.epoch,
+    leaseId: unknownTask.executorLease.leaseId, threadId: unknownTask.codexThreadId,
+    expectedSessionId: unknownTask.codexSessionId, timeoutMs: 5_000
+  });
+  const unknownFailure = await waitForCodingTaskRun({ dataRoot }, taskId, 'failure-unknown', { timeoutMs: 5_000 });
+  assert.equal(unknownFailure.status, 'failed');
+  assert.equal(unknownFailure.failure.code, 'unknown');
+  assert.equal(unknownFailure.failure.retryable, false);
+  assert.equal(unknownFailure.failure.outcomeKnown, false);
+  assert.equal(unknownFailure.failure.turnStarted, false);
+  assert(unknownFailure.turnStartRequestedAt);
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
 
   const persistedFirstRun = await getCodingTaskRun({ dataRoot }, taskId, 'run-one');
   assert.equal(persistedFirstRun.status, 'waiting_review');
@@ -773,6 +1037,11 @@ function taskDirFor(taskId, dataRoot) {
   return path.join(dataRoot, 'tasks', taskId);
 }
 
+function continuationLedgerPath(taskId, dataRoot, requestKey) {
+  return path.join(taskDirFor(taskId, dataRoot), 'continuations',
+    `request_${createHash('sha256').update(requestKey).digest('hex').slice(0, 32)}`);
+}
+
 function withRunFingerprint(definition) {
   const fingerprint = createHash('sha256').update(JSON.stringify({
     schema: 'codexpro-coding-task-run-v1', taskId: definition.taskId,
@@ -781,6 +1050,7 @@ function withRunFingerprint(definition) {
     leaseId: definition.leaseId, threadId: definition.threadId ?? null,
     expectedSessionId: definition.expectedSessionId ?? null,
     continuationFingerprint: definition.continuationFingerprint ?? null,
+    ...(definition.expectedPreviousTurnId ? { expectedPreviousTurnId: definition.expectedPreviousTurnId } : {}),
     model: definition.model, effort: definition.effort, timeoutMs: definition.timeoutMs,
     worktreeRoot: definition.worktreeRoot, codexBinary: definition.codexBinary,
     maxLogBytes: definition.maxLogBytes, createdAt: definition.createdAt

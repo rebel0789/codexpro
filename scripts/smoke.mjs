@@ -240,8 +240,8 @@ const initialized = await client.request('initialize', {
   clientInfo: { name: 'codexpro-smoke', version: '0.1.0' }
 });
 const serverInstructionText = initialized.instructions ?? '';
-if (/Persistent Goals[^.]*one-turn\/no-retry/i.test(serverInstructionText) || !/1-4 upfront-approved turns/i.test(serverInstructionText) || !/scheduler never invents or mutates/i.test(serverInstructionText) || !/only after the final authorized turn/i.test(serverInstructionText)) {
-  throw new Error(`server instructions did not describe Phase 9 continuation authority: ${serverInstructionText}`);
+if (/Persistent Goals[^.]*zero-retry/i.test(serverInstructionText) || !/1-4 upfront-approved semantic turns/i.test(serverInstructionText) || !/0-2 total fresh retries per work item/i.test(serverInstructionText) || !/Same-operation recovery is not a retry/i.test(serverInstructionText) || !/scheduler never invents or mutates/i.test(serverInstructionText) || !/only after the final authorized turn/i.test(serverInstructionText)) {
+  throw new Error(`server instructions did not describe Phase 10 turn and retry authority: ${serverInstructionText}`);
 }
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
@@ -256,6 +256,12 @@ if (goalPlatformConfig.structuredContent.goalOrchestration?.supported !== goalOr
 if (goalPlatformConfig.structuredContent.goalScheduling?.persistentSupported !== goalOrchestrationSupported() || goalPlatformConfig.structuredContent.goalScheduling?.executionEnabled !== false || goalPlatformConfig.structuredContent.goalScheduling?.usesShell !== false || goalPlatformConfig.structuredContent.goalScheduling?.refreshRelaunches !== false) {
   throw new Error(`server_config did not honestly report persistent scheduling gates: ${JSON.stringify(goalPlatformConfig.structuredContent.goalScheduling)}`);
 }
+if (goalOrchestrationSupported() && (goalPlatformConfig.structuredContent.goalScheduling?.persistentContract?.maxRetriesPerWorker !== '0-2 total fresh retries per work item' || JSON.stringify(goalPlatformConfig.structuredContent.goalScheduling?.persistentContract?.retryBackoffMs) !== '[1000,5000]' || goalPlatformConfig.structuredContent.goalScheduling?.persistentContract?.retryAlgorithm !== 'infra-pre-turn-v1' || JSON.stringify(goalPlatformConfig.structuredContent.goalScheduling?.persistentContract?.retryableFailures) !== JSON.stringify([
+  { code: 'app_server_startup', category: 'infrastructure', phase: 'runner_start', outcomeKnown: true, turnStarted: false },
+  { code: 'app_server_initialize_transport', category: 'infrastructure', phase: 'app_server_initialize', outcomeKnown: true, turnStarted: false }
+]))) {
+  throw new Error(`server_config did not expose the fixed retry contract: ${JSON.stringify(goalPlatformConfig.structuredContent.goalScheduling?.persistentContract)}`);
+}
 if (toolNames.includes('start_goal') || toolNames.includes('resume_goal')) {
   throw new Error(`execution-gated Goal tools leaked under bash=safe: ${toolNames.filter((name) => ['start_goal', 'resume_goal'].includes(name)).join(', ')}`);
 }
@@ -267,13 +273,60 @@ if (goalOrchestrationSupported() && !JSON.stringify(proposeDescriptor?.inputSche
   throw new Error(`propose_goal schema did not advertise persistent policy: ${JSON.stringify(proposeDescriptor?.inputSchema)}`);
 }
 const proposeSchemaText = JSON.stringify(proposeDescriptor?.inputSchema);
-if (goalOrchestrationSupported() && (!proposeSchemaText.includes('continuation_intents') || !proposeSchemaText.includes('intent_id') || !proposeSchemaText.includes('max_turns_per_worker') || !proposeSchemaText.includes('maximum":4'))) {
-  throw new Error(`propose_goal schema did not expose bounded continuation intents and the four-turn total cap: ${proposeSchemaText}`);
+if (goalOrchestrationSupported() && (!proposeSchemaText.includes('continuation_intents') || !proposeSchemaText.includes('intent_id') || !proposeSchemaText.includes('max_turns_per_worker') || !proposeSchemaText.includes('maximum":4') || !proposeSchemaText.includes('max_retries_per_worker') || !proposeSchemaText.includes('maximum":2'))) {
+  throw new Error(`propose_goal schema did not expose bounded semantic turns and the two-retry cap: ${proposeSchemaText}`);
+}
+const serverSource = await fs.readFile(path.resolve('src/server.ts'), 'utf8');
+const publicFailureStart = serverSource.indexOf('failure: attempt.failure ? {');
+const publicFailureEnd = serverSource.indexOf('} : null', publicFailureStart);
+const publicFailureProjection = publicFailureStart >= 0 && publicFailureEnd > publicFailureStart
+  ? serverSource.slice(publicFailureStart, publicFailureEnd)
+  : '';
+if (!publicFailureProjection || publicFailureProjection.includes('summary:') || !publicFailureProjection.includes('summarySha256:') || !publicFailureProjection.includes('outcomeKnown:') || !publicFailureProjection.includes('turnStarted:')) {
+  throw new Error(`public attempt failure projection must omit raw summary/private paths while retaining tuple and summary hash authority: ${publicFailureProjection}`);
+}
+const goalStructuredStart = serverSource.indexOf('function goalStructured(');
+const goalStructuredEnd = serverSource.indexOf('\nfunction goalSchedulerStructured(', goalStructuredStart);
+const goalStructuredProjection = goalStructuredStart >= 0 && goalStructuredEnd > goalStructuredStart
+  ? serverSource.slice(goalStructuredStart, goalStructuredEnd)
+  : '';
+if (!goalStructuredProjection || goalStructuredProjection.includes('source_root:') || goalStructuredProjection.includes('integration_worktree_root:')) {
+  throw new Error('public Goal structured results must not expose source or private integration absolute paths');
+}
+if (!serverSource.includes('review: publicReview') || !serverSource.includes('const { worktreeRoot: _privateWorktreeRoot, ...publicReview } = review;')) {
+  throw new Error('review_goal must omit the private integration worktree root from its public review snapshot');
+}
+const publicGoalProjectionStart = serverSource.indexOf('function publicGoalWork(');
+const publicGoalProjectionEnd = serverSource.indexOf('\nfunction goalText(', publicGoalProjectionStart);
+const publicGoalProjectionSource = publicGoalProjectionStart >= 0 && publicGoalProjectionEnd > publicGoalProjectionStart
+  ? serverSource.slice(publicGoalProjectionStart, publicGoalProjectionEnd)
+  : '';
+if (!publicGoalProjectionSource || /\berror\s*:/.test(publicGoalProjectionSource) || publicGoalProjectionSource.includes('safeGoalSummary(runtime?.error') || !publicGoalProjectionSource.includes('...publicGoalError(work.error)') || !publicGoalProjectionSource.includes('error_sha256: publicGoalError(runtime?.error')) {
+  throw new Error('public Goal status projections must expose only error presence, never raw error text or private paths');
+}
+const goalMutationErrorStart = serverSource.indexOf('async function goalMutationErrorResult(');
+const goalMutationErrorEnd = serverSource.indexOf('\nfunction boundedGoalText(', goalMutationErrorStart);
+const goalMutationErrorProjection = goalMutationErrorStart >= 0 && goalMutationErrorEnd > goalMutationErrorStart
+  ? serverSource.slice(goalMutationErrorStart, goalMutationErrorEnd)
+  : '';
+if (!goalMutationErrorProjection.includes('projection: projection ? publicGoalProjection(projection) : null') || goalMutationErrorProjection.includes('projection: projection ?? null')) {
+  throw new Error('Goal mutation failures must not reattach the raw persisted projection after building the safe Goal projection');
+}
+if (serverSource.includes('projection: result.projection,')) {
+  throw new Error('Goal projection success results must use the same safe public projection instead of returning persisted error text');
+}
+const publicProjectionStart = serverSource.indexOf('function publicGoalProjection(');
+const publicProjectionEnd = serverSource.indexOf('\nfunction publicGoalWork(', publicProjectionStart);
+const publicProjectionSource = publicProjectionStart >= 0 && publicProjectionEnd > publicProjectionStart
+  ? serverSource.slice(publicProjectionStart, publicProjectionEnd)
+  : '';
+if (!publicProjectionSource.includes('changedPaths: projection.changedPaths.slice()') || !publicProjectionSource.includes('changedPathCount: projection.changedPaths.length')) {
+  throw new Error('safe Goal projections must preserve exact policy-validated relative changed-path evidence and its authoritative count');
 }
 if (tools.tools.find((tool) => tool.name === 'approve_goal')?.annotations?.destructiveHint !== false || tools.tools.find((tool) => tool.name === 'cancel_goal')?.annotations?.destructiveHint !== true) {
   throw new Error('Goal approval/cancel annotations do not match their actual effects.');
 }
-const toolCardUri = 'ui://widget/codexpro-tool-card-v16.html';
+const toolCardUri = 'ui://widget/codexpro-tool-card-v17.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
@@ -468,6 +521,7 @@ const toolCard = resources.resources.find((resource) => resource.uri === toolCar
 if (!toolCard) throw new Error(`missing tool-card resource: ${toolCardUri}`);
 if (toolCard.mimeType !== 'text/html;profile=mcp-app') throw new Error(`unexpected tool-card mime type: ${toolCard.mimeType}`);
 const legacyToolCardUris = [
+  'ui://widget/codexpro-tool-card-v16.html',
   'ui://widget/codexpro-tool-card-v15.html',
   'ui://widget/codexpro-tool-card-v14.html',
   'ui://widget/codexpro-tool-card-v13.html',
@@ -598,6 +652,37 @@ const inventory = await client.request('tools/call', { name: 'codexpro_inventory
 if (inventory.structuredContent.codexpro_tool !== 'codexpro_inventory') throw new Error('inventory result was not tagged for widget rendering');
 const opened = await client.request('tools/call', { name: 'open_workspace', arguments: { root: tmp, include_tree: true } });
 const ws = opened.structuredContent.workspace_id;
+if (goalOrchestrationSupported()) {
+  const retryProposalBase = {
+    workspace_id: ws,
+    title: 'Retry policy smoke',
+    goal: 'Verify the exact bounded persistent retry contract.',
+    completion_criteria: ['The private checkpoint is ready for Pro review.'],
+    execution_policy: 'persistent',
+    workspace_policy: 'isolated',
+    limits: { max_turns_per_worker: 1, max_retries_per_worker: 2 },
+    permissions: { file_globs: ['src/**'], commands: [], network: false, source_effects: { apply: false, commit: false, push: false, draft_pr: false } },
+    work: [{ work_id: 'work_retry_policy', title: 'Retry policy', goal: 'Exercise the exact approved task once.', acceptance_criteria: ['The task result is bounded.'], continuation_intents: [] }]
+  };
+  const persistentRetryProposal = await client.request('tools/call', { name: 'propose_goal', arguments: { ...retryProposalBase, goal_key: 'phase10-persistent-retry-policy' } });
+  const retryPolicy = persistentRetryProposal.structuredContent?.goal?.retryPolicy;
+  if (persistentRetryProposal.isError || retryPolicy?.algorithm !== 'infra-pre-turn-v1' || JSON.stringify(retryPolicy?.backoffMs) !== '[1000,5000]' || !/^[0-9a-f]{64}$/.test(retryPolicy?.fingerprint ?? '') || JSON.stringify(retryPolicy?.retryableFailures) !== JSON.stringify([
+    { code: 'app_server_startup', category: 'infrastructure', phase: 'runner_start', outcomeKnown: true, turnStarted: false },
+    { code: 'app_server_initialize_transport', category: 'infrastructure', phase: 'app_server_initialize', outcomeKnown: true, turnStarted: false }
+  ])) {
+    throw new Error(`persistent retry proposal did not return the authoritative retry policy: ${JSON.stringify(persistentRetryProposal.structuredContent)}`);
+  }
+  const goalsBeforeRejectedRetry = await client.request('tools/call', { name: 'list_goals', arguments: { limit: 100 } });
+  await expectToolError('propose_goal', { ...retryProposalBase, goal_key: 'phase10-supervised-retry-rejected', execution_policy: 'supervised' }, /Supervised Goals support exactly one semantic turn, zero retries/i);
+  const goalsAfterRejectedRetry = await client.request('tools/call', { name: 'list_goals', arguments: { limit: 100 } });
+  if (JSON.stringify(goalsAfterRejectedRetry.structuredContent) !== JSON.stringify(goalsBeforeRejectedRetry.structuredContent)) {
+    throw new Error('rejected supervised retry proposal mutated durable Goal state');
+  }
+  const compactGoalList = JSON.stringify(goalsAfterRejectedRetry.structuredContent);
+  if (!compactGoalList.includes('retriesUsed') || compactGoalList.includes('retryPolicy') || compactGoalList.includes('attempts') || compactGoalList.includes('Verify the exact bounded persistent retry contract.')) {
+    throw new Error(`list_goals did not preserve the compact retry-count-only contract: ${compactGoalList}`);
+  }
+}
 const viewedImage = await client.request('tools/call', { name: 'view_image', arguments: { workspace_id: ws, path: 'pixel.png' } });
 const imagePart = viewedImage.content?.find?.((part) => part.type === 'image');
 if (!imagePart?.data || imagePart.mimeType !== 'image/png' || viewedImage.structuredContent.width !== 1 || viewedImage.structuredContent.height !== 1) {

@@ -100,6 +100,10 @@ export interface CodexTurnResult extends CodexThreadIdentity {
 }
 
 export type CodexAppServerEvent =
+  | { type: "app_server_process_spawned" }
+  | { type: "app_server_initialize_requested" }
+  | { type: "thread_establish_requested"; mode: "start" | "resume"; threadId?: string }
+  | { type: "turn_start_requested"; threadId: string }
   | { type: "turn_started"; threadId: string; turnId: string }
   | { type: "agent_delta"; threadId: string; turnId: string; itemId: string; delta: string }
   | { type: "item_completed"; threadId: string; turnId: string; itemType: string; itemId: string }

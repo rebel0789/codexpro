@@ -68,6 +68,24 @@ export class CodexAppServerProtocolError extends Error {
   }
 }
 
+export class CodexAppServerInitializeTransportError extends Error {
+  readonly stage = "initialize" as const;
+  readonly kind = "transport" as const;
+  constructor(message: string) {
+    super(redactSensitiveText(message));
+    this.name = "CodexAppServerInitializeTransportError";
+  }
+}
+
+export class CodexAppServerRpcError extends Error {
+  readonly method: string;
+  constructor(method: string, message: string) {
+    super(redactSensitiveText(message));
+    this.name = "CodexAppServerRpcError";
+    this.method = method;
+  }
+}
+
 export class CodexAppServerClient {
   private readonly options: Required<
     Pick<
@@ -120,14 +138,21 @@ export class CodexAppServerClient {
     if (this.child) throw new Error("Codex app-server connection is already starting.");
     this.cwd = await realDirectory(this.options.cwd);
     this.spawnServer();
-    await this.request("initialize", {
-      clientInfo: this.clientInfo,
-      capabilities: {
-        experimentalApi: false,
-        requestAttestation: false,
-        extensions: null
-      }
-    });
+    this.emit({ type: "app_server_process_spawned" });
+    this.emit({ type: "app_server_initialize_requested" });
+    try {
+      await this.request("initialize", {
+        clientInfo: this.clientInfo,
+        capabilities: {
+          experimentalApi: false,
+          requestAttestation: false,
+          extensions: null
+        }
+      });
+    } catch (error) {
+      if (error instanceof CodexAppServerProtocolError || error instanceof CodexAppServerRpcError) throw error;
+      throw new CodexAppServerInitializeTransportError(errorMessage(error));
+    }
     this.notify("initialized");
     this.initialized = true;
   }
@@ -148,6 +173,8 @@ export class CodexAppServerClient {
       sandbox: "workspace-write"
     };
     const requestedThreadId = options.threadId?.trim();
+    this.emit({ type: "thread_establish_requested", mode: requestedThreadId ? "resume" : "start",
+      ...(requestedThreadId ? { threadId: requestedThreadId } : {}) });
     const result = asObject(
       await this.request(requestedThreadId ? "thread/resume" : "thread/start", {
         ...(requestedThreadId ? { threadId: requestedThreadId } : { ephemeral: false, threadSource: "codexpro" }),
@@ -181,6 +208,7 @@ export class CodexAppServerClient {
     this.startingTurn = true;
     let response: JsonObject;
     try {
+      this.emit({ type: "turn_start_requested", threadId: this.identity.threadId });
       response = asObject(await this.request("turn/start", {
         threadId: this.identity.threadId,
         ...(options.clientUserMessageId ? { clientUserMessageId: options.clientUserMessageId } : {}),
@@ -372,7 +400,7 @@ export class CodexAppServerClient {
       clearTimeout(pending.timer);
       this.pending.delete(id);
       if (message.error !== undefined) {
-        pending.reject(new Error(`${pending.method} failed: ${rpcErrorMessage(message.error)}`));
+        pending.reject(new CodexAppServerRpcError(pending.method, `${pending.method} failed: ${rpcErrorMessage(message.error)}`));
       } else if ("result" in message) {
         pending.resolve(message.result);
       } else {

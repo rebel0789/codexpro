@@ -9,6 +9,7 @@ import {
   GOAL_STATE_VERSION,
   assertGoalDag,
   computeGoalContinuationIntentFingerprint,
+  computeGoalRetryPolicyFingerprint,
   parseGoalState,
   validateGoalId,
   validateGoalContinuationIntentId,
@@ -142,7 +143,6 @@ function normalizeLimits(limits: GoalResourceLimits): GoalResourceLimits {
     maxRetriesPerWorker: integer(limits.maxRetriesPerWorker, "maxRetriesPerWorker", 0, 10),
     maxLogBytes: integer(limits.maxLogBytes, "maxLogBytes", 65_536, 104_857_600)
   };
-  if (normalized.maxRetriesPerWorker !== 0) throw new Error("Goal execution does not support automatic retries.");
   return normalized;
 }
 
@@ -163,13 +163,14 @@ function normalizePermissions(permissions: GoalPermissions): GoalPermissions {
   };
 }
 
-function contractShape(state: Pick<GoalState, "version" | "goalId" | "goalKey" | "title" | "goal" | "exclusions" | "completionCriteria" | "verification" | "executionPolicy" | "workspacePolicy" | "workerModel" | "workerEffort" | "limits" | "permissions" | "sourceRoot" | "sourceGitCommonDir" | "baseSha" | "sourceDirtyAtCreation" | "sourceStatusEntryCountAtCreation" | "sourceUncommittedChangesIncluded" | "integrationWorktreeRoot" | "work"> & Partial<Pick<GoalState, "contentPolicy" | "live">>) {
+function contractShape(state: Pick<GoalState, "version" | "goalId" | "goalKey" | "title" | "goal" | "exclusions" | "completionCriteria" | "verification" | "executionPolicy" | "workspacePolicy" | "workerModel" | "workerEffort" | "limits" | "permissions" | "sourceRoot" | "sourceGitCommonDir" | "baseSha" | "sourceDirtyAtCreation" | "sourceStatusEntryCountAtCreation" | "sourceUncommittedChangesIncluded" | "integrationWorktreeRoot" | "work"> & Partial<Pick<GoalState, "contentPolicy" | "retryPolicy" | "live">>) {
   return {
     version: state.version, goalId: state.goalId, goalKey: state.goalKey, title: state.title, goal: state.goal,
     exclusions: state.exclusions, completionCriteria: state.completionCriteria, verification: state.verification,
     executionPolicy: state.executionPolicy, workspacePolicy: state.workspacePolicy, workerModel: state.workerModel,
     workerEffort: state.workerEffort, limits: state.limits, permissions: state.permissions,
     ...(state.contentPolicy ? { contentPolicy: state.contentPolicy } : {}),
+    ...(state.retryPolicy ? { retryPolicy: state.retryPolicy } : {}),
     sourceRoot: state.sourceRoot, sourceGitCommonDir: state.sourceGitCommonDir, baseSha: state.baseSha,
     sourceDirtyAtCreation: state.sourceDirtyAtCreation, sourceStatusEntryCountAtCreation: state.sourceStatusEntryCountAtCreation,
     sourceUncommittedChangesIncluded: state.sourceUncommittedChangesIncluded,
@@ -221,10 +222,10 @@ export async function proposeGoal(
     if (permissions.commands.length || Object.values(permissions.sourceEffects).some(Boolean)) {
       throw new Error("Persistent Goal execution requires empty commands and all sourceEffects=false.");
     }
-    if (limits.maxTurnsPerWorker > 4 || work.some((item) => (item.continuationIntents?.length ?? 0) !== limits.maxTurnsPerWorker - 1)) {
+    if (limits.maxTurnsPerWorker > 4 || limits.maxRetriesPerWorker > 2 || work.some((item) => (item.continuationIntents?.length ?? 0) !== limits.maxTurnsPerWorker - 1)) {
       throw new Error("Persistent Goal maxTurnsPerWorker must be 1-4 and equal one initial turn plus every work item's approved continuation intents.");
     }
-  } else if (limits.maxTurnsPerWorker !== 1 || work.some((item) => item.continuationIntents?.length)) {
+  } else if (limits.maxTurnsPerWorker !== 1 || limits.maxRetriesPerWorker !== 0 || work.some((item) => item.continuationIntents?.length)) {
     throw new Error("Supervised Goal execution remains a one-turn contract without persistent continuation intents.");
   }
   if (input.workspacePolicy === "live" && !permissions.sourceEffects.apply) {
@@ -246,6 +247,10 @@ export async function proposeGoal(
     limits,
     permissions,
     ...(contentPolicy ? { contentPolicy } : {}),
+    ...(input.executionPolicy === "persistent" ? { retryPolicy: { version: 1 as const, algorithm: "infra-pre-turn-v1" as const, backoffMs: [1000, 5000] as [1000, 5000], retryableFailures: [
+      { code: "app_server_startup" as const, category: "infrastructure" as const, phase: "runner_start" as const, outcomeKnown: true as const, turnStarted: false as const },
+      { code: "app_server_initialize_transport" as const, category: "infrastructure" as const, phase: "app_server_initialize" as const, outcomeKnown: true as const, turnStarted: false as const }
+    ], fingerprint: computeGoalRetryPolicyFingerprint(limits.maxRetriesPerWorker) } } : {}),
     sourceRoot: identity.sourceRoot,
     sourceGitCommonDir: identity.commonDir,
     baseSha: identity.baseSha,

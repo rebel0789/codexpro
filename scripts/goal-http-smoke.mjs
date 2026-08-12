@@ -168,7 +168,7 @@ process.stdin.on('data', (chunk) => {
   assert.match(goalId, /^goal_[a-f0-9]{24}$/);
   assert.equal(proposed.structuredContent.lifecycle, 'proposed');
   assert.equal(proposed.structuredContent.execution_started, false);
-  await assert.rejects(fs.stat(proposed.structuredContent.integration_worktree_root), { code: 'ENOENT' });
+  assert.equal('source_root' in proposed.structuredContent, false); assert.equal('integration_worktree_root' in proposed.structuredContent, false);
   assert.equal(git(sourceRoot, ['status', '--porcelain=v1', '--untracked-files=all']), '');
 
   const approved = await callTool(client, 'approve_goal', {
@@ -957,7 +957,15 @@ async function waitForGoalWork(mcpClient, goalId, workId, wanted = 'waiting_revi
   while (Date.now() < deadline) {
     refreshed = await callTool(mcpClient, 'refresh_goal', { goal_id: goalId });
     const item = refreshed.structuredContent.work.find((candidate) => candidate.workId === workId);
-    if (item?.status === wanted || (wanted === 'symlink_rejected' && /ELOOP|symbolic link/i.test(item?.error || ''))) return refreshed;
+    if (item?.status === wanted) return refreshed;
+    if (wanted === 'symlink_rejected') {
+      const privateState = JSON.parse(await fs.readFile(path.join(dataRoot, 'goals', goalId, 'state.json'), 'utf8')); const privateItem = privateState.work.find((candidate) => candidate.workId === workId); const privateError = privateItem?.error || privateState.error || '';
+      if (/ELOOP|symbolic link/i.test(privateError)) {
+        assert.equal(item?.hasError, true); assert.match(item?.errorSha256 || '', /^[0-9a-f]{64}$/); assert.equal('error' in item, false);
+        const publicPayload = JSON.stringify(refreshed); assert.equal(publicPayload.includes(privateError), false); assert.equal(publicPayload.includes(dataRoot), false); assert.equal(publicPayload.includes(fixture), false);
+        return refreshed;
+      }
+    }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new Error(`Timed out waiting for ${workId} to reach ${wanted}: ${JSON.stringify(refreshed?.structuredContent?.work)}`);

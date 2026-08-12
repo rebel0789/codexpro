@@ -1,5 +1,6 @@
-export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v16.html";
+export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v17.html";
 export const TOOL_CARD_LEGACY_URIS = [
+  "ui://widget/codexpro-tool-card-v16.html",
   "ui://widget/codexpro-tool-card-v15.html",
   "ui://widget/codexpro-tool-card-v14.html",
   "ui://widget/codexpro-tool-card-v13.html",
@@ -850,6 +851,9 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const workspacePolicy = asText(goal.workspacePolicy || goal.workspace_policy, "isolated").toLowerCase();
         const executionPolicy = asText(goal.executionPolicy || goal.execution_policy, "supervised").toLowerCase();
         const persistent = executionPolicy === "persistent";
+        const limits = record(goal.limits);
+        const retryPolicy = record(goal.retryPolicy || goal.retry_policy);
+        const maxRetries = optionalNumber(limits.maxRetriesPerWorker, limits.max_retries_per_worker) ?? 0;
         const scheduler = record(data.scheduler || goal.scheduler_health);
         const schedulerAlive = data.scheduler_alive === true || scheduler.runner_alive === true;
         const schedulerStranded = data.scheduler_stranded === true || scheduler.stranded === true;
@@ -864,9 +868,11 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const projectionStatus = asText(projection.status, liveAllowed ? "not projected" : "not enabled").toLowerCase();
         const integrationHead = asText(goal.integrationHeadSha || goal.integration_head_sha || data.integration_head_sha, "Not integrated");
         const projectedHead = asText(live.projectedIntegrationSha || live.projected_integration_sha || projection.toIntegrationSha || projection.to_integration_sha || projection.integrationHeadSha || projection.integration_head_sha || projection.targetIntegrationHeadSha || projection.target_integration_head_sha, "");
+        const hasBackoff = work.some((item) => toArray(item.turns).some((turn) => toArray(record(turn).attempts).some((attempt) => asText(record(attempt).status) === "backoff")));
         const activity = approvalStatus === "pending" ? "The persisted contract is waiting for explicit approval."
           : lifecycle === "approved" ? "The exact contract is approved; execution remains inert until start_goal."
           : persistent && lifecycle === "waiting_review" ? "Automatic private integration is complete; Pro review and final judgment remain explicit."
+          : persistent && hasBackoff ? "A fresh attempt is waiting for its approved deterministic retry deadline; the semantic turn has not been consumed."
           : persistent && schedulerStranded ? "The passive health observation suggests the detached scheduler needs explicit recovery."
           : persistent && schedulerAlive ? "The detached scheduler is observed alive under the approved persistent contract."
           : "The local engine is reporting authoritative Goal state.";
@@ -881,14 +887,19 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
           const authorizedTurns = optionalNumber(item.authorizedTurnCount, item.authorized_turn_count) ?? (1 + toArray(item.continuationIntents || item.continuation_intents).length);
           const completedTurns = optionalNumber(item.completedTurnCount, item.completed_turn_count) ?? turns.filter((turn) => asText(turn.status) === "succeeded").length;
           const turnMeta = persistent ? " · turn " + Math.min(turns.length, authorizedTurns) + "/" + authorizedTurns + " · " + completedTurns + " completed" : "";
+          const attemptCount = optionalNumber(item.attemptCount, item.attempt_count) ?? turns.reduce((count, turn) => count + Math.max(1, toArray(record(turn).attempts).length), 0);
+          const retriesUsed = optionalNumber(item.retriesUsed, item.retries_used) ?? Math.max(0, attemptCount - turns.length);
+          const retryMeta = persistent ? " · " + attemptCount + " attempt" + (attemptCount === 1 ? "" : "s") + " · retries " + retriesUsed + "/" + maxRetries : "";
           return '<li><span class="task-list-mark ' + taskTone(asText(item.status, "planned")) + '" aria-hidden="true"></span><div class="task-list-main"><div class="task-list-title">' +
             escapeHtml(asText(item.title, item.workId || item.work_id || "Work")) + '</div><div class="task-list-meta">' + escapeHtml(asText(item.workId || item.work_id, "") + (dependencies.length ? " · after " + dependencies.join(", ") : "")) +
-            escapeHtml(turnMeta) + '</div></div><div class="task-list-status">' + escapeHtml(friendly(asText(item.status, "planned"))) + '</div></li>';
+            escapeHtml(turnMeta + retryMeta) + '</div></div><div class="task-list-status">' + escapeHtml(friendly(asText(item.status, "planned"))) + '</div></li>';
         }).join("");
         const workBlock = rows ? '<ul class="task-list">' + rows + '</ul>' : '<div class="empty">No work items.</div>';
         const context = factRows([
           ["Approval", friendly(approvalStatus)],
           ["Policy", friendly(executionPolicy) + " · " + friendly(workspacePolicy)],
+          ["Turns / retries", persistent ? "1-4 semantic turns · " + maxRetries + " total fresh retries per work item" : "1 semantic turn · no retries"],
+          ["Retry policy", persistent ? friendly(asText(retryPolicy.algorithm, "infra-pre-turn-v1")) + " · " + toArray(retryPolicy.backoffMs || retryPolicy.backoff_ms).map((value) => number(value) + "ms").join(" / ") : "Not applicable"],
           ["Scheduling", persistent ? (schedulerAlive ? "Observed alive" : schedulerStranded ? "Observed stranded · recovery needed" : friendly(asText(scheduler.status, "not started"))) : "Explicit Pro actions"],
           ["Live permission", !liveSupported ? "Unavailable on this platform" : liveAllowed ? "Approved source projection" : "Not approved"],
           ["Revision", goal.revision],
@@ -902,6 +913,16 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const reviewFold = diff ? fold("Integrated diff", codeBlock("Diff", diff, true, 6000), false) : "";
         const criteria = toArray(goal.completionCriteria || goal.completion_criteria).map(asText).filter(Boolean);
         const criteriaFold = criteria.length ? fold("Completion criteria", list(criteria), false) : "";
+        const retryableFailures = toArray(retryPolicy.retryableFailures || retryPolicy.retryable_failures).map((entry) => {
+          const value = record(entry);
+          return friendly(asText(value.code, "unknown")) + " · " + friendly(asText(value.category, "unknown")) + " · " + friendly(asText(value.phase, "unknown")) + " · outcome known · turn not started";
+        });
+        const retryPolicyFold = persistent ? fold("Retry policy authority", factRows([
+          ["Algorithm", friendly(asText(retryPolicy.algorithm, "infra-pre-turn-v1"))],
+          ["Backoff", toArray(retryPolicy.backoffMs || retryPolicy.backoff_ms).map((value) => number(value) + "ms").join(" / ")],
+          ["Fingerprint", '<span class="mono">' + escapeHtml(truncate(asText(retryPolicy.fingerprint, "Unavailable"), 120)) + '</span>', true],
+          ["Retryable failures", retryableFailures.length ? list(retryableFailures) : "None", retryableFailures.length > 0]
+        ]), false) : "";
         const turnHistory = work.slice(0, 12).flatMap((item) => {
           const intents = toArray(item.continuationIntents || item.continuation_intents).map((intent) => {
             const value = record(intent);
@@ -909,14 +930,28 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
           });
           const turns = toArray(item.turns).map((turn) => {
             const value = record(turn);
-            return asText(item.workId || item.work_id, "work") + " · turn " + asText(value.turnIndex || value.turn_index, "?") + " · " + friendly(asText(value.status, "reserved")) + " · " + friendly(asText(value.stopReason || value.stop_reason, "in progress")) + " · " + truncate(asText(value.operationId || value.operation_id, ""), 80);
-          });
+            const attempts = toArray(value.attempts).map((attempt) => {
+              const attemptValue = record(attempt);
+              const failure = record(attemptValue.failure);
+              const attemptNumber = optionalNumber(attemptValue.attemptNumber, attemptValue.attempt_number) ?? ((optionalNumber(attemptValue.attemptIndex, attemptValue.attempt_index) ?? 0) + 1);
+              const failureMeta = failure.code
+                ? " · " + friendly(asText(failure.code)) + " / " + friendly(asText(failure.category)) + " · outcome " + (failure.outcomeKnown === true ? "known" : "unknown") + " · " + (failure.retryable === true ? "retryable" : "not retryable")
+                : "";
+              const notBefore = asText(attemptValue.notBefore || attemptValue.not_before, "");
+              return asText(item.workId || item.work_id, "work") + " · turn " + asText(value.turnIndex || value.turn_index, "?") + " · attempt " + attemptNumber + " · " + friendly(asText(attemptValue.status, "reserved")) + (notBefore && asText(attemptValue.status) === "backoff" ? " · not before " + notBefore : "") + failureMeta;
+            });
+            const turnLine = asText(item.workId || item.work_id, "work") + " · semantic turn " + asText(value.turnIndex || value.turn_index, "?") + " · " + friendly(asText(value.status, "reserved")) + " · " + friendly(asText(value.stopReason || value.stop_reason, "in progress"));
+            return [turnLine, ...attempts];
+          }).flat();
           return [...intents, ...turns];
         });
-        const turnHistoryFold = persistent && turnHistory.length ? fold("Approved continuation and turn history", list(turnHistory), false) : "";
+        const turnHistoryFold = persistent && turnHistory.length ? fold("Approved turns and attempt history", list(turnHistory), false) : "";
         const application = record(goal.sourceApplication || goal.source_application);
         const projectionError = asText(data.error || projection.error || goal.error, "");
-        const projectionErrorBlock = projectionError ? '<div class="notice bad">' + escapeHtml(projectionError) + '</div>' : "";
+        const publicErrorRecorded = data.has_error === true || goal.hasError === true || projection.hasError === true || application.hasError === true || scheduler.has_error === true;
+        const projectionErrorBlock = projectionError
+          ? '<div class="notice bad">' + escapeHtml(projectionError) + '</div>'
+          : publicErrorRecorded ? '<div class="notice bad">An error is recorded in private Goal state. Review the safe status, classification, and hashes; raw error text and private paths are intentionally hidden.</div>' : "";
         const liveProjectionFact = !liveSupported ? "Unavailable on this platform" : liveAllowed
           ? escapeHtml(friendly(projectionStatus)) + (projectedHead ? ' · <span class="mono">' + escapeHtml(truncate(projectedHead, 80)) + '</span>' : "")
           : "Not approved";
@@ -928,11 +963,11 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         ]), true);
         const availableActions = toArray(data.available_actions || goal.available_actions).map((action) => typeof action === "object" ? asText(action.label || action.tool) : asText(action)).filter(Boolean);
         const actionsFold = availableActions.length ? fold("Available actions", list(availableActions), true) : "";
-        const next = lifecycle === "proposed" ? (persistent ? "Review every ordered bounded continuation summary and fingerprint. Approval fixes all turns; the scheduler never invents prompts, and private integration waits for the final authorized turn." : "Review the complete contract and fingerprint; approve only after the user explicitly agrees.")
+        const next = lifecycle === "proposed" ? (persistent ? "Review every semantic turn and the fingerprinted retry policy separately. The scheduler never invents prompts. Fresh retries repeat the exact prompt with a new operation ID, never consume a turn, and cannot expand the fixed pre-turn infrastructure allowlist; private integration still waits for the final authorized turn." : "Review the complete one-turn, zero-retry contract and fingerprint; approve only after the user explicitly agrees.")
           : lifecycle === "approved" ? (persistent ? "The contract is approved and inert. Start persistent scheduling explicitly when the execution gate is enabled." : "The contract is approved and remains inert until an explicit execution action.")
           : !liveSupported && workspacePolicy === "live" ? "Live projection is unavailable on this platform; inspect existing state without attempting a source mutation."
-          : lifecycle === "paused" ? (persistent ? "Scheduling is durably paused; resume_goal explicitly wakes the detached scheduler while existing workers retain approved leases." : "Scheduling is paused; already-running workers retain only their approved leases.")
-          : lifecycle === "canceling" ? "Cancellation authority is persisted. Use refresh_goal for store-only reconciliation; no scheduler or Codex process is relaunched."
+          : lifecycle === "paused" ? (persistent ? "Scheduling is durably paused. In-flight evidence may finish, but no backoff retry, next turn, or integration launches until resume_goal explicitly wakes the scheduler." : "Scheduling is paused; already-running workers retain only their approved leases.")
+          : lifecycle === "canceling" ? "Cancellation authority is persisted before any scheduled backoff retry. Use refresh_goal for store-only reconciliation; no scheduler or Codex process is relaunched."
           : lifecycle === "canceled" ? "The Goal is canceled; review any isolated partial work before deciding on a new Goal."
           : lifecycle === "completed" && application.status === "applied" ? "The completed Goal result is finalized in source with persisted readback."
           : lifecycle === "completed" && liveAllowed && /projected|applied/.test(projectionStatus) ? "The completed checkpoint is already projected; final application should adopt it without writing the source twice."
@@ -940,12 +975,13 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
           : liveAllowed && /failed|conflict|recovery/.test(projectionStatus) ? "Live projection needs recovery; retry only with the same key or explicitly revert the recorded projection."
           : liveAllowed && integrationHead !== "Not integrated" && !/projected|applied/.test(projectionStatus) ? "Review the exact integration checkpoint, then explicitly project its fingerprint into source."
           : recoveryNeeded ? "Recover only through start_goal with the original start key and the execution gate enabled; passive reads never relaunch work."
+          : hasBackoff ? "Wait for the displayed deterministic not-before time. Same-operation recovery is not a retry; the fresh attempt gets a new operation ID and repeats the exact approved prompt."
           : work.some((item) => asText(item.status) === "continuing") ? "An intermediate authorized turn succeeded but remains private and non-integrable. The scheduler may execute only the next approved continuation; dependencies stay locked until the final authorized turn succeeds."
           : /review/.test(lifecycle) ? "All authorized turns finished. Review the private integrated checkpoint and evidence; completion remains an explicit Pro judgment."
           : /failed|blocked/.test(lifecycle) ? "Inspect the blocker and let Pro decide whether a bounded replan is required."
           : "Use authoritative Goal status for the next Pro-supervised action.";
         return card(truncate(asText(goal.title, "Goal"), 180), goalId + " · " + friendly(approvalStatus), friendly(lifecycle), taskTone(lifecycle),
-          state + metrics + context + stages + projectionErrorBlock + workBlock + criteriaFold + turnHistoryFold + recordsFold + reviewFold + actionsFold + '<div class="task-next"><span>' + escapeHtml(next) + '</span></div>', "task-card goal-card");
+          state + metrics + context + stages + projectionErrorBlock + workBlock + criteriaFold + retryPolicyFold + turnHistoryFold + recordsFold + reviewFold + actionsFold + '<div class="task-next"><span>' + escapeHtml(next) + '</span></div>', "task-card goal-card");
       }
 
       function renderGeneric(data) {

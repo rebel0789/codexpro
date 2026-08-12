@@ -4,7 +4,7 @@
 Deliver the first real vertical slice in which ChatGPT Pro plans and supervises a durable local Goal, Codex workers execute isolated CodingTasks, and the user can observe, interrupt, resume, review, and apply an integrated result from ordinary Chat.
 
 ## Current Phase
-Phase 10 next
+Phase 11 complete
 
 ## Phases
 
@@ -72,18 +72,18 @@ Phase 10 next
 - **Status:** complete
 
 ### Phase 10: Bounded automatic retries
-- [ ] Define retryable infrastructure failures separately from semantic, policy, validation, and conflict failures
-- [ ] Persist attempt identity, backoff, exhaustion, and response-loss-safe idempotency within the approved retry budget
-- [ ] Ensure retry never expands scope, overwrites source, or hides the original failure
-- [ ] Verify transient recovery and deterministic fail-closed exhaustion through the intended Goal flow
-- **Status:** pending
+- [x] Define retryable infrastructure failures separately from semantic, policy, validation, and conflict failures
+- [x] Persist attempt identity, backoff, exhaustion, and response-loss-safe idempotency within the approved retry budget
+- [x] Ensure retry never expands scope, overwrites source, or hides the original failure
+- [x] Verify transient recovery and deterministic fail-closed exhaustion through the intended Goal flow
+- **Status:** complete
 
 ### Phase 11: Final real-world verification and delivery
-- [ ] Run compile, focused, full, security, and package verification on the final architecture
-- [ ] Exercise persistent scheduling, multi-turn continuation, and bounded retry from ordinary ChatGPT Pro with a real Codex worker
-- [ ] Confirm source/worktree/state authority, disconnect recovery, cards, and no unintended Git or external effects
-- [ ] Update user documentation and delivery evidence, then commit each coherent completed stage
-- **Status:** pending
+- [x] Run compile, focused, full, security, and package verification on the final architecture
+- [x] Exercise persistent scheduling, multi-turn continuation, and bounded retry from ordinary ChatGPT Pro with a real Codex worker
+- [x] Confirm source/worktree/state authority, disconnect recovery, cards, and no unintended Git or external effects
+- [x] Update user documentation and delivery evidence, then commit the coherent completed stage
+- **Status:** complete
 
 ## Key Questions
 1. What is the smallest Goal contract that preserves the accepted final architecture instead of creating a throwaway orchestration layer?
@@ -107,6 +107,9 @@ Phase 10 next
 | Cancel never silently reverts projected source changes | Prevents cancellation from overwriting user edits; rollback is a separate latest-first confirmed action |
 | Live v1 supports only regular file add/modify/delete and executable-mode changes | Symlink, submodule, and unsafe topology changes fail closed until an equally safe manifest contract exists |
 | The implicit legacy widget domain is omitted from runtime metadata | It is a documentation origin, not a dedicated hosted component origin; omission lets ChatGPT use its sandbox while explicit custom domains remain available |
+| Persistent fresh retries default to 0 and are capped at 2 per work across all semantic turns | Preserves backward safety and prevents a multi-turn contract from multiplying the approved retry budget |
+| Retry backoff is immutable policy v1 at 1 second then 5 seconds | Makes restart recovery deterministic and keeps timing inside the approved contract rather than runtime configuration |
+| Only structured pre-thread/turn infrastructure failure plus exact unchanged Git authority may consume a fresh retry | Prevents semantic failures, response-loss ambiguity, partial edits, and error-text heuristics from amplifying Codex execution |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |

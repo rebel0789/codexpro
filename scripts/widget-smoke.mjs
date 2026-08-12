@@ -393,7 +393,17 @@ const proposedPersistentGoal = mount({
         executionPolicy: "persistent",
         workspacePolicy: "isolated",
         permissions: { commands: [], sourceEffects: { apply: false, commit: false, push: false, draftPr: false } },
-        limits: { maxTurnsPerWorker: 1, maxRetriesPerWorker: 0 },
+        limits: { maxTurnsPerWorker: 2, maxRetriesPerWorker: 2 },
+        retryPolicy: {
+          version: 1,
+          algorithm: "infra-pre-turn-v1",
+          backoffMs: [1000, 5000],
+          retryableFailures: [
+            { code: "app_server_startup", category: "infrastructure", phase: "runner_start", outcomeKnown: true, turnStarted: false },
+            { code: "app_server_initialize_transport", category: "infrastructure", phase: "app_server_initialize", outcomeKnown: true, turnStarted: false }
+          ],
+          fingerprint: "f".repeat(64)
+        },
         baseSha: "a".repeat(40),
         contractFingerprint: "b".repeat(64),
         approval: { status: "pending" },
@@ -411,7 +421,12 @@ const proposedPersistentGoal = mount({
 });
 assert.match(proposedPersistentGoal.root.innerHTML, /Persistent/);
 assert.match(proposedPersistentGoal.root.innerHTML, /scheduler never invents prompts/i);
-assert.match(proposedPersistentGoal.root.innerHTML, /private integration waits for the final authorized turn/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /semantic turns/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /2 total fresh retries per work item/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /Infra pre turn v1/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /App server startup/i);
+assert.match(proposedPersistentGoal.root.innerHTML, new RegExp("f{64}"));
+assert.match(proposedPersistentGoal.root.innerHTML, /Fresh retries repeat the exact prompt with a new operation ID/i);
 assert.match(proposedPersistentGoal.root.innerHTML, /approved verify_final/i);
 assert.match(proposedPersistentGoal.root.innerHTML, /Inspect the first turn result/);
 assert.match(proposedPersistentGoal.root.innerHTML, /Approve exact contract/);
@@ -440,6 +455,43 @@ assert.match(continuingPersistentGoal.root.innerHTML, /private and non-integrabl
 assert.match(continuingPersistentGoal.root.innerHTML, /dependencies stay locked until the final authorized turn succeeds/i);
 assert.match(continuingPersistentGoal.root.innerHTML, /Terminal success/i);
 assert.doesNotMatch(continuingPersistentGoal.root.innerHTML, /EXACT_PROMPT_MUST_NOT_RENDER_123456/, "card should render the bounded approved summary, not an exact continuation prompt field");
+
+const backoffPersistentGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "get_goal",
+      goal: {
+        goalId: "goal_6123456789abcdef01234567", title: "Retry approved infrastructure failure", lifecycle: "running", revision: 8,
+        executionPolicy: "persistent", workspacePolicy: "isolated", permissions: { sourceEffects: { apply: false } },
+        limits: { maxTurnsPerWorker: 1, maxRetriesPerWorker: 2 },
+        retryPolicy: { version: 1, algorithm: "infra-pre-turn-v1", backoffMs: [1000, 5000], fingerprint: "f".repeat(64) },
+        baseSha: "a".repeat(40), contractFingerprint: "b".repeat(64), approval: { status: "approved" }, hasError: true, errorSha256: "8".repeat(64),
+        completionCriteria: ["Finish the approved semantic turn"], blackboard: [],
+        work: [{
+          workId: "work_retry", title: "One semantic turn", status: "launching", dependsOn: [],
+          authorizedTurnCount: 1, completedTurnCount: 0, remainingTurnCount: 1,
+          attemptCount: 2, retriesUsed: 1, retriesRemaining: 1, currentAttemptNumber: 2, retryNotBefore: "2030-01-01T00:00:01.000Z",
+          turns: [{
+            turnIndex: 1, intentId: "initial", status: "reserved", operationId: "goal:phase10:work_retry:run:1:attempt:1",
+            attempts: [
+              { attemptIndex: 0, attemptNumber: 1, status: "failed", operationId: "goal:phase10:work_retry:run:1:attempt:0", scheduledAt: "2030-01-01T00:00:00.000Z", notBefore: "2030-01-01T00:00:00.000Z", failure: { code: "app_server_startup", category: "infrastructure", phase: "runner_start", retryable: true, outcomeKnown: true, turnStarted: false, summary: "SECRET_ATTEMPT_ERROR_MUST_NOT_RENDER /private/tmp/codexpro/CODEX_HOME/worktree", summarySha256: "9".repeat(64), occurredAt: "2030-01-01T00:00:00.500Z" } },
+              { attemptIndex: 1, attemptNumber: 2, status: "backoff", operationId: "goal:phase10:work_retry:run:1:attempt:1", scheduledAt: "2030-01-01T00:00:00.000Z", notBefore: "2030-01-01T00:00:01.000Z" }
+            ]
+          }]
+        }]
+      }
+    }
+  }
+});
+assert.match(backoffPersistentGoal.root.innerHTML, /turn 1\/1 · 0 completed · 2 attempts · retries 1\/2/i);
+assert.match(backoffPersistentGoal.root.innerHTML, /attempt 2 · Backoff/i);
+assert.match(backoffPersistentGoal.root.innerHTML, /not before 2030-01-01T00:00:01.000Z/i);
+assert.match(backoffPersistentGoal.root.innerHTML, /App server startup \/ Infrastructure · outcome known · retryable/i);
+assert.match(backoffPersistentGoal.root.innerHTML, /attempt 1 · Failed/i);
+assert.match(backoffPersistentGoal.root.innerHTML, /Same-operation recovery is not a retry/i);
+assert.match(backoffPersistentGoal.root.innerHTML, /raw error text and private paths are intentionally hidden/i);
+assert.doesNotMatch(backoffPersistentGoal.root.innerHTML, /SECRET_ATTEMPT_ERROR_MUST_NOT_RENDER/);
+assert.doesNotMatch(backoffPersistentGoal.root.innerHTML, /\/private\/tmp\/codexpro\/CODEX_HOME\/worktree/);
 
 const strandedPersistentGoal = mount({
   toolOutput: {

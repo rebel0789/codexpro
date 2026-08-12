@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CodexAppServerClient } from "./codexAppServerClient.js";
+import { CodexAppServerClient, CodexAppServerInitializeTransportError } from "./codexAppServerClient.js";
 import type { CodexAppServerEvent, CodexPlanSnapshot, CodexTurnResult } from "./codexAppServerTypes.js";
 import {
   beginCodingTaskOperation,
@@ -47,6 +47,7 @@ export interface LaunchCodingTaskRunInput {
   threadId?: string;
   expectedSessionId?: string;
   continuationFingerprint?: string;
+  expectedPreviousTurnId?: string;
   model?: string;
   effort?: string;
   timeoutMs?: number;
@@ -66,6 +67,7 @@ export interface CodingTaskRunDefinition {
   threadId?: string;
   expectedSessionId?: string;
   continuationFingerprint?: string;
+  expectedPreviousTurnId?: string;
   model: string;
   effort: string;
   timeoutMs: number;
@@ -76,6 +78,29 @@ export interface CodingTaskRunDefinition {
 export interface CodingTaskRunEvent {
   at: string;
   event: CodexAppServerEvent;
+}
+
+export type CodingTaskRunFailureCode =
+  | "app_server_startup" | "app_server_initialize_transport"
+  | "turn_failed" | "turn_timeout" | "approval_or_input_declined" | "canceled" | "identity_mismatch"
+  | "runner_lost" | "resource_or_output" | "unknown";
+export type CodingTaskRunFailureCategory =
+  | "infrastructure" | "model_or_tool" | "policy" | "cancellation" | "identity" | "resource" | "unknown";
+export type CodingTaskRunFailurePhase =
+  | "runner_start" | "app_server_initialize" | "thread_establish" | "turn_start" | "turn_active"
+  | "terminal_writeback" | "reconciliation" | "unknown";
+
+export interface CodingTaskRunFailure {
+  version: 1;
+  code: CodingTaskRunFailureCode;
+  category: CodingTaskRunFailureCategory;
+  phase: CodingTaskRunFailurePhase;
+  retryable: boolean;
+  outcomeKnown: boolean;
+  turnStarted: boolean;
+  summary: string;
+  summarySha256: string;
+  occurredAt: string;
 }
 
 export interface CodingTaskRunState {
@@ -102,6 +127,11 @@ export interface CodingTaskRunState {
   errors?: string[];
   error?: string;
   approvalOrInputDeclined?: boolean;
+  turnStartRequestedAt?: string;
+  initializeRequestedAt?: string;
+  threadEstablishRequestedAt?: string;
+  attemptStartGitObservation?: import("./codingTaskState.js").CodingTaskGitObservation;
+  failure?: CodingTaskRunFailure;
   truncated?: boolean;
   events: CodingTaskRunEvent[];
 }
@@ -199,6 +229,8 @@ export interface SubmitCodingTaskContinuationInput {
   expectedThreadId: string;
   expectedSessionId: string;
   expectedPreviousTurnId: string;
+  /** Immediate failed attempt being retried for this same semantic continuation turn. */
+  retryPreviousAttemptOperationId?: string;
   model?: string;
   effort?: string;
   timeoutMs?: number;
@@ -218,6 +250,7 @@ export interface CodingTaskContinuationDecision {
   expectedThreadId: string;
   expectedSessionId: string;
   expectedPreviousTurnId: string;
+  retryPreviousAttemptOperationId?: string;
   prompt: string;
   model: string;
   effort: string;
@@ -569,6 +602,12 @@ function assertDefinition(definition: CodingTaskRunDefinition, definitionPath: s
   if (definition.continuationFingerprint !== undefined && !/^[0-9a-f]{64}$/.test(definition.continuationFingerprint)) {
     throw new Error("Invalid continuation fingerprint.");
   }
+  if (definition.expectedPreviousTurnId !== undefined && !definition.expectedPreviousTurnId.trim()) {
+    throw new Error("Invalid previous continuation turn identity.");
+  }
+  if (Boolean(definition.continuationFingerprint) !== Boolean(definition.expectedPreviousTurnId)) {
+    throw new Error("Continuation fingerprint and previous turn identity must be bound together.");
+  }
   if (!definition.model.trim() || definition.model.length > 160 || !definition.effort.trim() || definition.effort.length > 160 ||
       !Number.isSafeInteger(definition.timeoutMs) || definition.timeoutMs < 1_000 || definition.timeoutMs > 24 * 60 * 60_000 ||
       !Number.isSafeInteger(definition.maxLogBytes) || definition.maxLogBytes < 64 * 1024 ||
@@ -584,7 +623,9 @@ function runDefinitionFingerprint(definition: Omit<CodingTaskRunDefinition, "ver
     taskId: definition.taskId, operationId: definition.operationId, prompt: definition.prompt,
     revision: definition.expectedRevision, epoch: definition.executorEpoch, leaseId: definition.leaseId,
     threadId: definition.threadId ?? null, expectedSessionId: definition.expectedSessionId ?? null,
-    continuationFingerprint: definition.continuationFingerprint ?? null, model: definition.model,
+    continuationFingerprint: definition.continuationFingerprint ?? null,
+    ...(definition.expectedPreviousTurnId ? { expectedPreviousTurnId: definition.expectedPreviousTurnId } : {}),
+    model: definition.model,
     effort: definition.effort, timeoutMs: definition.timeoutMs, worktreeRoot: definition.worktreeRoot,
     codexBinary: definition.codexBinary, maxLogBytes: definition.maxLogBytes, createdAt: definition.createdAt
   }));
@@ -623,6 +664,72 @@ function terminalLifecycle(status: CodingTaskRunStatus): "waiting_review" | "com
   throw new Error(`Codex run status ${status} is not terminal.`);
 }
 
+function runFailure(
+  code: CodingTaskRunFailureCode,
+  category: CodingTaskRunFailureCategory,
+  phase: CodingTaskRunFailurePhase,
+  message: string,
+  state: Pick<CodingTaskRunState, "turnId" | "turnStartRequestedAt" | "threadEstablishRequestedAt" | "approvalOrInputDeclined">
+): CodingTaskRunFailure {
+  const summary = bounded(redactSensitiveText(message), 4_096);
+  const turnStarted = Boolean(state.turnId);
+  const retryable = (code === "app_server_startup" || code === "app_server_initialize_transport") &&
+    !turnStarted && !state.turnStartRequestedAt && !state.threadEstablishRequestedAt && !state.approvalOrInputDeclined &&
+    (phase === "runner_start" || phase === "app_server_initialize");
+  const outcomeKnown = code === "turn_failed" || code === "approval_or_input_declined" || code === "canceled" ||
+    (!state.turnStartRequestedAt && !state.threadEstablishRequestedAt);
+  return { version: 1, code, category, phase, retryable, outcomeKnown,
+    turnStarted, summary, summarySha256: sha256(summary), occurredAt: new Date().toISOString() };
+}
+
+function assertRunFailure(failure: CodingTaskRunFailure, state: CodingTaskRunState): void {
+  const allowedCodes: CodingTaskRunFailureCode[] = ["app_server_startup", "app_server_initialize_transport",
+    "turn_failed", "turn_timeout", "approval_or_input_declined", "canceled",
+    "identity_mismatch", "runner_lost", "resource_or_output", "unknown"];
+  const allowedCategories: CodingTaskRunFailureCategory[] = ["infrastructure", "model_or_tool", "policy", "cancellation",
+    "identity", "resource", "unknown"];
+  const allowedPhases: CodingTaskRunFailurePhase[] = ["runner_start", "app_server_initialize", "thread_establish",
+    "turn_start", "turn_active", "terminal_writeback", "reconciliation", "unknown"];
+  const canonical = runFailure(failure.code, failure.category, failure.phase, failure.summary, state);
+  const coherentTuple = (() => {
+    switch (failure.code) {
+      case "app_server_startup": return failure.category === "infrastructure" && failure.phase === "runner_start";
+      case "app_server_initialize_transport": return failure.category === "infrastructure" && failure.phase === "app_server_initialize";
+      case "turn_failed":
+      case "turn_timeout": return failure.category === "model_or_tool" && failure.phase === "turn_active";
+      case "approval_or_input_declined": return failure.category === "policy" &&
+        (failure.phase === "turn_start" || failure.phase === "turn_active");
+      case "canceled": return failure.category === "cancellation" &&
+        (failure.phase === "runner_start" || failure.phase === "turn_start" || failure.phase === "turn_active");
+      case "identity_mismatch": return failure.category === "identity" &&
+        (failure.phase === "runner_start" || failure.phase === "app_server_initialize" ||
+          failure.phase === "thread_establish" || failure.phase === "turn_start" || failure.phase === "turn_active");
+      case "runner_lost": return failure.category === "infrastructure" && failure.phase === "reconciliation";
+      case "resource_or_output": return failure.category === "resource" &&
+        (failure.phase === "turn_start" || failure.phase === "turn_active" || failure.phase === "terminal_writeback");
+      case "unknown": return failure.category === "unknown" &&
+        (failure.phase === "turn_start" || failure.phase === "turn_active" || failure.phase === "terminal_writeback" ||
+          failure.phase === "unknown");
+    }
+  })();
+  if (failure.version !== 1 || !allowedCodes.includes(failure.code) || !allowedCategories.includes(failure.category) ||
+      !allowedPhases.includes(failure.phase) || !failure.summary || failure.summary.length > 4_096 ||
+      failure.summarySha256 !== sha256(failure.summary) || !Number.isFinite(Date.parse(failure.occurredAt)) ||
+      failure.turnStarted !== Boolean(state.turnId) || failure.outcomeKnown !== canonical.outcomeKnown ||
+      failure.retryable !== canonical.retryable || !coherentTuple || (failure.retryable && state.status !== "failed")) {
+    throw new Error(`Coding task run failure classification is invalid or tampered (${failure.code}/${failure.category}/${failure.phase}; retryable=${failure.retryable}/${canonical.retryable}; outcomeKnown=${failure.outcomeKnown}/${canonical.outcomeKnown}).`);
+  }
+}
+
+function assertRunGitObservation(value: import("./codingTaskState.js").CodingTaskGitObservation): void {
+  if (!value || !Number.isFinite(Date.parse(value.capturedAt)) || !/^[0-9a-f]{40,64}$/i.test(value.headSha) ||
+      typeof value.status !== "string" || typeof value.diffStat !== "string" ||
+      !/^[0-9a-f]{64}$/i.test(value.diffSha256) || typeof value.dirty !== "boolean" ||
+      Buffer.byteLength(value.status, "utf8") > MAX_RESULT_BYTES || Buffer.byteLength(value.diffStat, "utf8") > MAX_RESULT_BYTES) {
+    throw new Error("Coding task attempt-start Git observation is invalid or tampered.");
+  }
+}
+
 function stateWithoutViewFields(view: CodingTaskRunView): CodingTaskRunState {
   const state = { ...view } as CodingTaskRunState & Partial<CodingTaskRunView>;
   delete state.definitionFingerprint;
@@ -638,7 +745,8 @@ function continuationDecisionFingerprint(input: Omit<CodingTaskContinuationDecis
     previousOperationId: input.previousOperationId, prompt: input.prompt,
     expectedRevision: input.expectedRevision, executorEpoch: input.executorEpoch, leaseId: input.leaseId,
     expectedThreadId: input.expectedThreadId, expectedSessionId: input.expectedSessionId ?? null,
-    expectedPreviousTurnId: input.expectedPreviousTurnId, model: input.model,
+    expectedPreviousTurnId: input.expectedPreviousTurnId,
+    retryPreviousAttemptOperationId: input.retryPreviousAttemptOperationId ?? null, model: input.model,
     effort: input.effort, timeoutMs: input.timeoutMs, createdAt: input.createdAt
   }));
 }
@@ -653,7 +761,8 @@ function continuationDecisionMatchesInput(
     decision.expectedRevision === input.expectedRevision && decision.executorEpoch === input.executorEpoch &&
     decision.leaseId === input.leaseId && decision.expectedThreadId === input.expectedThreadId &&
     decision.expectedSessionId === input.expectedSessionId &&
-    decision.expectedPreviousTurnId === input.expectedPreviousTurnId && decision.model === input.model &&
+    decision.expectedPreviousTurnId === input.expectedPreviousTurnId &&
+    decision.retryPreviousAttemptOperationId === input.retryPreviousAttemptOperationId && decision.model === input.model &&
     decision.effort === input.effort && decision.timeoutMs === input.timeoutMs;
 }
 
@@ -662,17 +771,20 @@ function definitionMatchesLaunch(
   config: CodingTaskRunnerConfig,
   input: LaunchCodingTaskRunInput,
   prompt: string,
-  worktreeRoot: string
+  task: Pick<CodingTaskState, "worktreeRoot" | "codexThreadId" | "codexSessionId">
 ): boolean {
+  const intendedThreadId = input.threadId?.trim() || task.codexThreadId;
+  const intendedSessionId = input.expectedSessionId?.trim() || (intendedThreadId ? task.codexSessionId : undefined);
   return definition.prompt === prompt && definition.executorEpoch === input.executorEpoch &&
     definition.leaseId === input.leaseId && definition.expectedRevision === input.expectedRevision &&
-    definition.threadId === (input.threadId?.trim() || undefined) &&
+    definition.threadId === intendedThreadId &&
     definition.model === (input.model?.trim() || "gpt-5.6-sol") &&
-    definition.expectedSessionId === (input.expectedSessionId?.trim() || undefined) &&
+    definition.expectedSessionId === intendedSessionId &&
     definition.continuationFingerprint === (input.continuationFingerprint?.trim() || undefined) &&
+    definition.expectedPreviousTurnId === (input.expectedPreviousTurnId?.trim() || undefined) &&
     definition.effort === (input.effort?.trim() || "high") &&
     definition.timeoutMs === Math.max(1_000, Math.min(input.timeoutMs ?? 30 * 60_000, 24 * 60 * 60_000)) &&
-    definition.worktreeRoot === worktreeRoot && definition.codexBinary === config.codexBinary &&
+    definition.worktreeRoot === task.worktreeRoot && definition.codexBinary === config.codexBinary &&
     definition.maxLogBytes === Math.max(64 * 1024,
       Math.min(config.maxLogBytes ?? 2 * 1024 * 1024, 64 * 1024 * 1024));
 }
@@ -690,6 +802,8 @@ function assertContinuationDecision(
       decision.expectedRevision < 1 || !Number.isSafeInteger(decision.executorEpoch) || decision.executorEpoch < 1 ||
       !decision.leaseId.trim() || !decision.expectedThreadId.trim() || !decision.expectedPreviousTurnId.trim() ||
       typeof decision.expectedSessionId !== "string" || !decision.expectedSessionId.trim() ||
+      (decision.retryPreviousAttemptOperationId !== undefined &&
+        validateOperationId(decision.retryPreviousAttemptOperationId) !== decision.retryPreviousAttemptOperationId) ||
       !decision.prompt.trim() || Buffer.byteLength(decision.prompt, "utf8") > MAX_PROMPT_BYTES ||
       !decision.model.trim() || decision.model.length > 160 || !decision.effort.trim() || decision.effort.length > 160 ||
       !Number.isSafeInteger(decision.timeoutMs) || decision.timeoutMs < 1_000 || decision.timeoutMs > 24 * 60 * 60_000 ||
@@ -701,6 +815,8 @@ function assertContinuationDecision(
         leaseId: decision.leaseId, expectedThreadId: decision.expectedThreadId,
         expectedSessionId: decision.expectedSessionId,
         expectedPreviousTurnId: decision.expectedPreviousTurnId, prompt: decision.prompt,
+        ...(decision.retryPreviousAttemptOperationId
+          ? { retryPreviousAttemptOperationId: decision.retryPreviousAttemptOperationId } : {}),
         model: decision.model, effort: decision.effort, timeoutMs: decision.timeoutMs,
         createdAt: decision.createdAt
       })) {
@@ -723,6 +839,12 @@ export async function launchCodingTaskRun(
   if (input.continuationFingerprint !== undefined && !/^[0-9a-f]{64}$/.test(input.continuationFingerprint.trim())) {
     throw new Error("continuationFingerprint must be a SHA-256 hex digest.");
   }
+  if (input.expectedPreviousTurnId !== undefined && !input.expectedPreviousTurnId.trim()) {
+    throw new Error("expectedPreviousTurnId must be a non-empty turn identity.");
+  }
+  if (Boolean(input.continuationFingerprint?.trim()) !== Boolean(input.expectedPreviousTurnId?.trim())) {
+    throw new Error("continuationFingerprint and expectedPreviousTurnId must be supplied together.");
+  }
   const publication = await store.withTaskLock(taskId, async () => {
     const task = await store.get(taskId);
     const existing = await readJson<CodingTaskRunDefinition>(paths.definition).catch((error) => {
@@ -735,7 +857,7 @@ export async function launchCodingTaskRun(
     }));
     if (existing) {
       assertDefinition(existing, paths.definition, store.dataRoot);
-      if (!definitionMatchesLaunch(existing, config, input, prompt, task.worktreeRoot)) {
+      if (!definitionMatchesLaunch(existing, config, input, prompt, task)) {
         throw new Error("operationId is already bound to a different Codex run contract.");
       }
       if (stateExists) return { definition: existing, reused: true };
@@ -791,8 +913,10 @@ export async function launchCodingTaskRun(
       taskId, operationId, prompt, expectedRevision: input.expectedRevision,
       executorEpoch: input.executorEpoch, leaseId: input.leaseId, worktreeRoot: task.worktreeRoot,
       ...(normalizedThreadId ? { threadId: normalizedThreadId } : {}),
-      ...(input.expectedSessionId?.trim() ? { expectedSessionId: input.expectedSessionId.trim() } : {}),
+      ...((input.expectedSessionId?.trim() || (normalizedThreadId ? task.codexSessionId : undefined))
+        ? { expectedSessionId: input.expectedSessionId?.trim() || task.codexSessionId! } : {}),
       ...(input.continuationFingerprint?.trim() ? { continuationFingerprint: input.continuationFingerprint.trim() } : {}),
+      ...(input.expectedPreviousTurnId?.trim() ? { expectedPreviousTurnId: input.expectedPreviousTurnId.trim() } : {}),
       model: input.model?.trim() || "gpt-5.6-sol", effort: input.effort?.trim() || "high",
       timeoutMs: Math.max(1_000, Math.min(input.timeoutMs ?? 30 * 60_000, 24 * 60 * 60_000)),
       codexBinary: config.codexBinary,
@@ -838,6 +962,16 @@ export async function reconcileCodingTaskRun(
   taskIdInput: string,
   operationIdInput: string,
   options: { staleMs?: number; relaunchQueued?: boolean } = {}
+): Promise<CodingTaskRunView> {
+  return reconcileCodingTaskRunInternal(config, taskIdInput, operationIdInput, options, false);
+}
+
+async function reconcileCodingTaskRunInternal(
+  config: CodingTaskStoreConfig & Partial<Pick<CodingTaskRunnerConfig, "codexBinary" | "env" | "maxLogBytes">>,
+  taskIdInput: string,
+  operationIdInput: string,
+  options: { staleMs?: number; relaunchQueued?: boolean },
+  handoffRecoveryAttempt: boolean
 ): Promise<CodingTaskRunView> {
   const taskId = validateCodingTaskId(taskIdInput);
   const operationId = validateOperationId(operationIdInput);
@@ -921,10 +1055,13 @@ export async function reconcileCodingTaskRun(
           operationId, lifecycle: "canceled", error: persistedCancel.reason, gitObservation
         });
         const now = finished.finishedAt ?? new Date().toISOString();
-        await writeCodingTaskJsonAtomic(paths.state, compactRunState({
+        const canceledState: CodingTaskRunState = {
           version: RUN_VERSION, taskId, operationId, fingerprint: definition.fingerprint, status: "canceled",
           createdAt: view.createdAt, updatedAt: now, finishedAt: now, events: view.events
-        }, definition.maxLogBytes));
+        };
+        canceledState.failure = runFailure("canceled", "cancellation", "runner_start",
+          persistedCancel.reason ?? "Canceled before launch.", canceledState);
+        await writeCodingTaskJsonAtomic(paths.state, compactRunState(canceledState, definition.maxLogBytes));
         return { ...(await getCodingTaskRunState(config, taskId, operationId)), runnerAlive: false };
       } finally {
         await releaseRunLock(paths, lock);
@@ -988,6 +1125,14 @@ export async function reconcileCodingTaskRun(
     }
     const launched = await waitForCodingTaskRun(config, taskId, operationId, { timeoutMs: 12_000, terminal: false });
     if (launched.status === "queued") {
+      // A detached process may lose or exhaust the initial advisory-lock handoff without ever
+      // mutating state. Re-enter the execution-authorized reconciliation once with staleMs=0:
+      // the exclusive run lock either proves a late child is alive or fences one replacement
+      // spawn. This is same-operation recovery, never a fresh semantic retry.
+      if (!handoffRecoveryAttempt) {
+        return reconcileCodingTaskRunInternal(config, taskId, operationId,
+          { staleMs: 0, relaunchQueued: true }, true);
+      }
       throw new Error(`Detached Codex runner launch handoff did not become authoritative: ${launched.error ?? "no runner acknowledgement"}`);
     }
     return launched;
@@ -1013,9 +1158,12 @@ export async function reconcileCodingTaskRun(
       codexThreadId: view.threadId, codexSessionId: view.sessionId, codexTurnId: view.turnId
     });
     const now = finishedTask.finishedAt ?? new Date().toISOString();
-    const state: CodingTaskRunState = { ...stateWithoutViewFields(view),
+    const baseState: CodingTaskRunState = { ...stateWithoutViewFields(view),
       status: finishedTask.lifecycle === "canceled" ? "canceled" : "failed",
       updatedAt: now, finishedAt: now, error: finishedTask.lifecycle === "canceled" ? undefined : error };
+    const state: CodingTaskRunState = finishedTask.lifecycle === "canceled" ? baseState : {
+      ...baseState, failure: runFailure("runner_lost", "infrastructure", "reconciliation", error, baseState)
+    };
     await writeCodingTaskJsonAtomic(paths.state, compactRunState(state, definition.maxLogBytes));
     return { ...(await getCodingTaskRunState(config, taskId, operationId)), runnerAlive: false };
   } finally {
@@ -1071,6 +1219,8 @@ export async function cancelQueuedCodingTaskRun(
         ...(reason?.trim() ? { error: bounded(`Canceled before launch: ${reason.trim()}`, 20_000) } : {}),
         events: currentView.events
       };
+      canceled.failure = runFailure("canceled", "cancellation", "runner_start",
+        reason?.trim() || "Canceled before launch.", canceled);
       await writeCodingTaskJsonAtomic(paths.state, compactRunState(canceled, definition.maxLogBytes));
       return { ...(await getCodingTaskRunState(config, taskId, operationId)), runnerAlive: false };
   });
@@ -1104,6 +1254,8 @@ async function getCodingTaskRunState(
   if (state.taskId !== taskId || state.operationId !== definition.operationId || state.fingerprint !== definition.fingerprint) {
     throw new Error("Coding task run state identity mismatch.");
   }
+  if (state.failure) assertRunFailure(state.failure, state);
+  if (state.attemptStartGitObservation) assertRunGitObservation(state.attemptStartGitObservation);
   return { ...state, definitionFingerprint: definition.fingerprint, runnerAlive: false };
 }
 
@@ -1319,7 +1471,12 @@ export async function submitCodingTaskContinuation(
   const requestKey = validateRequestKey(input.requestKey);
   const operationId = validateOperationId(input.operationId);
   const previousOperationId = validateOperationId(input.previousOperationId);
+  const retryPreviousAttemptOperationId = input.retryPreviousAttemptOperationId === undefined
+    ? undefined : validateOperationId(input.retryPreviousAttemptOperationId);
   if (operationId === previousOperationId) throw new Error("Continuation operationId must differ from previousOperationId.");
+  if (retryPreviousAttemptOperationId === operationId || retryPreviousAttemptOperationId === previousOperationId) {
+    throw new Error("Continuation retry predecessor must be distinct from semantic and new attempt operations.");
+  }
   if (!Number.isSafeInteger(input.turnOrdinal) || input.turnOrdinal < 2 || input.turnOrdinal > 100) {
     throw new Error("Continuation turnOrdinal must be an integer from 2 through 100.");
   }
@@ -1346,6 +1503,7 @@ export async function submitCodingTaskContinuation(
     taskId, requestKey, operationId, turnOrdinal: input.turnOrdinal, previousOperationId,
     expectedRevision: input.expectedRevision, executorEpoch: input.executorEpoch, leaseId: input.leaseId,
     expectedThreadId, expectedSessionId, expectedPreviousTurnId,
+    ...(retryPreviousAttemptOperationId ? { retryPreviousAttemptOperationId } : {}),
     prompt, model, effort, timeoutMs
   };
   const store = new CodingTaskStore(config);
@@ -1371,11 +1529,36 @@ export async function submitCodingTaskContinuation(
       if (task.revision !== input.expectedRevision) {
         throw new Error(`Coding task CAS conflict: observed revision ${task.revision}.`);
       }
-      if (task.lifecycle !== "waiting_review" || task.activeOperation || task.codexTurnActive) {
-        throw new Error("Coding task continuation requires an idle waiting_review task.");
-      }
+      if (task.activeOperation || task.codexTurnActive) throw new Error("Coding task continuation requires an idle task.");
       if (task.cancelRequestedAt) throw new Error("Coding task cancellation is pending; continuation is not accepted.");
-      if (task.lastCompletedOperation?.operationId !== previousOperationId ||
+      if (retryPreviousAttemptOperationId) {
+        if (task.lifecycle !== "failed" || task.lastCompletedOperation?.operationId !== retryPreviousAttemptOperationId ||
+            task.lastCompletedOperation.executor !== "codex" ||
+            task.lastCompletedOperation.executorEpoch !== input.executorEpoch ||
+            task.lastCompletedOperation.lifecycle !== "failed") {
+          throw new Error("Coding task continuation retry predecessor identity changed.");
+        }
+        const failedAttempt = await getCodingTaskRunState(config, taskId, retryPreviousAttemptOperationId);
+        if (failedAttempt.status !== "failed" || !failedAttempt.failure?.retryable ||
+            !failedAttempt.failure.outcomeKnown || failedAttempt.failure.turnStarted || failedAttempt.threadId ||
+            failedAttempt.sessionId || failedAttempt.turnId || !failedAttempt.attemptStartGitObservation ||
+            !task.lastGitObservation || failedAttempt.attemptStartGitObservation.headSha !== task.lastGitObservation.headSha ||
+            failedAttempt.attemptStartGitObservation.diffSha256 !== task.lastGitObservation.diffSha256 ||
+            failedAttempt.attemptStartGitObservation.status !== task.lastGitObservation.status ||
+            failedAttempt.attemptStartGitObservation.diffStat !== task.lastGitObservation.diffStat ||
+            failedAttempt.attemptStartGitObservation.dirty !== task.lastGitObservation.dirty) {
+          throw new Error("Coding task continuation retry requires an unchanged canonical pre-turn infrastructure failure.");
+        }
+        const priorDecision = await findContinuationDecisionByOperation(store, taskId, retryPreviousAttemptOperationId);
+        if (!priorDecision || priorDecision.previousOperationId !== previousOperationId ||
+            priorDecision.turnOrdinal !== input.turnOrdinal || priorDecision.prompt !== prompt ||
+            priorDecision.model !== model || priorDecision.effort !== effort || priorDecision.timeoutMs !== timeoutMs ||
+            priorDecision.expectedThreadId !== expectedThreadId || priorDecision.expectedSessionId !== expectedSessionId ||
+            priorDecision.expectedPreviousTurnId !== expectedPreviousTurnId) {
+          throw new Error("Coding task continuation retry diverged from the prior attempt semantic authority.");
+        }
+      } else if (task.lifecycle !== "waiting_review" ||
+          task.lastCompletedOperation?.operationId !== previousOperationId ||
           task.lastCompletedOperation.executor !== "codex" ||
           task.lastCompletedOperation.executorEpoch !== input.executorEpoch ||
           task.lastCompletedOperation.lifecycle !== "waiting_review") {
@@ -1413,10 +1596,36 @@ export async function submitCodingTaskContinuation(
     operationId: decision.operationId, prompt: decision.prompt, expectedRevision: decision.expectedRevision,
     executorEpoch: decision.executorEpoch, leaseId: decision.leaseId, threadId: decision.expectedThreadId,
     expectedSessionId: decision.expectedSessionId,
-    continuationFingerprint: decision.fingerprint,
+    continuationFingerprint: decision.fingerprint, expectedPreviousTurnId: decision.expectedPreviousTurnId,
     model: decision.model, effort: decision.effort, timeoutMs: decision.timeoutMs
   });
   return { decision, run, reused };
+}
+
+async function findContinuationDecisionByOperation(
+  store: CodingTaskStore,
+  taskId: string,
+  operationId: string
+): Promise<CodingTaskContinuationDecision | undefined> {
+  const root = path.join(store.paths(taskId).taskDir, "continuations");
+  const entries = await fsp.readdir(root, { withFileTypes: true }).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw error;
+  });
+  if (entries.length > 300) throw new Error("Coding task continuation decision ledger exceeds its bounded scan limit.");
+  let found: CodingTaskContinuationDecision | undefined;
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^request_[0-9a-f]{32}$/.test(entry.name)) continue;
+    const decision = await readJson<CodingTaskContinuationDecision>(path.join(root, entry.name, "decision.json"));
+    assertContinuationDecision(decision, { taskId, requestKey: decision.requestKey });
+    if (entry.name !== `request_${sha256(decision.requestKey).slice(0, 32)}`) {
+      throw new Error("Coding task continuation decision path does not match its request identity.");
+    }
+    if (decision.operationId !== operationId) continue;
+    if (found) throw new Error("Coding task continuation attempt operation is bound by multiple decisions.");
+    found = decision;
+  }
+  return found;
 }
 
 export async function getCodingTaskContinuation(
@@ -1476,6 +1685,9 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
   let stateWriteError: Error | undefined;
   let requestPoll: Promise<void> = Promise.resolve();
   const controller = new AbortController();
+  let executionPhase: CodingTaskRunFailurePhase = "runner_start";
+  let appServerProcessSpawned = false;
+  let turnIdentityFailure: (Error & { codingTaskFailure: CodingTaskRunFailure }) | undefined;
 
   const persistRun = async (patch: Partial<CodingTaskRunState> = {}): Promise<void> => {
     runState = { ...runState, ...patch, updatedAt: new Date().toISOString(), events: runState.events.slice(-MAX_EVENTS) };
@@ -1519,10 +1731,32 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
   const recordEvent = (event: CodexAppServerEvent): void => {
     const safe = boundedEvent(event);
     runState.events = [...runState.events, { at: new Date().toISOString(), event: safe }].slice(-MAX_EVENTS);
-    if (event.type === "turn_started") {
+    if (event.type === "app_server_process_spawned") {
+      appServerProcessSpawned = true;
+    } else if (event.type === "app_server_initialize_requested") {
+      executionPhase = "app_server_initialize";
+      runState.initializeRequestedAt = new Date().toISOString();
+    } else if (event.type === "thread_establish_requested") {
+      executionPhase = "thread_establish";
+      runState.threadEstablishRequestedAt = new Date().toISOString();
+    } else if (event.type === "turn_start_requested") {
+      executionPhase = "turn_start";
+      runState.turnStartRequestedAt = new Date().toISOString();
+    } else if (event.type === "turn_started") {
+      executionPhase = "turn_active";
       runState.threadId = event.threadId;
       runState.turnId = event.turnId;
-      heartbeat({ threadId: event.threadId, sessionId: runState.sessionId, turnId: event.turnId, eventMessage: `Codex turn ${event.turnId} started.` });
+      if (definition.expectedPreviousTurnId && event.turnId === definition.expectedPreviousTurnId) {
+        const message = "Codex continuation returned the previous semantic turn identity.";
+        const error = new Error(message) as Error & { codingTaskFailure: CodingTaskRunFailure };
+        error.codingTaskFailure = runFailure("identity_mismatch", "identity", "turn_start", message, runState);
+        turnIdentityFailure = error;
+        controller.abort();
+        void client?.interrupt().catch(() => undefined);
+      } else {
+        heartbeat({ threadId: event.threadId, sessionId: runState.sessionId, turnId: event.turnId,
+          eventMessage: `Codex turn ${event.turnId} started.` });
+      }
     } else if (event.type === "server_request_declined") {
       declined = true;
     }
@@ -1594,8 +1828,11 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
     const queuedCancellation = await readQueuedRunCancellation(paths, definition);
     if (queuedCancellation && !current.activeOperation) {
       const now = new Date().toISOString();
+      const failure = runFailure("canceled", "cancellation", "runner_start",
+        queuedCancellation.reason ?? "Canceled before launch.", runState);
       await persistRun({ status: "canceled", finishedAt: now, heartbeatAt: now,
-        error: queuedCancellation.reason ? bounded(`Canceled before launch: ${queuedCancellation.reason}`, 20_000) : undefined });
+        error: queuedCancellation.reason ? bounded(`Canceled before launch: ${queuedCancellation.reason}`, 20_000) : undefined,
+        failure });
       return;
     }
     taskState = await beginCodingTaskOperation({ dataRoot }, definition.taskId, {
@@ -1615,13 +1852,22 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
         gitObservation
       });
       const canceledAt = taskState.finishedAt ?? new Date().toISOString();
+      const failure = runFailure("canceled", "cancellation", "runner_start",
+        cancellationAfterBegin.reason ?? "Canceled before launch.", runState);
       await persistRun({ status: "canceled", finishedAt: canceledAt, heartbeatAt: canceledAt,
-        error: cancellationAfterBegin.reason ? bounded(`Canceled before launch: ${cancellationAfterBegin.reason}`, 20_000) : undefined });
+        error: cancellationAfterBegin.reason ? bounded(`Canceled before launch: ${cancellationAfterBegin.reason}`, 20_000) : undefined,
+        failure });
       return;
     }
     const startedAt = new Date().toISOString();
+    const attemptStartGitObservation = await observeCodingTask({ dataRoot }, definition.taskId, {
+      executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
+      operationId: definition.operationId, maxGitOutputBytes: Math.min(definition.maxLogBytes, 64 * 1024)
+    });
     await persistRun({ status: "running", startedAt, heartbeatAt: startedAt, runnerPid: process.pid,
+      attemptStartGitObservation,
       runnerNonce: runnerLock.record.nonce, runnerStartedAt: runnerLock.record.processStartedAt });
+    executionPhase = "app_server_initialize";
     client = new CodexAppServerClient({ codexBinary: definition.codexBinary, cwd: definition.worktreeRoot,
       env: sanitizedRuntimeEnv({
         CODEX_HOME: process.env.CODEX_HOME,
@@ -1631,8 +1877,24 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
         NO_PROXY: process.env.NO_PROXY,
         no_proxy: process.env.no_proxy
       }), inheritEnv: false, turnTimeoutMs: definition.timeoutMs, onEvent: recordEvent });
-    const identity = await client.startOrResumeThread({ threadId: definition.threadId, model: definition.model,
-      effort: definition.effort, approvalPolicy: "never", networkAccess: false });
+    let identity: Awaited<ReturnType<CodexAppServerClient["startOrResumeThread"]>>;
+    try {
+      identity = await client.startOrResumeThread({ threadId: definition.threadId, model: definition.model,
+        effort: definition.effort, approvalPolicy: "never", networkAccess: false });
+    } catch (error) {
+      const message = errorMessage(error);
+      const requestWasWritten = Boolean(runState.threadEstablishRequestedAt);
+      const initializeTransport = error instanceof CodexAppServerInitializeTransportError;
+      const code: CodingTaskRunFailureCode = requestWasWritten || runState.initializeRequestedAt && !initializeTransport
+        ? "identity_mismatch" : appServerProcessSpawned ? "app_server_initialize_transport" : "app_server_startup";
+      const wrapped = new Error(message) as Error & { codingTaskFailure?: CodingTaskRunFailure };
+      wrapped.codingTaskFailure = runFailure(code, code === "identity_mismatch" ? "identity" : "infrastructure",
+        requestWasWritten ? "thread_establish" : runState.initializeRequestedAt ? "app_server_initialize" :
+          code === "app_server_startup" ? "runner_start" : "app_server_initialize",
+        message, runState);
+      throw wrapped;
+    }
+    executionPhase = "thread_establish";
     if (definition.expectedSessionId && identity.sessionId !== definition.expectedSessionId) {
       throw new Error("Codex thread resume returned an unexpected session identity.");
     }
@@ -1663,16 +1925,26 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
       }).catch(() => controller.abort());
     }, REQUEST_POLL_MS);
     requestTimer.unref();
+    executionPhase = "turn_start";
     const result = await client.runTurn({ prompt: definition.prompt, model: definition.model, effort: definition.effort,
       approvalPolicy: "never", networkAccess: false, timeoutMs: definition.timeoutMs, signal: controller.signal,
       clientUserMessageId: definition.operationId });
     await mutationChain;
     await lockRefresh;
     if (mutationError) throw mutationError;
+    if (turnIdentityFailure) throw turnIdentityFailure;
     await finishSuccessfulResult(result);
   } catch (error) {
     await mutationChain.catch(() => undefined);
-    const message = bounded(errorMessage(error), 20_000);
+    const effectiveError = turnIdentityFailure ?? error;
+    const message = bounded(errorMessage(effectiveError), 20_000);
+    const taggedFailure = (effectiveError as Error & { codingTaskFailure?: CodingTaskRunFailure }).codingTaskFailure;
+    const failure = taggedFailure ?? runFailure(
+      cancelRequested ? "canceled" : declined ? "approval_or_input_declined" :
+        runState.turnId || runState.turnStartRequestedAt ? "unknown" : "identity_mismatch",
+      cancelRequested ? "cancellation" : declined ? "policy" :
+        runState.turnId || runState.turnStartRequestedAt ? "unknown" : "identity",
+      runState.turnId ? "turn_active" : executionPhase, message, runState);
     const authoritative = await store.get(definition.taskId).catch(() => undefined);
     if (!authoritative) {
       await persistRun({ status: "running", finishedAt: undefined,
@@ -1712,8 +1984,11 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
     }
     const now = taskState?.finishedAt ?? new Date().toISOString();
     const status: CodingTaskRunStatus = taskState?.lifecycle === "canceled" || cancelRequested ? "canceled" : "failed";
+    const terminalFailure = status === "canceled" ? runFailure("canceled", "cancellation",
+      runState.turnId ? "turn_active" : runState.turnStartRequestedAt ? "turn_start" : "runner_start",
+      "Coding task cancellation won terminal completion.", runState) : failure;
     await persistRun({ status, finishedAt: now, error: status === "failed" ? message : undefined,
-      approvalOrInputDeclined: declined });
+      approvalOrInputDeclined: declined, failure: terminalFailure });
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (requestTimer) clearInterval(requestTimer);
@@ -1734,10 +2009,18 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
       executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
       operationId: definition.operationId, maxGitOutputBytes: definition.maxLogBytes
     });
+    const failure = status === "failed" ? runFailure(
+      declined ? "approval_or_input_declined" : result.timedOut ? "turn_timeout" : "turn_failed",
+      declined ? "policy" : "model_or_tool", result.turnId ? "turn_active" : "turn_start",
+      result.errors.join("\n") || "Codex turn failed or was interrupted.", { ...runState, turnId: result.turnId,
+        approvalOrInputDeclined: declined }) : status === "canceled" ? runFailure("canceled", "cancellation",
+      result.turnId ? "turn_active" : "turn_start", "Codex turn was canceled.", { ...runState,
+        turnId: result.turnId, approvalOrInputDeclined: declined }) : undefined;
     await persistRun({ status, finishedAt: now, heartbeatAt: now, threadId: result.threadId,
       sessionId: result.sessionId, turnId: result.turnId, finalText, latestPlan: result.latestPlan,
       latestDiff, warnings: result.warnings.slice(-100), errors: result.errors.slice(-100),
       approvalOrInputDeclined: declined,
+      failure,
       ...(status === "failed" ? { error: bounded(result.errors.join("\n") || "Codex turn failed or was interrupted.", 20_000) } : {}) });
     if (!taskState) throw new Error("Coding task state was unavailable at completion.");
     taskState = await finishCodingTaskOperationFenced({ dataRoot }, definition.taskId, {
@@ -1751,8 +2034,10 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
     });
     if (taskState.lifecycle === "canceled" && runState.status !== "canceled") {
       cancelRequested = true;
+      const canceledFailure = runFailure("canceled", "cancellation", result.turnId ? "turn_active" : "turn_start",
+        "Coding task cancellation won terminal completion.", { ...runState, turnId: result.turnId });
       await persistRun({ status: "canceled", finishedAt: taskState.finishedAt ?? new Date().toISOString(),
-        error: undefined });
+        error: undefined, failure: canceledFailure });
     }
   }
 }
