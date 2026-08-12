@@ -234,11 +234,15 @@ const client = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--al
   }
 });
 
-await client.request('initialize', {
+const initialized = await client.request('initialize', {
   protocolVersion: '2024-11-05',
   capabilities: {},
   clientInfo: { name: 'codexpro-smoke', version: '0.1.0' }
 });
+const serverInstructionText = initialized.instructions ?? '';
+if (/Persistent Goals[^.]*one-turn\/no-retry/i.test(serverInstructionText) || !/1-4 upfront-approved turns/i.test(serverInstructionText) || !/scheduler never invents or mutates/i.test(serverInstructionText) || !/only after the final authorized turn/i.test(serverInstructionText)) {
+  throw new Error(`server instructions did not describe Phase 9 continuation authority: ${serverInstructionText}`);
+}
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
@@ -262,10 +266,14 @@ const proposeDescriptor = tools.tools.find((tool) => tool.name === 'propose_goal
 if (goalOrchestrationSupported() && !JSON.stringify(proposeDescriptor?.inputSchema).includes('persistent')) {
   throw new Error(`propose_goal schema did not advertise persistent policy: ${JSON.stringify(proposeDescriptor?.inputSchema)}`);
 }
+const proposeSchemaText = JSON.stringify(proposeDescriptor?.inputSchema);
+if (goalOrchestrationSupported() && (!proposeSchemaText.includes('continuation_intents') || !proposeSchemaText.includes('intent_id') || !proposeSchemaText.includes('max_turns_per_worker') || !proposeSchemaText.includes('maximum":4'))) {
+  throw new Error(`propose_goal schema did not expose bounded continuation intents and the four-turn total cap: ${proposeSchemaText}`);
+}
 if (tools.tools.find((tool) => tool.name === 'approve_goal')?.annotations?.destructiveHint !== false || tools.tools.find((tool) => tool.name === 'cancel_goal')?.annotations?.destructiveHint !== true) {
   throw new Error('Goal approval/cancel annotations do not match their actual effects.');
 }
-const toolCardUri = 'ui://widget/codexpro-tool-card-v15.html';
+const toolCardUri = 'ui://widget/codexpro-tool-card-v16.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
@@ -301,7 +309,15 @@ try {
   const executionInventory = await executionInventoryClient.request('tools/list', {});
   const executionTools = new Map(executionInventory.tools.map((tool) => [tool.name, tool]));
   if (goalOrchestrationSupported() && (!executionTools.has('start_goal') || !executionTools.has('resume_goal'))) throw new Error('Goal execution tools were hidden despite the explicit full execution gate.');
-  if (goalOrchestrationSupported() && (executionTools.get('start_goal')?.annotations?.destructiveHint !== true || executionTools.get('resume_goal')?.annotations?.destructiveHint !== true)) throw new Error('Goal start/resume annotations did not report execution effects.');
+  if (
+    goalOrchestrationSupported() &&
+    (executionTools.get('start_goal')?.annotations?.readOnlyHint !== false ||
+      executionTools.get('start_goal')?.annotations?.destructiveHint !== false ||
+      executionTools.get('resume_goal')?.annotations?.readOnlyHint !== false ||
+      executionTools.get('resume_goal')?.annotations?.destructiveHint !== false)
+  ) {
+    throw new Error('Goal start/resume annotations did not report non-destructive private execution mutations.');
+  }
 } finally {
   executionInventoryClient.close();
 }
@@ -452,6 +468,7 @@ const toolCard = resources.resources.find((resource) => resource.uri === toolCar
 if (!toolCard) throw new Error(`missing tool-card resource: ${toolCardUri}`);
 if (toolCard.mimeType !== 'text/html;profile=mcp-app') throw new Error(`unexpected tool-card mime type: ${toolCard.mimeType}`);
 const legacyToolCardUris = [
+  'ui://widget/codexpro-tool-card-v15.html',
   'ui://widget/codexpro-tool-card-v14.html',
   'ui://widget/codexpro-tool-card-v13.html',
   'ui://widget/codexpro-tool-card-v12.html',

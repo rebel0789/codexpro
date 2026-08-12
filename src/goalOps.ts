@@ -4,12 +4,14 @@ import { inspectCodingTaskSource, type CodingTaskSourceWorkspace, type CodingTas
 import { GoalStore, type GoalStoreConfig } from "./goalStore.js";
 import { verifyGoalLiveProjection } from "./goalProjection.js";
 import { assertGoalContentPolicySnapshot } from "./goalPolicy.js";
-import { buildGoalWorkerPrompt } from "./goalPrompt.js";
+import { assertGoalPromptContractBudget, assertGoalWorkerPromptBudget, buildGoalWorkerPrompt } from "./goalPrompt.js";
 import {
   GOAL_STATE_VERSION,
   assertGoalDag,
+  computeGoalContinuationIntentFingerprint,
   parseGoalState,
   validateGoalId,
+  validateGoalContinuationIntentId,
   validateGoalWorkId,
   type GoalBlackboardKind,
   type GoalBlackboardRecord,
@@ -32,6 +34,7 @@ export interface ProposeGoalWorkInput {
   dependsOn?: string[];
   parallelGroup?: string;
   fileGlobs?: string[];
+  continuationIntents?: Array<{ intentId: string; prompt: string }>;
 }
 
 export interface ProposeGoalInput {
@@ -102,17 +105,27 @@ function texts(values: string[] | undefined, name: string, maxItems: number, max
 
 function normalizeWork(items: ProposeGoalWorkInput[]): GoalWorkItem[] {
   if (items.length < 1 || items.length > 50) throw new Error("A Goal requires 1-50 work items.");
-  const work = items.map((item): GoalWorkItem => ({
-    workId: validateGoalWorkId(item.workId),
-    title: text(item.title, `Goal work ${item.workId} title`, 500),
-    goal: text(item.goal, `Goal work ${item.workId} goal`, 20_000),
-    acceptanceCriteria: texts(item.acceptanceCriteria, `Goal work ${item.workId} acceptance criteria`, 50, 2_000),
-    verification: texts(item.verification, `Goal work ${item.workId} verification`, 50, 2_000),
-    dependsOn: (item.dependsOn ?? []).map(validateGoalWorkId),
-    ...(item.parallelGroup ? { parallelGroup: text(item.parallelGroup, `Goal work ${item.workId} parallel group`, 100) } : {}),
-    fileGlobs: texts(item.fileGlobs, `Goal work ${item.workId} file globs`, 100, 1_000),
-    status: "planned"
-  }));
+  const work = items.map((item): GoalWorkItem => {
+    const workId = validateGoalWorkId(item.workId);
+    const continuationIntents = (item.continuationIntents ?? []).map((intent, index) => {
+      const intentId = validateGoalContinuationIntentId(intent.intentId);
+      const prompt = text(intent.prompt, `Goal work ${item.workId} continuation intent ${intentId}`, 65_536);
+      return { intentId, prompt, fingerprint: computeGoalContinuationIntentFingerprint(workId, index + 2, intentId, prompt) };
+    });
+    if (new Set(continuationIntents.map((intent) => intent.intentId)).size !== continuationIntents.length) throw new Error(`Goal work ${workId} continuation intent ids must be unique.`);
+    return {
+      workId,
+      title: text(item.title, `Goal work ${item.workId} title`, 500),
+      goal: text(item.goal, `Goal work ${item.workId} goal`, 20_000),
+      acceptanceCriteria: texts(item.acceptanceCriteria, `Goal work ${item.workId} acceptance criteria`, 50, 2_000),
+      verification: texts(item.verification, `Goal work ${item.workId} verification`, 50, 2_000),
+      dependsOn: (item.dependsOn ?? []).map(validateGoalWorkId),
+      ...(item.parallelGroup ? { parallelGroup: text(item.parallelGroup, `Goal work ${item.workId} parallel group`, 100) } : {}),
+      fileGlobs: texts(item.fileGlobs, `Goal work ${item.workId} file globs`, 100, 1_000),
+      ...(continuationIntents.length ? { continuationIntents } : {}),
+      status: "planned"
+    };
+  });
   assertGoalDag(work);
   return work;
 }
@@ -129,9 +142,7 @@ function normalizeLimits(limits: GoalResourceLimits): GoalResourceLimits {
     maxRetriesPerWorker: integer(limits.maxRetriesPerWorker, "maxRetriesPerWorker", 0, 10),
     maxLogBytes: integer(limits.maxLogBytes, "maxLogBytes", 65_536, 104_857_600)
   };
-  if (normalized.maxTurnsPerWorker !== 1 || normalized.maxRetriesPerWorker !== 0) {
-    throw new Error("The current Goal execution slice supports exactly one turn per worker and no automatic retries.");
-  }
+  if (normalized.maxRetriesPerWorker !== 0) throw new Error("Goal execution does not support automatic retries.");
   return normalized;
 }
 
@@ -166,7 +177,8 @@ function contractShape(state: Pick<GoalState, "version" | "goalId" | "goalKey" |
     work: state.work.map((item) => ({
       workId: item.workId, title: item.title, goal: item.goal, acceptanceCriteria: item.acceptanceCriteria,
       verification: item.verification, dependsOn: item.dependsOn,
-      ...(item.parallelGroup ? { parallelGroup: item.parallelGroup } : {}), fileGlobs: item.fileGlobs, status: "planned" as const
+      ...(item.parallelGroup ? { parallelGroup: item.parallelGroup } : {}), fileGlobs: item.fileGlobs,
+      ...(item.continuationIntents ? { continuationIntents: item.continuationIntents } : {}), status: "planned" as const
     })),
     ...(state.workspacePolicy === "live" ? { live: { projectedIntegrationSha: state.baseSha, projections: [] } } : {})
   };
@@ -201,6 +213,7 @@ export async function proposeGoal(
   const identity = await inspectCodingTaskSource(workspace, input.baseSha, guard);
   const goalId = `goal_${sha256(`${identity.commonDir}\0${goalKey}`).slice(0, 24)}`;
   const work = normalizeWork(input.work);
+  const limits = normalizeLimits(input.limits);
   const permissions = normalizePermissions(input.permissions);
   const contentPolicy = input.contentPolicy ? assertGoalContentPolicySnapshot(input.contentPolicy) : undefined;
   if (input.executionPolicy === "persistent") {
@@ -208,6 +221,11 @@ export async function proposeGoal(
     if (permissions.commands.length || Object.values(permissions.sourceEffects).some(Boolean)) {
       throw new Error("Persistent Goal execution requires empty commands and all sourceEffects=false.");
     }
+    if (limits.maxTurnsPerWorker > 4 || work.some((item) => (item.continuationIntents?.length ?? 0) !== limits.maxTurnsPerWorker - 1)) {
+      throw new Error("Persistent Goal maxTurnsPerWorker must be 1-4 and equal one initial turn plus every work item's approved continuation intents.");
+    }
+  } else if (limits.maxTurnsPerWorker !== 1 || work.some((item) => item.continuationIntents?.length)) {
+    throw new Error("Supervised Goal execution remains a one-turn contract without persistent continuation intents.");
   }
   if (input.workspacePolicy === "live" && !permissions.sourceEffects.apply) {
     throw new Error("A supervised Live Goal requires the existing sourceEffects.apply permission.");
@@ -225,7 +243,7 @@ export async function proposeGoal(
     workspacePolicy: input.workspacePolicy,
     workerModel: text(input.workerModel, "Goal worker model", 160),
     workerEffort: input.workerEffort,
-    limits: normalizeLimits(input.limits),
+    limits,
     permissions,
     ...(contentPolicy ? { contentPolicy } : {}),
     sourceRoot: identity.sourceRoot,
@@ -238,7 +256,9 @@ export async function proposeGoal(
     work,
     ...(input.workspacePolicy === "live" ? { live: { projectedIntegrationSha: identity.baseSha, projections: [] } } : {})
   };
-  for (const item of immutable.work) buildGoalWorkerPrompt(immutable as GoalState, item);
+  const promptContract = immutable.work.map((item) => ({ initialPrompt: buildGoalWorkerPrompt(immutable as GoalState, item), continuationIntents: item.continuationIntents ?? [] }));
+  for (const entry of promptContract) assertGoalWorkerPromptBudget(entry.initialPrompt, entry.continuationIntents);
+  assertGoalPromptContractBudget(promptContract);
   if (!path.isAbsolute(immutable.integrationWorktreeRoot)) throw new Error("Goal integration worktree path must be absolute.");
   const contractFingerprint = computeGoalContractFingerprint(immutable);
   const createFingerprint = sha256(`codexpro-goal-create-v1\0${goalKey}\0${contractFingerprint}`);

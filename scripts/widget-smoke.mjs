@@ -399,15 +399,47 @@ const proposedPersistentGoal = mount({
         approval: { status: "pending" },
         completionCriteria: ["Pro reviews the private integration checkpoint"],
         blackboard: [],
-        work: [{ workId: "work_one", title: "Implement bounded change", status: "planned", dependsOn: [] }]
+        work: [{
+          workId: "work_one", title: "Implement bounded change", status: "planned", dependsOn: [],
+          authorizedTurnCount: 2, completedTurnCount: 0, remainingTurnCount: 2,
+          continuationIntents: [{ intentId: "verify_final", fingerprint: "d".repeat(64), promptSummary: "Inspect the first turn result and perform the bounded final verification." }],
+          turns: []
+        }]
       }
     }
   }
 });
 assert.match(proposedPersistentGoal.root.innerHTML, /Persistent/);
-assert.match(proposedPersistentGoal.root.innerHTML, /automatic dependency scheduling and deterministic private integration/i);
-assert.match(proposedPersistentGoal.root.innerHTML, /never source application or completion/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /scheduler never invents prompts/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /private integration waits for the final authorized turn/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /approved verify_final/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /Inspect the first turn result/);
 assert.match(proposedPersistentGoal.root.innerHTML, /Approve exact contract/);
+
+const continuingPersistentGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "get_goal",
+      goal: {
+        goalId: "goal_5123456789abcdef01234567", title: "Continue approved work", lifecycle: "running", revision: 7,
+        executionPolicy: "persistent", workspacePolicy: "isolated", permissions: { sourceEffects: { apply: false } },
+        baseSha: "a".repeat(40), contractFingerprint: "b".repeat(64), approval: { status: "approved" },
+        completionCriteria: ["Finish both approved turns"], blackboard: [],
+        work: [{
+          workId: "work_two", title: "Two exact turns", status: "continuing", dependsOn: [],
+          authorizedTurnCount: 2, completedTurnCount: 1, remainingTurnCount: 1, currentTurnIndex: 1,
+          continuationIntents: [{ intentId: "finish_exactly", fingerprint: "e".repeat(64), promptSummary: "Apply the approved final bounded check.", prompt: "EXACT_PROMPT_MUST_NOT_RENDER_123456" }],
+          turns: [{ turnIndex: 1, intentId: "initial", status: "succeeded", stopReason: "terminal_success", operationId: "goal:phase9:work_two:run:1" }]
+        }]
+      }
+    }
+  }
+});
+assert.match(continuingPersistentGoal.root.innerHTML, /turn 1\/2 · 1 completed/i);
+assert.match(continuingPersistentGoal.root.innerHTML, /private and non-integrable/i);
+assert.match(continuingPersistentGoal.root.innerHTML, /dependencies stay locked until the final authorized turn succeeds/i);
+assert.match(continuingPersistentGoal.root.innerHTML, /Terminal success/i);
+assert.doesNotMatch(continuingPersistentGoal.root.innerHTML, /EXACT_PROMPT_MUST_NOT_RENDER_123456/, "card should render the bounded approved summary, not an exact continuation prompt field");
 
 const strandedPersistentGoal = mount({
   toolOutput: {

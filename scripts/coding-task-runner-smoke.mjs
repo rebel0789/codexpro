@@ -16,20 +16,23 @@ const fakeLaunchCount = path.join(temp, 'fake-launch-count');
 const fakeSource = `#!/usr/bin/env node
 import fs from 'node:fs';
 const launchCountPath = ${JSON.stringify(fakeLaunchCount)};
-let launchCount = 0;
-try { launchCount = Number.parseInt(fs.readFileSync(launchCountPath, 'utf8'), 10) || 0; } catch {}
-fs.writeFileSync(launchCountPath, String(launchCount + 1));
+fs.appendFileSync(launchCountPath, String(process.pid) + '\\n');
 let buffer = '';
 const threadId = 'thread-smoke';
 const sessionId = 'session-smoke';
-const turnId = 'turn-smoke';
+let turnId = 'turn-smoke';
 function send(value) { process.stdout.write(JSON.stringify(value) + '\\n'); }
-function turn(status = 'inProgress') { return { id: turnId, status, error: null, items: status === 'completed' ? [{ type: 'agentMessage', id: 'final', text: 'finished sk-1234567890SECRET', phase: 'final_answer' }] : [] }; }
+function turn(status = 'inProgress') { return { id: turnId, status, error: null, items: status === 'completed' ? [{ type: 'agentMessage', id: 'final', text: 'finished ' + turnId + ' sk-1234567890SECRET', phase: 'final_answer' }] : [] }; }
 function handle(message) {
   if (message.method === 'initialize') return send({ id: message.id, result: {} });
   if (message.method === 'initialized') return;
   if (message.method === 'thread/start' || message.method === 'thread/resume') return send({ id: message.id, result: { thread: { id: message.params.threadId || threadId, sessionId, ephemeral: false } } });
-  if (message.method === 'turn/start') return send({ id: message.id, result: { turn: turn() } });
+  if (message.method === 'turn/start') {
+    turnId = message.params.clientUserMessageId === 'run-two' ? 'turn-two' : 'turn-smoke';
+    send({ id: message.id, result: { turn: turn() } });
+    if (turnId === 'turn-two') setTimeout(() => send({ method: 'turn/completed', params: { threadId, turn: turn('completed') } }), 10);
+    return;
+  }
   if (message.method === 'turn/steer') {
     send({ id: message.id, result: { turnId } });
     setTimeout(() => send({ method: 'turn/completed', params: { threadId, turn: turn('completed') } }), 10);
@@ -71,7 +74,7 @@ try {
   await fs.writeFile(fakeCodex, fakeSource, { mode: 0o755 });
   const { CodingTaskStore } = await import(pathToFileURL(path.join(root, 'dist', 'codingTaskStore.js')).href);
   const { beginCodingTaskOperation, requestCodingTaskCancellation } = await import(pathToFileURL(path.join(root, 'dist', 'codingTaskOps.js')).href);
-  const { launchCodingTaskRun, waitForCodingTaskRun, submitCodingTaskFollowup, getCodingTaskSteer, getCodingTaskRun, reconcileCodingTaskRun, cancelQueuedCodingTaskRun } = await import(
+  const { launchCodingTaskRun, waitForCodingTaskRun, submitCodingTaskFollowup, submitCodingTaskContinuation, getCodingTaskContinuation, getCodingTaskSteer, getCodingTaskRun, reconcileCodingTaskRun, cancelQueuedCodingTaskRun, holdCodingTaskRunLockForTest } = await import(
     pathToFileURL(path.join(root, 'dist', 'codingTaskRunner.js')).href
   );
   const taskId = 'task_0123456789abcdef01234567';
@@ -133,7 +136,7 @@ try {
   const finished = await waitForCodingTaskRun({ dataRoot }, taskId, 'run-one', { timeoutMs: 5_000 });
   assert.equal(finished.status, 'waiting_review', JSON.stringify(finished, null, 2));
   await waitFor(async () => (await waitForCodingTaskRun({ dataRoot }, taskId, 'run-one', { timeoutMs: 0 })).runnerAlive === false);
-  assert.equal(finished.finalText, 'finished [REDACTED_SECRET]');
+  assert.equal(finished.finalText, 'finished turn-smoke [REDACTED_SECRET]');
   const completedTask = await store.get(taskId);
   assert.equal(completedTask.lifecycle, 'waiting_review');
   assert.equal(completedTask.activeOperation, undefined);
@@ -145,8 +148,301 @@ try {
   assert.equal(responseLossRetry.steer.status, 'delivered');
   assert.equal(responseLossRetry.reused, true);
 
-  const reused = await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, launchInput);
-  assert.equal(reused.reused, true);
+  const continuationInput = {
+    requestKey: 'turn-two-request', operationId: 'run-two', turnOrdinal: 2,
+    previousOperationId: 'run-one', prompt: 'Perform the bounded second turn.',
+    expectedRevision: completedTask.revision, executorEpoch: completedTask.executorLease.epoch,
+    leaseId: completedTask.executorLease.leaseId, expectedThreadId: completedTask.codexThreadId,
+    expectedSessionId: completedTask.codexSessionId, expectedPreviousTurnId: completedTask.codexTurnId,
+    model: 'gpt-5.6-sol', effort: 'high', timeoutMs: 5_000
+  };
+  const rejectedContinuationKey = 'turn-two-authority-rejected';
+  const rejectedContinuationPath = path.join(taskDirFor(taskId, dataRoot), 'continuations',
+    `request_${createHash('sha256').update(rejectedContinuationKey).digest('hex').slice(0, 32)}`);
+  const taskBeforeRejectedContinuation = await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json'));
+  const launchesBeforeRejectedContinuation = await readLaunchCount();
+  await assert.rejects(
+    submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId,
+      { ...continuationInput, requestKey: rejectedContinuationKey, expectedSessionId: 'session-wrong' }),
+    /thread, session, or previous turn identity changed/
+  );
+  assert.equal(await fs.stat(rejectedContinuationPath).catch(() => undefined), undefined,
+    'failed continuation authority must not create its decision directory');
+  assert.deepEqual(await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json')),
+    taskBeforeRejectedContinuation, 'failed continuation authority must not mutate the task');
+  assert.equal(await readLaunchCount(), launchesBeforeRejectedContinuation,
+    'failed continuation authority must not launch App Server');
+  const missingSessionInput = { ...continuationInput, requestKey: `${rejectedContinuationKey}-missing` };
+  delete missingSessionInput.expectedSessionId;
+  const missingSessionPath = path.join(taskDirFor(taskId, dataRoot), 'continuations',
+    `request_${createHash('sha256').update(missingSessionInput.requestKey).digest('hex').slice(0, 32)}`);
+  await assert.rejects(
+    submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId, missingSessionInput),
+    /expectedSessionId is required/
+  );
+  assert.equal(await fs.stat(missingSessionPath).catch(() => undefined), undefined,
+    'missing session authority must fail before decision storage');
+  const continuation = await submitCodingTaskContinuation(
+    { dataRoot, codexBinary: fakeCodex }, taskId, continuationInput
+  );
+  assert.equal(continuation.reused, false);
+  assert.equal(continuation.decision.turnOrdinal, 2);
+  assert.equal(continuation.decision.previousOperationId, 'run-one');
+  assert.equal(continuation.decision.expectedThreadId, 'thread-smoke');
+  assert.equal(continuation.decision.expectedSessionId, 'session-smoke');
+  assert.equal(continuation.decision.expectedPreviousTurnId, 'turn-smoke');
+  const turnTwo = await waitForCodingTaskRun({ dataRoot }, taskId, 'run-two', { timeoutMs: 5_000 });
+  assert.equal(turnTwo.status, 'waiting_review');
+  assert.equal(turnTwo.threadId, 'thread-smoke');
+  assert.equal(turnTwo.sessionId, 'session-smoke');
+  assert.equal(turnTwo.turnId, 'turn-two');
+  assert.equal(turnTwo.finalText, 'finished turn-two [REDACTED_SECRET]');
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+  const continuationView = await getCodingTaskContinuation({ dataRoot }, taskId, 'turn-two-request');
+  assert.equal(continuationView.decision.fingerprint, continuation.decision.fingerprint);
+  assert.equal(continuationView.run.operationId, 'run-two');
+  const continuationRetry = await submitCodingTaskContinuation(
+    { dataRoot, codexBinary: fakeCodex }, taskId, continuationInput
+  );
+  assert.equal(continuationRetry.reused, true);
+  assert.equal(continuationRetry.decision.fingerprint, continuation.decision.fingerprint);
+  assert.equal(continuationRetry.run.turnId, 'turn-two');
+  await assert.rejects(
+    submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId,
+      { ...continuationInput, prompt: 'tampered continuation prompt' }),
+    /continuation decision identity|different continuation contract/
+  );
+  assert.equal(await readLaunchCount(), 2, 'response-loss retry and conflicting continuation must not start a fresh App Server');
+  const continuationDecisionPath = path.join(taskDirFor(taskId, dataRoot), 'continuations',
+    `request_${createHash('sha256').update('turn-two-request').digest('hex').slice(0, 32)}`, 'decision.json');
+  const pristineDecision = await fs.readFile(continuationDecisionPath, 'utf8');
+  const decisionTamperCases = [
+    (value) => { value.version = 2; },
+    (value) => { value.taskId = 'task_999999999999999999999999'; },
+    (value) => { value.requestKey = 'turn-two-request-tampered'; },
+    (value) => { value.fingerprint = 'f'.repeat(64); },
+    (value) => { value.prompt = 'tampered persisted prompt'; },
+    (value) => { value.expectedThreadId = 'thread-tampered'; },
+    (value) => { value.expectedPreviousTurnId = 'turn-tampered'; },
+    (value) => { value.turnOrdinal = 3; },
+    (value) => { value.operationId = 'run-three'; },
+    (value) => { value.previousOperationId = 'run-zero'; },
+    (value) => { value.expectedRevision += 1; },
+    (value) => { value.executorEpoch += 1; },
+    (value) => { value.leaseId = 'lease-tampered'; },
+    (value) => { value.expectedSessionId = 'session-tampered'; },
+    (value) => { value.model = 'gpt-tampered'; },
+    (value) => { value.effort = 'low'; },
+    (value) => { value.timeoutMs += 1_000; },
+    (value) => { value.createdAt = new Date(Date.parse(value.createdAt) + 1_000).toISOString(); }
+  ];
+  for (const tamper of decisionTamperCases) {
+    const changed = JSON.parse(pristineDecision); tamper(changed);
+    await fs.writeFile(continuationDecisionPath, JSON.stringify(changed), { mode: 0o600 });
+    const launchesBeforeTamper = await readLaunchCount();
+    const taskBytesBeforeTamper = await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json'));
+    await assert.rejects(
+      submitCodingTaskContinuation({ dataRoot, codexBinary: fakeCodex }, taskId, continuationInput),
+      /continuation decision identity or fingerprint mismatch/
+    );
+    assert.equal(await readLaunchCount(), launchesBeforeTamper);
+    assert.deepEqual(await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json')), taskBytesBeforeTamper);
+    await fs.writeFile(continuationDecisionPath, pristineDecision, { mode: 0o600 });
+  }
+  const runTwoToken = `run_${createHash('sha256').update('run-two').digest('hex').slice(0, 32)}`;
+  const runTwoDefinitionPath = path.join(taskDirFor(taskId, dataRoot), 'runs', runTwoToken, 'definition.json');
+  const pristineRunTwoDefinition = await fs.readFile(runTwoDefinitionPath, 'utf8');
+  const definitionTamperCases = [
+    (value) => { value.version = 2; },
+    (value) => { value.taskId = 'task_999999999999999999999999'; },
+    (value) => { value.operationId = 'run-three'; },
+    (value) => { value.fingerprint = 'f'.repeat(64); },
+    (value) => { value.prompt = 'tampered definition prompt'; },
+    (value) => { value.threadId = 'thread-tampered'; },
+    (value) => { value.expectedSessionId = 'session-tampered'; },
+    (value) => { value.continuationFingerprint = 'a'.repeat(64); },
+    (value) => { value.expectedRevision += 1; },
+    (value) => { value.executorEpoch += 1; },
+    (value) => { value.leaseId = 'lease-tampered'; },
+    (value) => { value.model = 'gpt-tampered'; },
+    (value) => { value.effort = 'low'; },
+    (value) => { value.timeoutMs += 1_000; },
+    (value) => { value.worktreeRoot = `${value.worktreeRoot}-tampered`; },
+    (value) => { value.codexBinary = `${value.codexBinary}-tampered`; },
+    (value) => { value.maxLogBytes += 1; },
+    (value) => { value.createdAt = new Date(Date.parse(value.createdAt) + 1_000).toISOString(); }
+  ];
+  for (const tamper of definitionTamperCases) {
+    const tamperedRunDefinition = JSON.parse(pristineRunTwoDefinition); tamper(tamperedRunDefinition);
+    await fs.writeFile(runTwoDefinitionPath, JSON.stringify(tamperedRunDefinition), { mode: 0o600 });
+    const launchesBeforeDefinitionTamper = await readLaunchCount();
+    const taskBytesBeforeDefinitionTamper = await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json'));
+    await assert.rejects(getCodingTaskRun({ dataRoot }, taskId, 'run-two'),
+      /run definition identity mismatch|tampered run fingerprint/);
+    assert.equal(await readLaunchCount(), launchesBeforeDefinitionTamper);
+    assert.deepEqual(await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json')),
+      taskBytesBeforeDefinitionTamper);
+    await fs.writeFile(runTwoDefinitionPath, pristineRunTwoDefinition, { mode: 0o600 });
+  }
+
+  // Crash-safe publication: an empty run directory and a definition-only run are both recoverable,
+  // while the task lock plus launch marker permits exactly one detached App Server launch.
+  const emptyPublicationTask = await store.get(taskId);
+  const emptyPublicationOperation = 'publication-empty-dir';
+  const emptyPublicationInput = {
+    operationId: emptyPublicationOperation, prompt: 'Recover an empty publication directory.',
+    expectedRevision: emptyPublicationTask.revision, executorEpoch: emptyPublicationTask.executorLease.epoch,
+    leaseId: emptyPublicationTask.executorLease.leaseId, threadId: emptyPublicationTask.codexThreadId,
+    expectedSessionId: emptyPublicationTask.codexSessionId, timeoutMs: 5_000
+  };
+  const emptyPublicationDir = path.join(taskDirFor(taskId, dataRoot), 'runs',
+    `run_${createHash('sha256').update(emptyPublicationOperation).digest('hex').slice(0, 32)}`);
+  await fs.mkdir(emptyPublicationDir, { recursive: true, mode: 0o700 });
+  const staleDefinitionTemp = path.join(emptyPublicationDir,
+    `definition.json.999999.01234567-89ab-cdef-0123-456789abcdef.tmp`);
+  await fs.writeFile(staleDefinitionTemp, '{"partial":', { mode: 0o600 });
+  const launchesBeforeEmptyPublication = await readLaunchCount();
+  const emptyPublicationResults = await Promise.all(Array.from({ length: 12 }, () =>
+    launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, emptyPublicationInput)));
+  assert(emptyPublicationResults.every((result) => result.operationId === emptyPublicationOperation));
+  await waitFor(async () => (await readLaunchCount()) >= launchesBeforeEmptyPublication + 1);
+  await waitFor(async () => {
+    const view = await getCodingTaskRun({ dataRoot }, taskId, emptyPublicationOperation);
+    return view.status !== 'queued';
+  });
+  const emptyPublicationStarted = await getCodingTaskRun({ dataRoot }, taskId, emptyPublicationOperation);
+  assert.equal(emptyPublicationStarted.status, 'running', JSON.stringify(emptyPublicationStarted, null, 2));
+  await waitFor(async () => (await store.get(taskId)).activeOperation?.operationId === emptyPublicationOperation &&
+    (await store.get(taskId)).codexTurnActive);
+  assert.equal(await readLaunchCount(), launchesBeforeEmptyPublication + 1,
+    'concurrent empty-directory recovery must launch one App Server');
+  assert.equal(await fs.stat(staleDefinitionTemp).catch(() => undefined), undefined,
+    'stale atomic definition temp must be reclaimed under publication authority');
+  await submitCodingTaskFollowup({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    requestKey: 'finish-publication-empty', prompt: 'Finish empty publication recovery.', timeoutMs: 5_000
+  });
+  await waitForCodingTaskRun({ dataRoot }, taskId, emptyPublicationOperation, { timeoutMs: 5_000 });
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+
+  const definitionOnlyTask = await store.get(taskId);
+  const definitionOnlyOperation = 'publication-definition-only';
+  const definitionOnlyInput = {
+    operationId: definitionOnlyOperation, prompt: 'Recover a definition-only publication.',
+    expectedRevision: definitionOnlyTask.revision, executorEpoch: definitionOnlyTask.executorLease.epoch,
+    leaseId: definitionOnlyTask.executorLease.leaseId, threadId: definitionOnlyTask.codexThreadId,
+    expectedSessionId: definitionOnlyTask.codexSessionId, timeoutMs: 5_000
+  };
+  const definitionOnlyDir = path.join(taskDirFor(taskId, dataRoot), 'runs',
+    `run_${createHash('sha256').update(definitionOnlyOperation).digest('hex').slice(0, 32)}`);
+  const definitionOnlyCreatedAt = new Date().toISOString();
+  const definitionOnlyDefinition = withRunFingerprint({
+    version: 1, taskId, operationId: definitionOnlyOperation, prompt: definitionOnlyInput.prompt,
+    expectedRevision: definitionOnlyInput.expectedRevision, executorEpoch: definitionOnlyInput.executorEpoch,
+    leaseId: definitionOnlyInput.leaseId, worktreeRoot: definitionOnlyTask.worktreeRoot,
+    codexBinary: fakeCodex, threadId: definitionOnlyInput.threadId,
+    expectedSessionId: definitionOnlyInput.expectedSessionId, model: 'gpt-5.6-sol', effort: 'high',
+    timeoutMs: 5_000, maxLogBytes: 2 * 1024 * 1024, createdAt: definitionOnlyCreatedAt
+  });
+  await fs.mkdir(definitionOnlyDir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(definitionOnlyDir, 'definition.json'), JSON.stringify(definitionOnlyDefinition), { mode: 0o600 });
+  const staleStateTemp = path.join(definitionOnlyDir,
+    `state.json.999999.01234567-89ab-cdef-0123-456789abcdef.tmp`);
+  await fs.writeFile(staleStateTemp, '{"partial":', { mode: 0o600 });
+  const launchesBeforeDefinitionOnly = await readLaunchCount();
+  process.env.CODEXPRO_RUNNER_SMOKE = '1';
+  process.env.CODEXPRO_RUNNER_HANDOFF_DELAY_MS = '500';
+  const definitionOnlyLaunch = launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, definitionOnlyInput);
+  await waitFor(async () => {
+    const state = await fs.readFile(path.join(definitionOnlyDir, 'state.json'), 'utf8').catch(() => undefined);
+    return state ? JSON.parse(state).runnerNonce?.startsWith('launch:') : false;
+  });
+  const handoffBarrier = holdCodingTaskRunLockForTest({ dataRoot }, taskId, definitionOnlyOperation, 750);
+  const definitionOnlyResults = await Promise.all([
+    definitionOnlyLaunch, handoffBarrier.then(() => getCodingTaskRun({ dataRoot }, taskId, definitionOnlyOperation))
+  ]);
+  delete process.env.CODEXPRO_RUNNER_SMOKE;
+  delete process.env.CODEXPRO_RUNNER_HANDOFF_DELAY_MS;
+  assert(definitionOnlyResults.every((result) => result.operationId === definitionOnlyOperation));
+  await waitFor(async () => (await readLaunchCount()) >= launchesBeforeDefinitionOnly + 1, 12_000);
+  await waitFor(async () => (await store.get(taskId)).activeOperation?.operationId === definitionOnlyOperation &&
+    (await store.get(taskId)).codexTurnActive, 12_000);
+  assert.equal(await readLaunchCount(), launchesBeforeDefinitionOnly + 1,
+    'concurrent definition-only recovery must launch one App Server');
+  assert.equal(await fs.stat(staleStateTemp).catch(() => undefined), undefined,
+    'stale atomic state temp must be reclaimed under publication authority');
+  await submitCodingTaskFollowup({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    requestKey: 'finish-publication-definition', prompt: 'Finish definition publication recovery.', timeoutMs: 5_000
+  });
+  await waitForCodingTaskRun({ dataRoot }, taskId, definitionOnlyOperation, { timeoutMs: 5_000 });
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
+
+  // A child that exhausts the launch-lock handoff must exit without writing. Cancellation written
+  // under exact task authority while the lock is held remains byte-for-byte authoritative.
+  const timeoutCancelTask = await store.get(taskId);
+  const timeoutCancelOperation = 'handoff-timeout-cancel';
+  const timeoutCancelInput = {
+    operationId: timeoutCancelOperation, prompt: 'Lose the handoff lock without mutating cancellation.',
+    expectedRevision: timeoutCancelTask.revision, executorEpoch: timeoutCancelTask.executorLease.epoch,
+    leaseId: timeoutCancelTask.executorLease.leaseId, threadId: timeoutCancelTask.codexThreadId,
+    expectedSessionId: timeoutCancelTask.codexSessionId, timeoutMs: 5_000
+  };
+  const timeoutCancelDir = path.join(taskDirFor(taskId, dataRoot), 'runs',
+    `run_${createHash('sha256').update(timeoutCancelOperation).digest('hex').slice(0, 32)}`);
+  const timeoutCancelCreatedAt = new Date().toISOString();
+  const timeoutCancelDefinition = withRunFingerprint({
+    version: 1, taskId, operationId: timeoutCancelOperation, prompt: timeoutCancelInput.prompt,
+    expectedRevision: timeoutCancelInput.expectedRevision, executorEpoch: timeoutCancelInput.executorEpoch,
+    leaseId: timeoutCancelInput.leaseId, worktreeRoot: timeoutCancelTask.worktreeRoot,
+    codexBinary: fakeCodex, threadId: timeoutCancelInput.threadId,
+    expectedSessionId: timeoutCancelInput.expectedSessionId, model: 'gpt-5.6-sol', effort: 'high',
+    timeoutMs: 5_000, maxLogBytes: 2 * 1024 * 1024, createdAt: timeoutCancelCreatedAt
+  });
+  await fs.mkdir(timeoutCancelDir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(timeoutCancelDir, 'definition.json'), JSON.stringify(timeoutCancelDefinition), { mode: 0o600 });
+  process.env.CODEXPRO_RUNNER_SMOKE = '1';
+  process.env.CODEXPRO_RUNNER_HANDOFF_DELAY_MS = '300';
+  process.env.CODEXPRO_RUNNER_HANDOFF_TIMEOUT_MS = '200';
+  const timeoutLaunch = launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, timeoutCancelInput);
+  await waitFor(async () => {
+    const state = await fs.readFile(path.join(timeoutCancelDir, 'state.json'), 'utf8').catch(() => undefined);
+    return state ? JSON.parse(state).runnerNonce?.startsWith('launch:') : false;
+  });
+  const timeoutBarrier = holdCodingTaskRunLockForTest({ dataRoot }, taskId, timeoutCancelOperation, 1_000);
+  await new Promise((resolve) => setTimeout(resolve, 550));
+  const canceledTimeoutRun = await cancelQueuedCodingTaskRun({ dataRoot }, taskId, timeoutCancelOperation,
+    'cancel wins after child handoff timeout');
+  assert.equal(canceledTimeoutRun.status, 'canceled');
+  const canceledRunBytes = await fs.readFile(path.join(timeoutCancelDir, 'state.json'));
+  const canceledTaskBytes = await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json'));
+  await timeoutBarrier;
+  assert.equal((await timeoutLaunch).status, 'canceled');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(await fs.readFile(path.join(timeoutCancelDir, 'state.json')), canceledRunBytes,
+    'losing child must not revert terminal canceled run bytes');
+  assert.deepEqual(await fs.readFile(path.join(taskDirFor(taskId, dataRoot), 'state.json')), canceledTaskBytes,
+    'losing child must not mutate the authoritative task after cancellation');
+  delete process.env.CODEXPRO_RUNNER_SMOKE;
+  delete process.env.CODEXPRO_RUNNER_HANDOFF_DELAY_MS;
+  delete process.env.CODEXPRO_RUNNER_HANDOFF_TIMEOUT_MS;
+
+  const ambiguousTask = await store.get(taskId);
+  const ambiguousOperation = 'publication-ambiguous-empty';
+  const ambiguousDir = path.join(taskDirFor(taskId, dataRoot), 'runs',
+    `run_${createHash('sha256').update(ambiguousOperation).digest('hex').slice(0, 32)}`);
+  await fs.mkdir(ambiguousDir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(ambiguousDir, 'unknown-artifact'), 'preserve me', { mode: 0o600 });
+  const launchesBeforeAmbiguous = await readLaunchCount();
+  await assert.rejects(launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, {
+    operationId: ambiguousOperation, prompt: 'Must not overwrite ambiguous publication state.',
+    expectedRevision: ambiguousTask.revision, executorEpoch: ambiguousTask.executorLease.epoch,
+    leaseId: ambiguousTask.executorLease.leaseId, threadId: ambiguousTask.codexThreadId,
+    expectedSessionId: ambiguousTask.codexSessionId, timeoutMs: 5_000
+  }), /contains ambiguous artifacts/);
+  assert.equal(await fs.readFile(path.join(ambiguousDir, 'unknown-artifact'), 'utf8'), 'preserve me');
+  assert.equal(await readLaunchCount(), launchesBeforeAmbiguous);
+
+  const persistedFirstRun = await getCodingTaskRun({ dataRoot }, taskId, 'run-one');
+  assert.equal(persistedFirstRun.status, 'waiting_review');
   await assert.rejects(
     launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, { ...launchInput, prompt: 'different contract', expectedRevision: completedTask.revision }),
     /different Codex run contract/
@@ -198,13 +494,14 @@ try {
   const orphanDir = path.join(taskDir, 'runs', orphanToken);
   await fs.mkdir(orphanDir, { recursive: true, mode: 0o700 });
   const orphanCreatedAt = new Date(Date.now() - 60_000).toISOString();
-  const orphanFingerprint = 'c'.repeat(64);
-  await fs.writeFile(path.join(orphanDir, 'definition.json'), JSON.stringify({
-    version: 1, taskId, operationId: orphanOperation, fingerprint: orphanFingerprint,
+  const orphanDefinition = withRunFingerprint({
+    version: 1, taskId, operationId: orphanOperation,
     prompt: 'orphan', expectedRevision: beforeOrphan.revision, executorEpoch: activeOrphan.executorLease.epoch,
     leaseId: 'lease-deliberately-diverged', worktreeRoot: worktree, codexBinary: fakeCodex,
     model: 'gpt-5.6-sol', effort: 'high', timeoutMs: 5_000, maxLogBytes: 64 * 1024, createdAt: orphanCreatedAt
-  }), { mode: 0o600 });
+  });
+  const orphanFingerprint = orphanDefinition.fingerprint;
+  await fs.writeFile(path.join(orphanDir, 'definition.json'), JSON.stringify(orphanDefinition), { mode: 0o600 });
   await fs.writeFile(path.join(orphanDir, 'state.json'), JSON.stringify({
     version: 1, taskId, operationId: orphanOperation, fingerprint: orphanFingerprint, status: 'running',
     createdAt: orphanCreatedAt, updatedAt: orphanCreatedAt, heartbeatAt: orphanCreatedAt, runnerPid: 999999, events: []
@@ -219,7 +516,11 @@ try {
   const launchesBeforeDeadCancel = await readLaunchCount();
   const matchingOrphanDefinition = JSON.parse(await fs.readFile(path.join(orphanDir, 'definition.json'), 'utf8'));
   matchingOrphanDefinition.leaseId = activeOrphan.executorLease.leaseId;
+  matchingOrphanDefinition.fingerprint = withRunFingerprint(matchingOrphanDefinition).fingerprint;
   await fs.writeFile(path.join(orphanDir, 'definition.json'), JSON.stringify(matchingOrphanDefinition), { mode: 0o600 });
+  const matchingOrphanState = JSON.parse(await fs.readFile(path.join(orphanDir, 'state.json'), 'utf8'));
+  matchingOrphanState.fingerprint = matchingOrphanDefinition.fingerprint;
+  await fs.writeFile(path.join(orphanDir, 'state.json'), JSON.stringify(matchingOrphanState), { mode: 0o600 });
   const cancellableOrphan = await store.get(taskId);
   await requestCodingTaskCancellation({ dataRoot }, taskId, {
     expectedRevision: cancellableOrphan.revision, executor: 'codex', executorEpoch: cancellableOrphan.executorLease.epoch,
@@ -249,13 +550,13 @@ try {
   const passiveToken = `run_${createHash('sha256').update(passiveOperation).digest('hex').slice(0, 32)}`;
   const passiveRunDir = path.join(store.paths(passiveTaskId).taskDir, 'runs', passiveToken);
   await fs.mkdir(passiveRunDir, { recursive: true, mode: 0o700 });
-  const passiveFingerprint = 'e'.repeat(64);
-  const passiveDefinition = {
-    version: 1, taskId: passiveTaskId, operationId: passiveOperation, fingerprint: passiveFingerprint,
+  const passiveDefinition = withRunFingerprint({
+    version: 1, taskId: passiveTaskId, operationId: passiveOperation,
     prompt: 'queued orphan', expectedRevision: 1, executorEpoch: 1, leaseId: 'lease-passive',
     worktreeRoot: passiveWorktree, codexBinary: fakeCodex, model: 'gpt-5.6-sol', effort: 'high',
     timeoutMs: 5_000, maxLogBytes: 64 * 1024, createdAt: passiveNow
-  };
+  });
+  const passiveFingerprint = passiveDefinition.fingerprint;
   await fs.writeFile(path.join(passiveRunDir, 'definition.json'), JSON.stringify(passiveDefinition), { mode: 0o600 });
   await fs.writeFile(path.join(passiveRunDir, 'state.json'), JSON.stringify({
     version: 1, taskId: passiveTaskId, operationId: passiveOperation, fingerprint: passiveFingerprint,
@@ -282,10 +583,9 @@ try {
   const recoveryToken = `run_${createHash('sha256').update(recoveryOperation).digest('hex').slice(0, 32)}`;
   const recoveryDir = path.join(store.paths(passiveTaskId).taskDir, 'runs', recoveryToken);
   await fs.mkdir(recoveryDir, { recursive: true, mode: 0o700 });
-  const recoveryFingerprint = 'f'.repeat(64);
-  await fs.writeFile(path.join(recoveryDir, 'definition.json'), JSON.stringify({
-    ...passiveDefinition, operationId: recoveryOperation, fingerprint: recoveryFingerprint
-  }), { mode: 0o600 });
+  const recoveryDefinition = withRunFingerprint({ ...passiveDefinition, operationId: recoveryOperation });
+  const recoveryFingerprint = recoveryDefinition.fingerprint;
+  await fs.writeFile(path.join(recoveryDir, 'definition.json'), JSON.stringify(recoveryDefinition), { mode: 0o600 });
   await fs.writeFile(path.join(recoveryDir, 'state.json'), JSON.stringify({
     version: 1, taskId: passiveTaskId, operationId: recoveryOperation, fingerprint: recoveryFingerprint,
     status: 'queued', createdAt: passiveNow, updatedAt: passiveNow, events: []
@@ -295,6 +595,10 @@ try {
   );
   assert.notEqual(executionRecovery.status, 'queued');
   assert.equal((await store.get(passiveTaskId)).activeOperation?.operationId, recoveryOperation);
+  await waitFor(async () => {
+    const state = await store.get(passiveTaskId);
+    return state.activeOperation?.operationId === recoveryOperation && state.codexTurnActive;
+  });
   const recoveryFollowup = await submitCodingTaskFollowup({ dataRoot, codexBinary: fakeCodex }, passiveTaskId, {
     requestKey: 'finish-execution-recovery', prompt: 'Finish recovered execution.', timeoutMs: 5_000
   });
@@ -305,11 +609,11 @@ try {
   // Crash after begin but before the queued run-state transition: exact active identity may relaunch once.
   const beforeQueuedActive = await store.get(passiveTaskId);
   const queuedActiveOperation = 'queued-active-crash-window';
-  const queuedActiveDefinition = {
-    ...passiveDefinition, operationId: queuedActiveOperation, fingerprint: '1'.repeat(64),
+  const queuedActiveDefinition = withRunFingerprint({
+    ...passiveDefinition, operationId: queuedActiveOperation,
     prompt: 'recover queued active crash', expectedRevision: beforeQueuedActive.revision,
     leaseId: beforeQueuedActive.executorLease.leaseId, createdAt: new Date().toISOString()
-  };
+  });
   await beginCodingTaskOperation({ dataRoot }, passiveTaskId, {
     expectedRevision: beforeQueuedActive.revision, executor: 'codex', executorEpoch: beforeQueuedActive.executorLease.epoch,
     leaseId: beforeQueuedActive.executorLease.leaseId, operationId: queuedActiveOperation, codexRunnerPid: 999998
@@ -334,6 +638,11 @@ try {
     reconcileCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, passiveTaskId, queuedActiveOperation, { relaunchQueued: true })
   ]);
   await waitFor(async () => (await getCodingTaskRun({ dataRoot }, passiveTaskId, queuedActiveOperation)).status === 'running');
+  await waitFor(async () => (await readLaunchCount()) >= beforeConcurrentRecoveryLaunches + 1);
+  await waitFor(async () => {
+    const task = await store.get(passiveTaskId);
+    return task.activeOperation?.operationId === queuedActiveOperation && task.codexTurnActive;
+  });
   assert.equal(await readLaunchCount(), beforeConcurrentRecoveryLaunches + 1, 'exclusive run lock must prevent duplicate App Server launch');
   if (process.platform === 'win32') {
     await assert.rejects(fs.access(path.join(queuedActiveDir, 'runner.lock.recovery')), /ENOENT/,
@@ -349,11 +658,11 @@ try {
   const beforeTerminalRecovery = await store.get(passiveTaskId);
   const terminalOperation = 'terminal-task-writeback-crash';
   const terminalCreatedAt = new Date(Date.now() - 10_000).toISOString();
-  const terminalDefinition = {
-    ...passiveDefinition, operationId: terminalOperation, fingerprint: '2'.repeat(64),
+  const terminalDefinition = withRunFingerprint({
+    ...passiveDefinition, operationId: terminalOperation,
     prompt: 'recover terminal writeback', expectedRevision: beforeTerminalRecovery.revision,
     leaseId: beforeTerminalRecovery.executorLease.leaseId, createdAt: terminalCreatedAt
-  };
+  });
   await beginCodingTaskOperation({ dataRoot }, passiveTaskId, {
     expectedRevision: beforeTerminalRecovery.revision, executor: 'codex', executorEpoch: beforeTerminalRecovery.executorLease.epoch,
     leaseId: beforeTerminalRecovery.executorLease.leaseId, operationId: terminalOperation, codexRunnerPid: 999997
@@ -379,8 +688,8 @@ try {
   const lockOperation = 'live-advisory-owner';
   const lockDir = path.join(store.paths(passiveTaskId).taskDir, 'runs', `run_${createHash('sha256').update(lockOperation).digest('hex').slice(0, 32)}`);
   const lockCreatedAt = new Date().toISOString();
-  const lockDefinition = { ...passiveDefinition, operationId: lockOperation, fingerprint: '3'.repeat(64),
-    prompt: 'live advisory owner', expectedRevision: (await store.get(passiveTaskId)).revision, createdAt: lockCreatedAt };
+  const lockDefinition = withRunFingerprint({ ...passiveDefinition, operationId: lockOperation,
+    prompt: 'live advisory owner', expectedRevision: (await store.get(passiveTaskId)).revision, createdAt: lockCreatedAt });
   await fs.mkdir(lockDir, { recursive: true, mode: 0o700 });
   await fs.writeFile(path.join(lockDir, 'definition.json'), JSON.stringify(lockDefinition), { mode: 0o600 });
   const lockPath = path.join(lockDir, 'runner.lock');
@@ -441,7 +750,7 @@ async function waitFor(check, timeoutMs = 4_000) {
 }
 
 async function readLaunchCount() {
-  try { return Number.parseInt(await fs.readFile(fakeLaunchCount, 'utf8'), 10) || 0; }
+  try { return (await fs.readFile(fakeLaunchCount, 'utf8')).trim().split(/\n+/).filter(Boolean).length; }
   catch (error) { if (error?.code === 'ENOENT') return 0; throw error; }
 }
 
@@ -458,4 +767,23 @@ async function waitForOutput(stream, expected, timeoutMs = 2_000) {
 
 function terminalCreatedFallback() {
   return new Date(Date.now() - 60_000).toISOString();
+}
+
+function taskDirFor(taskId, dataRoot) {
+  return path.join(dataRoot, 'tasks', taskId);
+}
+
+function withRunFingerprint(definition) {
+  const fingerprint = createHash('sha256').update(JSON.stringify({
+    schema: 'codexpro-coding-task-run-v1', taskId: definition.taskId,
+    operationId: definition.operationId, prompt: definition.prompt,
+    revision: definition.expectedRevision, epoch: definition.executorEpoch,
+    leaseId: definition.leaseId, threadId: definition.threadId ?? null,
+    expectedSessionId: definition.expectedSessionId ?? null,
+    continuationFingerprint: definition.continuationFingerprint ?? null,
+    model: definition.model, effort: definition.effort, timeoutMs: definition.timeoutMs,
+    worktreeRoot: definition.worktreeRoot, codexBinary: definition.codexBinary,
+    maxLogBytes: definition.maxLogBytes, createdAt: definition.createdAt
+  })).digest('hex');
+  return { ...definition, fingerprint };
 }

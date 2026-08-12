@@ -1,14 +1,16 @@
 import { createHash } from "node:crypto";
+import { buildGoalWorkerPrompt } from "./goalPrompt.js";
 
 export const GOAL_STATE_VERSION = 1 as const;
 export const GOAL_ID_PATTERN = /^goal_[a-f0-9]{24}$/;
 export const GOAL_WORK_ID_PATTERN = /^work_[a-z0-9][a-z0-9_-]{0,63}$/;
+export const GOAL_CONTINUATION_INTENT_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export type GoalLifecycle = "proposed" | "approved" | "running" | "paused" | "canceling" | "waiting_review" | "completed" | "failed" | "canceled";
 export type GoalExecutionPolicy = "supervised" | "persistent";
 export type GoalWorkspacePolicy = "live" | "isolated";
 export type GoalApprovalStatus = "pending" | "approved" | "rejected";
-export type GoalWorkStatus = "planned" | "ready" | "launching" | "running" | "waiting_review" | "integrating" | "integrated" | "blocked" | "failed" | "canceled";
+export type GoalWorkStatus = "planned" | "ready" | "launching" | "running" | "continuing" | "waiting_review" | "integrating" | "integrated" | "blocked" | "failed" | "canceled";
 export type GoalBlackboardKind = "discovery" | "contract" | "file_ownership" | "question" | "answer" | "blocker" | "verification" | "decision";
 export type GoalEventKind = "proposed" | "approved" | "approval_rejected" | "started" | "paused" | "resumed" | "cancel_requested" | "canceled" | "scheduler_updated" | "work_updated" | "blackboard_published" | "integration_updated" | "projection_updated" | "completed" | "failed";
 
@@ -51,6 +53,51 @@ export interface GoalWorkLaunchReservation {
   reservedAt: string;
 }
 
+export interface GoalContinuationIntent {
+  intentId: string;
+  prompt: string;
+  fingerprint: string;
+}
+
+export type GoalWorkTurnStatus = "reserved" | "running" | "succeeded" | "failed" | "canceled";
+
+export interface GoalWorkTurnObservation {
+  capturedAt: string;
+  headSha: string;
+  status: string;
+  diffStat: string;
+  diffSha256: string;
+  dirty: boolean;
+  changedPaths: string[];
+}
+
+export interface GoalWorkTurn {
+  turnIndex: number;
+  intentId: "initial" | string;
+  intentFingerprint: string;
+  promptSha256: string;
+  operationId: string;
+  previousOperationId?: string;
+  taskId: string;
+  baseSha: string;
+  taskRevision?: number;
+  executorEpoch?: number;
+  executorLeaseId?: string;
+  status: GoalWorkTurnStatus;
+  runFingerprint?: string;
+  runStatus?: "queued" | "running" | "waiting_review" | "completed" | "failed" | "canceled";
+  threadId?: string;
+  sessionId?: string;
+  turnId?: string;
+  resultSummary?: string;
+  resultSha256?: string;
+  stopReason?: "terminal_success" | "failed" | "canceled";
+  terminalObservation?: GoalWorkTurnObservation;
+  reservedAt: string;
+  startedAt?: string;
+  finishedAt?: string;
+}
+
 export interface GoalResourceLimits {
   maxConcurrency: number;
   timeoutMs: number;
@@ -82,6 +129,8 @@ export interface GoalWorkItem {
   dependsOn: string[];
   parallelGroup?: string;
   fileGlobs: string[];
+  continuationIntents?: GoalContinuationIntent[];
+  turns?: GoalWorkTurn[];
   status: GoalWorkStatus;
   launch?: GoalWorkLaunchReservation;
   baseSha?: string;
@@ -239,7 +288,8 @@ export interface GoalState {
 }
 
 const LIFECYCLES = new Set<GoalLifecycle>(["proposed", "approved", "running", "paused", "canceling", "waiting_review", "completed", "failed", "canceled"]);
-const WORK_STATUSES = new Set<GoalWorkStatus>(["planned", "ready", "launching", "running", "waiting_review", "integrating", "integrated", "blocked", "failed", "canceled"]);
+const WORK_STATUSES = new Set<GoalWorkStatus>(["planned", "ready", "launching", "running", "continuing", "waiting_review", "integrating", "integrated", "blocked", "failed", "canceled"]);
+const TURN_STATUSES = new Set<GoalWorkTurnStatus>(["reserved", "running", "succeeded", "failed", "canceled"]);
 const BLACKBOARD_KINDS = new Set<GoalBlackboardKind>(["discovery", "contract", "file_ownership", "question", "answer", "blocker", "verification", "decision"]);
 const EVENT_KINDS = new Set<GoalEventKind>(["proposed", "approved", "approval_rejected", "started", "paused", "resumed", "cancel_requested", "canceled", "scheduler_updated", "work_updated", "blackboard_published", "integration_updated", "projection_updated", "completed", "failed"]);
 const FULL_SHA = /^[0-9a-f]{40}$/;
@@ -285,6 +335,20 @@ export function validateGoalWorkId(value: string): string {
   const normalized = value.trim().toLowerCase();
   if (!GOAL_WORK_ID_PATTERN.test(normalized)) throw new Error("Invalid Goal work id; expected work_ followed by letters, numbers, underscore, or dash.");
   return normalized;
+}
+
+export function validateGoalContinuationIntentId(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (!GOAL_CONTINUATION_INTENT_ID_PATTERN.test(normalized)) throw new Error("Invalid Goal continuation intent id; expected 1-64 lowercase letters, numbers, underscore, or dash.");
+  return normalized;
+}
+
+export function computeGoalContinuationIntentFingerprint(workId: string, turnIndex: number, intentId: string, prompt: string): string {
+  return createHash("sha256").update(`codexpro-goal-continuation-intent-v1\0${validateGoalWorkId(workId)}\0${turnIndex}\0${validateGoalContinuationIntentId(intentId)}\0${prompt}`).digest("hex");
+}
+
+export function computeGoalInitialIntentFingerprint(workId: string, prompt: string): string {
+  return createHash("sha256").update(`codexpro-goal-initial-intent-v1\0${validateGoalWorkId(workId)}\0${prompt}`).digest("hex");
 }
 
 export function assertGoalDag(work: Array<Pick<GoalWorkItem, "workId" | "dependsOn">>): void {
@@ -352,7 +416,7 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
   if (value.executionPolicy === "persistent") {
     if (value.workspacePolicy !== "isolated") invalid("persistent workspacePolicy");
     if (value.contentPolicy === undefined) invalid("persistent contentPolicy");
-    if (value.limits.maxTurnsPerWorker !== 1 || value.limits.maxRetriesPerWorker !== 0) invalid("persistent limits");
+    if ((value.limits.maxTurnsPerWorker as number) > 4 || value.limits.maxRetriesPerWorker !== 0) invalid("persistent limits");
     if (value.permissions.commands.length || value.permissions.network || Object.values(value.permissions.sourceEffects).some(Boolean)) invalid("persistent permissions");
   }
   if (!LIFECYCLES.has(value.lifecycle as GoalLifecycle)) invalid("lifecycle");
@@ -418,6 +482,86 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
     stringArray(item.dependsOn, `work[${index}].dependsOn`, 50, 80);
     stringField(item.parallelGroup, `work[${index}].parallelGroup`, 100, true);
     stringArray(item.fileGlobs, `work[${index}].fileGlobs`, 100, 1_000);
+    if (item.continuationIntents !== undefined) {
+      if (!Array.isArray(item.continuationIntents) || item.continuationIntents.length > 3) invalid(`work[${index}].continuationIntents`);
+      const intentIds = new Set<string>();
+      for (const [intentIndex, intent] of item.continuationIntents.entries()) {
+        if (!record(intent)) invalid(`work[${index}].continuationIntents[${intentIndex}]`);
+        const intentId = validateGoalContinuationIntentId(String(intent.intentId ?? ""));
+        if (intentIds.has(intentId)) invalid(`work[${index}].continuationIntents duplicate intentId`);
+        intentIds.add(intentId);
+        const prompt = stringField(intent.prompt, `work[${index}].continuationIntents[${intentIndex}].prompt`, 65_536)!;
+        if (typeof intent.fingerprint !== "string" || intent.fingerprint !== computeGoalContinuationIntentFingerprint(String(item.workId), intentIndex + 2, intentId, prompt)) invalid(`work[${index}].continuationIntents[${intentIndex}].fingerprint`);
+      }
+    }
+    if (value.executionPolicy === "persistent" && (item.continuationIntents?.length ?? 0) !== (value.limits.maxTurnsPerWorker as number) - 1) invalid(`work[${index}].continuationIntents count`);
+    if (item.turns !== undefined) {
+      if (!Array.isArray(item.turns) || item.turns.length > (value.limits.maxTurnsPerWorker as number)) invalid(`work[${index}].turns`);
+      const turns = item.turns;
+      const seenOperations = new Set<string>();
+      for (const [turnOffset, turn] of turns.entries()) {
+        if (!record(turn)) invalid(`work[${index}].turns[${turnOffset}]`);
+        const turnIndex = integer(turn.turnIndex, `work[${index}].turns[${turnOffset}].turnIndex`, 1, value.limits.maxTurnsPerWorker as number);
+        if (turnIndex !== turnOffset + 1) invalid(`work[${index}].turns order`);
+        const expectedIntent = turnIndex === 1 ? undefined : item.continuationIntents?.[turnIndex - 2];
+        const intentId = stringField(turn.intentId, `work[${index}].turns[${turnOffset}].intentId`, 64)!;
+        if (intentId !== (expectedIntent?.intentId ?? "initial")) invalid(`work[${index}].turns[${turnOffset}].intent binding`);
+        const approvedPrompt = turnIndex === 1 ? buildGoalWorkerPrompt(value as unknown as GoalState, item as unknown as GoalWorkItem) : String(expectedIntent?.prompt ?? "");
+        const expectedIntentFingerprint = turnIndex === 1 ? computeGoalInitialIntentFingerprint(String(item.workId), approvedPrompt) : expectedIntent?.fingerprint;
+        if (typeof turn.intentFingerprint !== "string" || turn.intentFingerprint !== expectedIntentFingerprint) invalid(`work[${index}].turns[${turnOffset}].intentFingerprint`);
+        if (typeof turn.promptSha256 !== "string" || turn.promptSha256 !== createHash("sha256").update(approvedPrompt).digest("hex")) invalid(`work[${index}].turns[${turnOffset}].promptSha256`);
+        const operationId = stringField(turn.operationId, `work[${index}].turns[${turnOffset}].operationId`, 160)!;
+        if (operationId !== `goal:${goalId.slice(5)}:${item.workId}:run:${turnIndex}` || seenOperations.has(operationId)) invalid(`work[${index}].turns[${turnOffset}].operationId deterministic identity`);
+        seenOperations.add(operationId);
+        stringField(turn.previousOperationId, `work[${index}].turns[${turnOffset}].previousOperationId`, 160, true);
+        if ((turnIndex === 1) !== (turn.previousOperationId === undefined)) invalid(`work[${index}].turns[${turnOffset}].previousOperationId`);
+        if (turnIndex > 1 && turn.previousOperationId !== (turns[turnOffset - 1] as Record<string, unknown> | undefined)?.operationId) invalid(`work[${index}].turns[${turnOffset}].previous operation binding`);
+        if (typeof turn.taskId !== "string" || !/^task_[a-f0-9]{24}$/.test(turn.taskId)) invalid(`work[${index}].turns[${turnOffset}].taskId`);
+        if (typeof turn.baseSha !== "string" || !FULL_SHA.test(turn.baseSha)) invalid(`work[${index}].turns[${turnOffset}].baseSha`);
+        if (record(item.launch) && (turn.taskId !== item.launch.taskId || turn.baseSha !== item.launch.baseSha)) invalid(`work[${index}].turns[${turnOffset}] task/base binding`);
+        if (turn.taskRevision !== undefined) integer(turn.taskRevision, `work[${index}].turns[${turnOffset}].taskRevision`, 1, Number.MAX_SAFE_INTEGER);
+        if (turn.executorEpoch !== undefined) integer(turn.executorEpoch, `work[${index}].turns[${turnOffset}].executorEpoch`, 1, Number.MAX_SAFE_INTEGER);
+        stringField(turn.executorLeaseId, `work[${index}].turns[${turnOffset}].executorLeaseId`, 160, true);
+        if (!TURN_STATUSES.has(turn.status as GoalWorkTurnStatus)) invalid(`work[${index}].turns[${turnOffset}].status`);
+        if (turn.runFingerprint !== undefined && (typeof turn.runFingerprint !== "string" || !HASH.test(turn.runFingerprint))) invalid(`work[${index}].turns[${turnOffset}].runFingerprint`);
+        if (turn.runStatus !== undefined && !["queued", "running", "waiting_review", "completed", "failed", "canceled"].includes(String(turn.runStatus))) invalid(`work[${index}].turns[${turnOffset}].runStatus`);
+        stringField(turn.threadId, `work[${index}].turns[${turnOffset}].threadId`, 200, true);
+        stringField(turn.sessionId, `work[${index}].turns[${turnOffset}].sessionId`, 200, true);
+        stringField(turn.turnId, `work[${index}].turns[${turnOffset}].turnId`, 200, true);
+        stringField(turn.resultSummary, `work[${index}].turns[${turnOffset}].resultSummary`, 20_000, true);
+        if (turn.resultSha256 !== undefined && (typeof turn.resultSha256 !== "string" || !HASH.test(turn.resultSha256))) invalid(`work[${index}].turns[${turnOffset}].resultSha256`);
+        if (turn.stopReason !== undefined && !["terminal_success", "failed", "canceled"].includes(String(turn.stopReason))) invalid(`work[${index}].turns[${turnOffset}].stopReason`);
+        if (turn.terminalObservation !== undefined) {
+          if (!record(turn.terminalObservation)) invalid(`work[${index}].turns[${turnOffset}].terminalObservation`);
+          timestamp(turn.terminalObservation.capturedAt, `work[${index}].turns[${turnOffset}].terminalObservation.capturedAt`);
+          if (typeof turn.terminalObservation.headSha !== "string" || !FULL_SHA.test(turn.terminalObservation.headSha)) invalid(`work[${index}].turns[${turnOffset}].terminalObservation.headSha`);
+          for (const field of ["status", "diffStat"] as const) if (typeof turn.terminalObservation[field] !== "string" || Buffer.byteLength(turn.terminalObservation[field] as string, "utf8") > 32_768 || turn.terminalObservation[field].includes("\0")) invalid(`work[${index}].turns[${turnOffset}].terminalObservation.${field}`);
+          if (typeof turn.terminalObservation.diffSha256 !== "string" || !HASH.test(turn.terminalObservation.diffSha256) || typeof turn.terminalObservation.dirty !== "boolean") invalid(`work[${index}].turns[${turnOffset}].terminalObservation`);
+          stringArray(turn.terminalObservation.changedPaths, `work[${index}].turns[${turnOffset}].terminalObservation.changedPaths`, 1_000, 1_000);
+        }
+        timestamp(turn.reservedAt, `work[${index}].turns[${turnOffset}].reservedAt`);
+        timestamp(turn.startedAt, `work[${index}].turns[${turnOffset}].startedAt`, true);
+        timestamp(turn.finishedAt, `work[${index}].turns[${turnOffset}].finishedAt`, true);
+        const terminal = ["succeeded", "failed", "canceled"].includes(String(turn.status));
+        const terminalAuthority = turn.finishedAt !== undefined && turn.stopReason !== undefined && turn.runFingerprint !== undefined && turn.runStatus !== undefined && turn.resultSha256 !== undefined && turn.terminalObservation !== undefined;
+        if (terminal !== terminalAuthority || (turn.status === "succeeded" && (turn.threadId === undefined || turn.sessionId === undefined || turn.turnId === undefined))) invalid(`work[${index}].turns[${turnOffset}].terminal authority`);
+        if (["running", "succeeded", "failed", "canceled"].includes(String(turn.status)) && (turn.taskRevision === undefined || turn.executorEpoch === undefined || turn.executorLeaseId === undefined || turn.runFingerprint === undefined)) invalid(`work[${index}].turns[${turnOffset}].run authority`);
+        if (turn.status === "succeeded" && (turn.runStatus !== "waiting_review" || turn.stopReason !== "terminal_success")) invalid(`work[${index}].turns[${turnOffset}].successful terminal status`);
+        if (turn.status === "failed" && turn.stopReason !== "failed") invalid(`work[${index}].turns[${turnOffset}].failed terminal status`);
+        if (turn.status === "canceled" && (turn.runStatus !== "canceled" || turn.stopReason !== "canceled")) invalid(`work[${index}].turns[${turnOffset}].canceled terminal status`);
+        if (turnIndex > 1) {
+          const prior = turns[turnOffset - 1] as Record<string, unknown>;
+          if (turn.taskId !== prior.taskId || turn.baseSha !== prior.baseSha) invalid(`work[${index}].turns[${turnOffset}].task continuity`);
+          if (turn.executorEpoch !== undefined && (turn.executorEpoch !== prior.executorEpoch || turn.executorLeaseId !== prior.executorLeaseId || (typeof prior.taskRevision === "number" && (turn.taskRevision as number) <= prior.taskRevision))) invalid(`work[${index}].turns[${turnOffset}].task lease continuity`);
+          if (turn.status === "succeeded" && (turn.threadId !== prior.threadId || turn.sessionId !== prior.sessionId)) invalid(`work[${index}].turns[${turnOffset}].thread session continuity`);
+        }
+      }
+      if (turns.some((turn: unknown, turnIndex: number) => turnIndex < turns.length - 1 && record(turn) && turn.status !== "succeeded")) invalid(`work[${index}].turns monotonic success`);
+      const tail = turns.at(-1) as Record<string, unknown> | undefined;
+      if (tail && item.operationId !== tail.operationId) invalid(`work[${index}].operationId turn tail binding`);
+      if (item.status === "continuing" && !((tail?.status === "succeeded" && turns.length < (value.limits.maxTurnsPerWorker as number)) || (tail?.status === "reserved" && turns.length > 1 && turns.length <= (value.limits.maxTurnsPerWorker as number)))) invalid(`work[${index}].continuing authority`);
+      if (["waiting_review", "integrating", "integrated"].includes(String(item.status)) && (turns.length !== (value.limits.maxTurnsPerWorker as number) || tail?.status !== "succeeded")) invalid(`work[${index}].final turn authority`);
+    }
     if (!WORK_STATUSES.has(item.status as GoalWorkStatus)) invalid(`work[${index}].status`);
     if (item.launch !== undefined) {
       if (!record(item.launch)) invalid(`work[${index}].launch`);
@@ -430,8 +574,8 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
       if (typeof item.launch.baseSha !== "string" || !FULL_SHA.test(item.launch.baseSha)) invalid(`work[${index}].launch.baseSha`);
       timestamp(item.launch.reservedAt, `work[${index}].launch.reservedAt`);
       if (value.executionPolicy !== "persistent") invalid(`work[${index}].launch executionPolicy`);
-      if (!["launching", "running", "waiting_review", "integrating", "integrated", "failed", "canceled"].includes(String(item.status))) invalid(`work[${index}].launch status`);
-      if (item.operationId !== undefined && item.operationId !== item.launch.operationId) invalid(`work[${index}].launch operation binding`);
+      if (!["launching", "running", "continuing", "waiting_review", "integrating", "integrated", "failed", "canceled"].includes(String(item.status))) invalid(`work[${index}].launch status`);
+      if (item.operationId !== undefined && item.turns === undefined && item.operationId !== item.launch.operationId) invalid(`work[${index}].launch operation binding`);
       if (item.baseSha !== undefined && item.baseSha !== item.launch.baseSha) invalid(`work[${index}].launch base binding`);
       if (item.codingTaskId !== undefined && item.codingTaskId !== item.launch.taskId) invalid(`work[${index}].launch task binding`);
       const expectedTaskKey = `goal:${goalId}:${item.workId}`;
@@ -449,7 +593,7 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
     stringField(item.error, `work[${index}].error`, 20_000, true);
     timestamp(item.startedAt, `work[${index}].startedAt`, true);
     timestamp(item.finishedAt, `work[${index}].finishedAt`, true);
-    if (value.executionPolicy === "persistent" && ["launching", "running", "waiting_review", "integrating", "integrated"].includes(String(item.status)) && item.launch === undefined) invalid(`work[${index}].launch required`);
+    if (value.executionPolicy === "persistent" && ["launching", "running", "continuing", "waiting_review", "integrating", "integrated"].includes(String(item.status)) && item.launch === undefined) invalid(`work[${index}].launch required`);
   }
   if (value.lifecycle === "canceling" && value.cancelRequest === undefined) invalid("canceling request");
   if (value.executionPolicy === "persistent" && value.startKey !== undefined && value.scheduler === undefined) invalid("persistent scheduler authority");

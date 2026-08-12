@@ -6,13 +6,13 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { beginCodingTaskOperation, createCodingTask, finishCodingTaskOperationFenced, getCodingTask, requestCodingTaskCancellation, reviewCodingTask, transitionCodingTaskExecutor } from "./codingTaskOps.js";
-import { cancelQueuedCodingTaskRun, getCodingTaskRun, launchCodingTaskRun, reconcileCodingTaskRun, type CodingTaskRunView } from "./codingTaskRunner.js";
+import { cancelQueuedCodingTaskRun, getCodingTaskContinuation, getCodingTaskRun, launchCodingTaskRun, reconcileCodingTaskRun, submitCodingTaskContinuation, type CodingTaskRunView } from "./codingTaskRunner.js";
 import { secureCodingTaskDirectory, writeCodingTaskJsonAtomic } from "./codingTaskStore.js";
 import { GoalStore, type GoalStoreConfig } from "./goalStore.js";
 import { assertGoalContentPolicySnapshot, isGoalPathContentAllowed, unionGoalContentPolicySnapshots } from "./goalPolicy.js";
 import { buildGoalWorkerPrompt } from "./goalPrompt.js";
 import { applyGoalWorkerPatch, ensureGoalIntegrationWorktree, getGoalIntegrationHead } from "./goalWorktree.js";
-import { parseGoalState, validateGoalId, type GoalContentPolicySnapshot, type GoalSchedulerAuthority, type GoalState, type GoalWorkItem } from "./goalState.js";
+import { computeGoalInitialIntentFingerprint, parseGoalState, validateGoalId, type GoalContentPolicySnapshot, type GoalSchedulerAuthority, type GoalState, type GoalWorkItem, type GoalWorkTurn } from "./goalState.js";
 import { minimatch } from "minimatch";
 import { assertGoalContractIntegrity } from "./goalOps.js";
 
@@ -93,7 +93,8 @@ function key(value: string, name: string): string {
 function errorText(error: unknown): string { return (error instanceof Error ? error.message : String(error)).slice(0, 20_000); }
 function alive(pid: number): boolean { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } }
 function wait(ms: number): Promise<void> { return new Promise((resolve) => setTimeout(resolve, ms)); }
-function opId(goalId: string, workId: string): string { return `goal:${goalId.slice(5)}:${workId}:run:1`; }
+function opId(goalId: string, workId: string, turnIndex = 1): string { return `goal:${goalId.slice(5)}:${workId}:run:${turnIndex}`; }
+function continuationKey(goalId: string, workId: string, turnIndex: number): string { return `goal:${goalId}:${workId}:turn:${turnIndex}`; }
 function launchKey(goalId: string, workId: string): string { return `goal:${goalId}:${workId}:launch:1`; }
 function integrationKey(goalId: string, workId: string): string { return `goal:${goalId}:${workId}:integrate:1`; }
 function taskKey(goalId: string, workId: string): string { return `goal:${goalId}:${workId}`; }
@@ -352,7 +353,7 @@ export async function reconcilePersistentGoalCancellation(config: GoalStoreConfi
     let run: CodingTaskRunView;
     try { run = await getCodingTaskRun(config, taskId, operationId); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT" && work.status === "launching") {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT" && ["launching", "continuing"].includes(work.status)) {
         if (task.lastCompletedOperation?.operationId === operationId && task.lifecycle === "canceled" && !task.activeOperation) { await retireCanceledTask(config, task, goalId, work.workId); continue; }
         if (task.activeOperation && (task.activeOperation.operationId !== operationId || task.activeOperation.executor !== "codex")) throw new Error(`Unstarted child ${work.workId} has divergent active operation authority.`);
         const begun = task.activeOperation ? task : await beginCodingTaskOperation(config, taskId, { expectedRevision: task.revision, executor: "codex", executorEpoch: task.executorLease.epoch, leaseId: task.executorLease.leaseId, operationId });
@@ -448,27 +449,46 @@ async function reserveAndLaunch(config: GoalSchedulerConfig, definition: GoalSch
     assertGoalContractIntegrity(state);
     if (state.contractFingerprint !== definition.contractFingerprint) throw new Error("Goal contract changed before worker launch.");
     if (!schedulerFence(state, authority) || state.lifecycle !== "running") return false;
-    const reserved = state.work.find((work) => work.status === "launching" && work.launch);
-    const active = state.work.filter((work) => ["launching", "running"].includes(work.status)).length;
+    const reserved = state.work.find((work) => work.status === "launching" && work.launch) ??
+      state.work.find((work) => work.status === "continuing" && work.turns?.at(-1)?.status === "reserved");
+    const active = state.work.filter((work) => ["launching", "running"].includes(work.status) || (work.status === "continuing" && work.turns?.at(-1)?.status === "reserved")).length;
+    const continuing = state.work.find((work) => work.status === "continuing" && work.turns?.at(-1)?.status === "succeeded" && (work.turns?.length ?? 0) < state.limits.maxTurnsPerWorker);
     const ready = state.work.find((work) => work.status === "ready" && work.dependsOn.every((dep) => state.work.find((x) => x.workId === dep)?.status === "integrated"));
-    const candidate = reserved ?? ready;
-    if (!candidate || (!reserved && active >= state.limits.maxConcurrency)) return false;
+    const candidate = reserved ?? continuing ?? ready;
+    if (!candidate || (!reserved && candidate.status !== "continuing" && active >= state.limits.maxConcurrency)) return false;
     const now = new Date().toISOString();
-    if (!reserved) {
-      const baseSha = await getGoalIntegrationHead(state); const operationId = opId(state.goalId, candidate.workId);
+    if (!reserved && candidate.status === "ready") {
+      const baseSha = await getGoalIntegrationHead(state); const operationId = opId(state.goalId, candidate.workId, 1);
       const durableTaskKey = taskKey(state.goalId, candidate.workId);
       const reservation = { launchKey: launchKey(state.goalId, candidate.workId), taskKey: durableTaskKey, taskId: deterministicTaskId(state, candidate.workId), schedulerEpoch: authority.epoch, schedulerLeaseId: authority.leaseId, operationId, baseSha, reservedAt: now };
-      state = { ...state, revision: state.revision + 1, updatedAt: now, work: state.work.map((work) => work.workId === candidate.workId ? { ...work, status: "launching" as const, launch: reservation, baseSha, operationId } : work) };
+      const prompt = buildGoalWorkerPrompt(state, candidate);
+      const turn: GoalWorkTurn = { turnIndex: 1, intentId: "initial", intentFingerprint: computeGoalInitialIntentFingerprint(candidate.workId, prompt), promptSha256: sha256(prompt), operationId, taskId: reservation.taskId, baseSha, status: "reserved", reservedAt: now };
+      state = { ...state, revision: state.revision + 1, updatedAt: now, work: state.work.map((work) => work.workId === candidate.workId ? { ...work, status: "launching" as const, launch: reservation, baseSha, operationId, turns: [turn] } : work) };
+      await store.writeLocked(state);
+    } else if (!reserved && candidate.status === "continuing") {
+      const turns = candidate.turns ?? [];
+      const turnIndex = turns.length + 1;
+      const intent = candidate.continuationIntents?.[turnIndex - 2];
+      const previous = turns.at(-1);
+      if (!intent || !previous || previous.status !== "succeeded" || !candidate.codingTaskId || !candidate.baseSha) throw new Error("Persistent continuation reservation lost approved prior-turn authority.");
+      const operationId = opId(state.goalId, candidate.workId, turnIndex);
+      const turn: GoalWorkTurn = { turnIndex, intentId: intent.intentId, intentFingerprint: intent.fingerprint, promptSha256: sha256(intent.prompt), operationId, previousOperationId: previous.operationId, taskId: candidate.codingTaskId, baseSha: candidate.baseSha, status: "reserved", reservedAt: now };
+      state = { ...state, revision: state.revision + 1, updatedAt: now, work: state.work.map((work) => work.workId === candidate.workId ? { ...work, operationId, turns: [...turns, turn] } : work) };
       await store.writeLocked(state);
     }
     let work = state.work.find((item) => item.workId === candidate.workId)!;
     if (!work.launch) throw new Error("Persistent Goal launch reservation disappeared.");
     const baseSha = work.launch.baseSha;
-    const operationId = work.launch.operationId;
-    const prompt = buildGoalWorkerPrompt(state, work);
+    const turn = work.turns?.at(-1);
+    if (!turn || turn.status !== "reserved") throw new Error("Persistent Goal turn reservation disappeared.");
+    const operationId = turn.operationId;
+    const prompt = turn.turnIndex === 1 ? buildGoalWorkerPrompt(state, work) : work.continuationIntents?.[turn.turnIndex - 2]?.prompt;
+    if (!prompt || sha256(prompt) !== turn.promptSha256) throw new Error("Persistent Goal turn prompt no longer matches its approved reservation.");
     try {
-      const created = await createCodingTask(config, { root: state.sourceRoot }, { assertSourceWorkspace: (root) => { if (root !== state.sourceRoot) throw new Error("Goal worker source identity changed."); } }, { taskKey: work.launch!.taskKey, title: `${state.title} · ${work.title}`, goal: prompt, executor: "codex", baseSha, goalId: state.goalId, goalWorkId: work.workId });
-      if (created.task.taskId !== work.launch!.taskId) throw new Error("Persistent Goal deterministic CodingTask identity mismatch.");
+      const created = turn.turnIndex === 1
+        ? await createCodingTask(config, { root: state.sourceRoot }, { assertSourceWorkspace: (root) => { if (root !== state.sourceRoot) throw new Error("Goal worker source identity changed."); } }, { taskKey: work.launch!.taskKey, title: `${state.title} · ${work.title}`, goal: prompt, executor: "codex", baseSha, goalId: state.goalId, goalWorkId: work.workId })
+        : { task: await getCodingTask(config, turn.taskId), reused: true };
+      if (created.task.taskId !== work.launch!.taskId || created.task.worktreeRoot === state.integrationWorktreeRoot) throw new Error("Persistent Goal deterministic CodingTask identity mismatch.");
       if (!work.codingTaskId) {
         const bound = await store.get(definition.goalId);
         if (!schedulerFence(bound, authority) || bound.lifecycle !== "running") return true;
@@ -477,11 +497,46 @@ async function reserveAndLaunch(config: GoalSchedulerConfig, definition: GoalSch
         const boundNext: GoalState = { ...bound, revision: bound.revision + 1, updatedAt: new Date().toISOString(), work: bound.work.map((item) => item.workId === work.workId ? { ...item, codingTaskId: created.task.taskId } : item) };
         await store.writeLocked(boundNext); state = boundNext; work = boundNext.work.find((item) => item.workId === work.workId)!;
       }
+      const durableTurn = work.turns?.at(-1);
+      if (!durableTurn) throw new Error("Persistent Goal turn disappeared before durable runner binding.");
+      if (durableTurn.taskRevision === undefined) {
+        const bound = await store.get(definition.goalId);
+        if (!schedulerFence(bound, authority) || bound.lifecycle !== "running") return true;
+        const boundWork = bound.work.find((item) => item.workId === work.workId);
+        const boundTurn = boundWork?.turns?.at(-1);
+        if (!boundWork || !boundTurn || boundTurn.operationId !== operationId || boundTurn.status !== "reserved") return true;
+        const boundNext: GoalState = { ...bound, revision: bound.revision + 1, updatedAt: new Date().toISOString(), work: bound.work.map((item) => item.workId === work.workId ? { ...item, turns: item.turns?.map((entry) => entry.operationId === operationId ? { ...entry, taskRevision: created.task.revision, executorEpoch: created.task.executorLease.epoch, executorLeaseId: created.task.executorLease.leaseId } : entry) } : item) };
+        await store.writeLocked(boundNext); state = boundNext; work = boundNext.work.find((item) => item.workId === work.workId)!;
+      }
+      const launchTurn = work.turns?.at(-1);
+      if (!launchTurn?.taskRevision || !launchTurn.executorEpoch || !launchTurn.executorLeaseId) throw new Error("Persistent Goal turn lacks durable task lease binding.");
       await assertExecutableIdentity(definition);
-      const run = await launchCodingTaskRun({ dataRoot: config.dataRoot, codexBinary: config.codexBinary, env: { CODEX_HOME: config.codexDir }, maxLogBytes: state.limits.maxLogBytes }, created.task.taskId, { operationId, prompt, expectedRevision: created.task.revision, executorEpoch: created.task.executorLease.epoch, leaseId: created.task.executorLease.leaseId, model: state.workerModel, effort: state.workerEffort, timeoutMs: state.limits.timeoutMs });
+      const runnerConfig = { dataRoot: config.dataRoot, codexBinary: config.codexBinary, env: { CODEX_HOME: config.codexDir }, maxLogBytes: state.limits.maxLogBytes };
+      let run: CodingTaskRunView;
+      if (turn.turnIndex === 1) {
+        run = await launchCodingTaskRun(runnerConfig, created.task.taskId, { operationId, prompt, expectedRevision: launchTurn.taskRevision, executorEpoch: launchTurn.executorEpoch, leaseId: launchTurn.executorLeaseId, model: state.workerModel, effort: state.workerEffort, timeoutMs: state.limits.timeoutMs });
+      } else {
+        const previous = work.turns?.[turn.turnIndex - 2];
+        if (!previous?.threadId || !previous.sessionId || !previous.turnId || previous.status !== "succeeded") throw new Error("Persistent continuation lacks exact successful prior thread/session/turn authority.");
+        const requestKey = continuationKey(state.goalId, work.workId, turn.turnIndex);
+        const existing = await getCodingTaskContinuation(config, created.task.taskId, requestKey).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw error;
+        });
+        if (existing) {
+          const decision = existing.decision;
+          if (decision.operationId !== operationId || decision.turnOrdinal !== turn.turnIndex || decision.previousOperationId !== previous.operationId || decision.expectedRevision !== launchTurn.taskRevision || decision.executorEpoch !== launchTurn.executorEpoch || decision.leaseId !== launchTurn.executorLeaseId || decision.expectedThreadId !== previous.threadId || decision.expectedSessionId !== previous.sessionId || decision.expectedPreviousTurnId !== previous.turnId || decision.prompt !== prompt) throw new Error("Persistent continuation decision diverged from the durable Goal turn reservation.");
+          if (existing.run) run = await reconcileCodingTaskRun(runnerConfig, created.task.taskId, operationId, { relaunchQueued: true });
+          else run = (await submitCodingTaskContinuation(runnerConfig, created.task.taskId, { requestKey, operationId, turnOrdinal: turn.turnIndex, previousOperationId: previous.operationId, prompt, expectedRevision: launchTurn.taskRevision, executorEpoch: launchTurn.executorEpoch, leaseId: launchTurn.executorLeaseId, expectedThreadId: previous.threadId, expectedSessionId: previous.sessionId, expectedPreviousTurnId: previous.turnId, model: state.workerModel, effort: state.workerEffort, timeoutMs: state.limits.timeoutMs })).run;
+        } else {
+          const result = await submitCodingTaskContinuation(runnerConfig, created.task.taskId, { requestKey, operationId, turnOrdinal: turn.turnIndex, previousOperationId: previous.operationId, prompt, expectedRevision: launchTurn.taskRevision, executorEpoch: launchTurn.executorEpoch, leaseId: launchTurn.executorLeaseId, expectedThreadId: previous.threadId, expectedSessionId: previous.sessionId, expectedPreviousTurnId: previous.turnId, model: state.workerModel, effort: state.workerEffort, timeoutMs: state.limits.timeoutMs });
+          if (result.run.operationId !== operationId) throw new Error("Persistent continuation runner decision diverged from reserved operation.");
+          run = result.run;
+        }
+      }
       const current = await store.get(definition.goalId); if (!schedulerFence(current, authority) || current.lifecycle !== "running") return true;
-      const currentWork = current.work.find((x) => x.workId === work.workId); if (!currentWork?.launch || currentWork.launch.operationId !== operationId || ["integrated", "canceled"].includes(currentWork.status)) return true;
-      const next: GoalState = { ...current, revision: current.revision + 1, updatedAt: new Date().toISOString(), work: current.work.map((x) => x.workId === work.workId ? { ...x, codingTaskId: created.task.taskId, status: run.status === "failed" ? "failed" as const : run.status === "canceled" ? "canceled" as const : "running" as const, startedAt: x.startedAt ?? run.startedAt ?? now, ...(run.error ? { error: run.error } : {}) } : x) };
+      const currentWork = current.work.find((x) => x.workId === work.workId); const currentTurn = currentWork?.turns?.at(-1); if (!currentWork?.launch || currentTurn?.operationId !== operationId || ["integrated", "canceled"].includes(currentWork.status)) return true;
+      const next: GoalState = { ...current, revision: current.revision + 1, updatedAt: new Date().toISOString(), work: current.work.map((x) => x.workId === work.workId ? { ...x, codingTaskId: created.task.taskId, operationId, status: run.status === "failed" ? "failed" as const : run.status === "canceled" ? "canceled" as const : "running" as const, startedAt: x.startedAt ?? run.startedAt ?? now, turns: x.turns?.map((entry) => entry.operationId === operationId ? { ...entry, status: "running" as const, runFingerprint: run.definitionFingerprint, runStatus: run.status, startedAt: run.startedAt ?? now } : entry), ...(run.error ? { error: run.error } : {}) } : x) };
       await store.writeLocked(next); return true;
     } catch (error) {
       const current = await store.get(definition.goalId); if (schedulerFence(current, authority)) await store.writeLocked({ ...current, lifecycle: "failed", error: errorText(error), revision: current.revision + 1, updatedAt: new Date().toISOString(), work: current.work.map((x) => x.workId === work.workId && !["integrated", "canceled"].includes(x.status) ? { ...x, status: "failed" as const, error: errorText(error) } : x) });
@@ -495,18 +550,51 @@ async function reconcileRuns(config: GoalSchedulerConfig, definition: GoalSchedu
   for (const work of state.work) {
     if (!work.codingTaskId || !work.operationId || !["launching", "running"].includes(work.status)) continue;
     let run: CodingTaskRunView;
-    try { await assertExecutableIdentity(definition); run = await reconcileCodingTaskRun({ dataRoot: config.dataRoot, codexBinary: config.codexBinary, env: { CODEX_HOME: config.codexDir }, maxLogBytes: state.limits.maxLogBytes }, work.codingTaskId, work.operationId, { relaunchQueued: true }); }
+    try {
+      await assertExecutableIdentity(definition);
+      const runnerConfig = { dataRoot: config.dataRoot, codexBinary: config.codexBinary, env: { CODEX_HOME: config.codexDir }, maxLogBytes: state.limits.maxLogBytes };
+      const observed = await getCodingTaskRun(config, work.codingTaskId, work.operationId);
+      if (observed.status === "queued" && !observed.runnerAlive) {
+        run = await store.withGoalLock(definition.goalId, async () => {
+          const current = await store.get(definition.goalId);
+          const currentWork = current.work.find((item) => item.workId === work.workId);
+          if (!schedulerFence(current, authority) || current.lifecycle !== "running" || !currentWork || currentWork.operationId !== work.operationId || !["launching", "running"].includes(currentWork.status)) return observed;
+          return reconcileCodingTaskRun(runnerConfig, work.codingTaskId!, work.operationId!, { relaunchQueued: true });
+        });
+      } else run = await reconcileCodingTaskRun(runnerConfig, work.codingTaskId, work.operationId, { relaunchQueued: false });
+    }
     catch (error) {
       if (work.status === "launching" && (error as NodeJS.ErrnoException).code === "ENOENT") continue;
       throw new Error(`Persistent worker run reconciliation failed for ${work.workId}: ${errorText(error)}`);
     }
     if (["queued", "running"].includes(run.status)) continue;
+    // The runner publishes its terminal run record before it can acquire the task lock
+    // for fenced terminal writeback. A terminal-looking run is not attestable while that
+    // publisher still owns the run lock; reviewing now would race the active operation.
+    if (run.runnerAlive) continue;
+    const task = await getCodingTask(config, work.codingTaskId);
+    if (task.activeOperation) {
+      if (task.activeOperation.executor === "codex" && task.activeOperation.operationId === work.operationId) continue;
+      throw new Error(`Persistent worker ${work.workId} has divergent active operation authority during terminal publication.`);
+    }
+    if (task.lastCompletedOperation?.operationId !== work.operationId) continue;
+    const review = await reviewCodingTask(config, task.taskId, { maxGitOutputBytes: config.maxOutputBytes, isPathContentAllowed: (pathname) => isGoalPathContentAllowed(definition.contentPolicy, pathname) });
+    const outside = review.changedPaths.filter((pathname) => !pathAllowed(pathname, state, work, definition.contentPolicy));
+    const terminalSuccess = run.status === "waiting_review" && !run.approvalOrInputDeclined && !run.error && task.lastCompletedOperation?.operationId === work.operationId && task.lifecycle === "waiting_review" && !task.activeOperation && sameObservation(task, review) && review.contentComplete && outside.length === 0;
+    if (terminalSuccess && (!run.threadId || !run.sessionId || !run.turnId || task.codexThreadId !== run.threadId || task.codexTurnId !== run.turnId || task.codexSessionId !== run.sessionId)) throw new Error(`Persistent worker ${work.workId} terminal thread/session/turn provenance diverged.`);
+    if (Buffer.byteLength(review.status, "utf8") > 32_768 || Buffer.byteLength(review.diffStat, "utf8") > 32_768) throw new Error(`Persistent worker ${work.workId} terminal Git observation exceeds its compact ledger bound.`);
     await store.withGoalLock(definition.goalId, async () => {
       const current = await store.get(definition.goalId); if (!schedulerFence(current, authority) || current.lifecycle !== "running") return;
       const item = current.work.find((x) => x.workId === work.workId); if (!item || ["integrated", "canceled", "failed"].includes(item.status) || item.operationId !== work.operationId) return;
-      const status = ["waiting_review", "completed"].includes(run.status) ? "waiting_review" as const : run.status === "canceled" ? "canceled" as const : "failed" as const;
+      const tail = item.turns?.at(-1); if (!tail || tail.operationId !== work.operationId || tail.runFingerprint !== run.definitionFingerprint) throw new Error("Persistent worker terminal run does not match the reserved turn ledger.");
+      if (tail.turnIndex > 1) { const prior = item.turns?.[tail.turnIndex - 2]; if (!prior?.threadId || run.threadId !== prior.threadId || run.sessionId !== prior.sessionId) throw new Error("Persistent continuation forked the approved CodingTask thread or session."); }
+      const finalTurn = tail.turnIndex === current.limits.maxTurnsPerWorker;
+      const status = terminalSuccess ? (finalTurn ? "waiting_review" as const : "continuing" as const) : run.status === "canceled" ? "canceled" as const : "failed" as const;
       const abnormal = status === "failed" || status === "canceled";
-      const next: GoalState = { ...current, ...(abnormal ? { lifecycle: "failed" as const, error: run.error ?? `Worker ${work.workId} ended ${status} outside Goal cancellation.` } : {}), revision: current.revision + 1, updatedAt: new Date().toISOString(), work: current.work.map((x) => x.workId === work.workId ? { ...x, status, finishedAt: run.finishedAt ?? new Date().toISOString(), ...(run.finalText ? { summary: run.finalText } : {}), ...(run.error ? { error: run.error } : {}) } : x) };
+      const terminalError = run.error ?? (outside.length ? `Persistent worker changed paths outside the approved contract: ${outside.join(", ")}` : !review.contentComplete ? `Worker ${work.workId} terminal review was blocked by the approved content policy.` : `Worker ${work.workId} terminal result failed exact run/thread/Git provenance attestation.`);
+      const resultSummary = run.finalText ?? ""; const observation = task.lastGitObservation!;
+      const terminalTurn: GoalWorkTurn = { ...tail, status: terminalSuccess ? "succeeded" : status === "canceled" ? "canceled" : "failed", runStatus: run.status, threadId: run.threadId, sessionId: run.sessionId, turnId: run.turnId, ...(resultSummary ? { resultSummary } : {}), resultSha256: sha256(resultSummary), stopReason: terminalSuccess ? "terminal_success" : status === "canceled" ? "canceled" : "failed", terminalObservation: { capturedAt: observation.capturedAt, headSha: observation.headSha, status: observation.status, diffStat: observation.diffStat, diffSha256: observation.diffSha256, dirty: observation.dirty, changedPaths: review.changedPaths }, finishedAt: run.finishedAt ?? new Date().toISOString() };
+      const next: GoalState = { ...current, ...(abnormal ? { lifecycle: "failed" as const, error: terminalError } : {}), revision: current.revision + 1, updatedAt: new Date().toISOString(), work: current.work.map((x) => x.workId === work.workId ? { ...x, status, turns: x.turns?.map((entry) => entry.operationId === tail.operationId ? terminalTurn : entry), ...(finalTurn && terminalSuccess ? { finishedAt: terminalTurn.finishedAt, ...(resultSummary ? { summary: resultSummary } : {}) } : {}), ...(abnormal ? { error: terminalError } : {}) } : x) };
       await store.writeLocked(next); changed = true;
     });
   }
@@ -525,10 +613,17 @@ async function integrateNext(config: GoalSchedulerConfig, definition: GoalSchedu
     assertGoalContractIntegrity(state); if (state.contractFingerprint !== definition.contractFingerprint) throw new Error("Goal contract changed before mechanical integration.");
     const work = state.work.find((x) => x.status === "waiting_review" && x.dependsOn.every((dep) => state.work.find((y) => y.workId === dep)?.status === "integrated"));
     if (!work?.codingTaskId || !work.operationId) return false;
+    const finalTurn = work.turns?.at(-1);
+    if (!finalTurn || work.turns?.length !== state.limits.maxTurnsPerWorker || finalTurn.turnIndex !== state.limits.maxTurnsPerWorker || finalTurn.status !== "succeeded" || finalTurn.operationId !== work.operationId || finalTurn.runStatus !== "waiting_review") {
+      throw new Error("Persistent integration requires the exact final authorized successful turn ledger.");
+    }
     const task = await getCodingTask(config, work.codingTaskId);
     if (task.goalId !== state.goalId || task.goalWorkId !== work.workId || task.lastCompletedOperation?.operationId !== work.operationId || !["waiting_review", "completed"].includes(task.lifecycle) || task.activeOperation) throw new Error("Persistent integration refused stale CodingTask membership or operation authority.");
     const review = await reviewCodingTask(config, task.taskId, { maxGitOutputBytes: config.maxOutputBytes, isPathContentAllowed: (pathname) => isGoalPathContentAllowed(definition.contentPolicy, pathname) });
     if (!review.contentComplete || !sameObservation(task, review)) throw new Error("Persistent integration review no longer equals the terminal worker Git observation.");
+    if (!finalTurn.terminalObservation || finalTurn.threadId !== task.codexThreadId || finalTurn.sessionId !== task.codexSessionId || finalTurn.turnId !== task.codexTurnId || finalTurn.terminalObservation.headSha !== review.headSha || finalTurn.terminalObservation.status !== review.status || finalTurn.terminalObservation.diffStat !== review.diffStat || finalTurn.terminalObservation.diffSha256 !== review.diffSha256 || finalTurn.terminalObservation.dirty !== review.dirty) {
+      throw new Error("Persistent integration review no longer equals the final authorized turn provenance ledger.");
+    }
     const outside = review.changedPaths.filter((pathname) => !pathAllowed(pathname, state, work, definition.contentPolicy));
     if (outside.length) throw new Error(`Persistent worker changed paths outside the approved contract: ${outside.join(", ")}`);
     const ikey = integrationKey(state.goalId, work.workId); const expectedParent = state.integrationHeadSha ?? state.baseSha;
@@ -536,7 +631,9 @@ async function integrateNext(config: GoalSchedulerConfig, definition: GoalSchedu
     const journalText = `${JSON.stringify({ version: 1, goalId: state.goalId, workId: work.workId, integrationKey: ikey, expectedParent, reviewDiffSha256: review.visibleDiffSha256, changedPaths: review.changedPaths }, null, 2)}\n`;
     if (review.changedPaths.length > 1_000 || Buffer.byteLength(journalText) > 64 * 1024) throw new Error("Persistent integration journal exceeds its safety bound.");
     await publishImmutable(journalPath, journalText);
-    const applied = await applyGoalWorkerPatch(state, work.workId, ikey, review.visibleDiffSha256, review.diff, review.changedPaths, config.maxOutputBytes);
+    const applied = review.changedPaths.length === 0 && review.diff === ""
+      ? { commitSha: expectedParent }
+      : await applyGoalWorkerPatch(state, work.workId, ikey, review.visibleDiffSha256, review.diff, review.changedPaths, config.maxOutputBytes);
     const now = new Date().toISOString();
     const updated = state.work.map((x): GoalWorkItem => x.workId === work.workId ? { ...x, status: "integrated", integrationKey: ikey, reviewDiffSha256: review.visibleDiffSha256, integratedCommitSha: applied.commitSha, finishedAt: x.finishedAt ?? now } : x);
     const unlocked = updated.map((x): GoalWorkItem => x.status === "planned" && x.dependsOn.every((dep) => updated.find((y) => y.workId === dep)?.status === "integrated") ? { ...x, status: "ready" } : x);

@@ -1,5 +1,6 @@
-export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v15.html";
+export const TOOL_CARD_URI = "ui://widget/codexpro-tool-card-v16.html";
 export const TOOL_CARD_LEGACY_URIS = [
+  "ui://widget/codexpro-tool-card-v15.html",
   "ui://widget/codexpro-tool-card-v14.html",
   "ui://widget/codexpro-tool-card-v13.html",
   "ui://widget/codexpro-tool-card-v12.html",
@@ -842,7 +843,7 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const approval = record(goal.approval);
         const work = toArray(goal.work).filter((item) => item && typeof item === "object");
         const completed = optionalNumber(data.completed_work_count) ?? work.filter((item) => ["integrated", "waiting_review"].includes(asText(item.status))).length;
-        const running = optionalNumber(data.running_work_count) ?? work.filter((item) => asText(item.status) === "running").length;
+        const running = optionalNumber(data.running_work_count) ?? work.filter((item) => ["launching", "running", "continuing"].includes(asText(item.status))).length;
         const blocked = optionalNumber(data.blocked_work_count) ?? work.filter((item) => ["blocked", "failed"].includes(asText(item.status))).length;
         const goalId = asText(goal.goal_id || goal.goalId, "Goal");
         const approvalStatus = asText(approval.status, "pending").toLowerCase();
@@ -876,9 +877,13 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const metrics = '<div class="metrics">' + metric(completed + "/" + work.length, "work ready") + metric(running, "running") + metric(blocked, "blocked") + (reviewChangedFileCount === null ? metric(number(data.blackboard_count, toArray(goal.blackboard).length), "records") : metric(reviewChangedFileCount, "changed files")) + '</div>';
         const rows = work.slice(0, 12).map((item) => {
           const dependencies = toArray(item.dependsOn || item.depends_on).map(asText).filter(Boolean);
+          const turns = toArray(item.turns).filter((turn) => turn && typeof turn === "object");
+          const authorizedTurns = optionalNumber(item.authorizedTurnCount, item.authorized_turn_count) ?? (1 + toArray(item.continuationIntents || item.continuation_intents).length);
+          const completedTurns = optionalNumber(item.completedTurnCount, item.completed_turn_count) ?? turns.filter((turn) => asText(turn.status) === "succeeded").length;
+          const turnMeta = persistent ? " · turn " + Math.min(turns.length, authorizedTurns) + "/" + authorizedTurns + " · " + completedTurns + " completed" : "";
           return '<li><span class="task-list-mark ' + taskTone(asText(item.status, "planned")) + '" aria-hidden="true"></span><div class="task-list-main"><div class="task-list-title">' +
             escapeHtml(asText(item.title, item.workId || item.work_id || "Work")) + '</div><div class="task-list-meta">' + escapeHtml(asText(item.workId || item.work_id, "") + (dependencies.length ? " · after " + dependencies.join(", ") : "")) +
-            '</div></div><div class="task-list-status">' + escapeHtml(friendly(asText(item.status, "planned"))) + '</div></li>';
+            escapeHtml(turnMeta) + '</div></div><div class="task-list-status">' + escapeHtml(friendly(asText(item.status, "planned"))) + '</div></li>';
         }).join("");
         const workBlock = rows ? '<ul class="task-list">' + rows + '</ul>' : '<div class="empty">No work items.</div>';
         const context = factRows([
@@ -897,6 +902,18 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
         const reviewFold = diff ? fold("Integrated diff", codeBlock("Diff", diff, true, 6000), false) : "";
         const criteria = toArray(goal.completionCriteria || goal.completion_criteria).map(asText).filter(Boolean);
         const criteriaFold = criteria.length ? fold("Completion criteria", list(criteria), false) : "";
+        const turnHistory = work.slice(0, 12).flatMap((item) => {
+          const intents = toArray(item.continuationIntents || item.continuation_intents).map((intent) => {
+            const value = record(intent);
+            return asText(item.workId || item.work_id, "work") + " · approved " + asText(value.intentId || value.intent_id, "continuation") + " · " + truncate(asText(value.promptSummary || value.prompt_summary, "Prompt hidden"), 180) + " · " + truncate(asText(value.fingerprint, ""), 18);
+          });
+          const turns = toArray(item.turns).map((turn) => {
+            const value = record(turn);
+            return asText(item.workId || item.work_id, "work") + " · turn " + asText(value.turnIndex || value.turn_index, "?") + " · " + friendly(asText(value.status, "reserved")) + " · " + friendly(asText(value.stopReason || value.stop_reason, "in progress")) + " · " + truncate(asText(value.operationId || value.operation_id, ""), 80);
+          });
+          return [...intents, ...turns];
+        });
+        const turnHistoryFold = persistent && turnHistory.length ? fold("Approved continuation and turn history", list(turnHistory), false) : "";
         const application = record(goal.sourceApplication || goal.source_application);
         const projectionError = asText(data.error || projection.error || goal.error, "");
         const projectionErrorBlock = projectionError ? '<div class="notice bad">' + escapeHtml(projectionError) + '</div>' : "";
@@ -905,13 +922,13 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
           : "Not approved";
         const stages = fold("Delivery stages", factRows([
           ["Integration checkpoint", '<span class="mono">' + escapeHtml(truncate(integrationHead, 120)) + '</span>', true],
-          ["Private integration", persistent ? "Automatic only after terminal + provenance + path/content checks" : "Explicit Pro-reviewed action"],
+          ["Private integration", persistent ? "Only after the final authorized turn passes terminal + provenance + path/content checks" : "Explicit Pro-reviewed action"],
           ["Live projection", liveProjectionFact, true],
           ["Final application", friendly(asText(application.status, "not applied")) + (application.zeroWrite === true ? " · adopted without rewrite" : "")]
         ]), true);
         const availableActions = toArray(data.available_actions || goal.available_actions).map((action) => typeof action === "object" ? asText(action.label || action.tool) : asText(action)).filter(Boolean);
         const actionsFold = availableActions.length ? fold("Available actions", list(availableActions), true) : "";
-        const next = lifecycle === "proposed" ? (persistent ? "Review the isolated, command-free, one-turn/zero-retry contract. Approval authorizes automatic dependency scheduling and deterministic private integration, never source application or completion." : "Review the complete contract and fingerprint; approve only after the user explicitly agrees.")
+        const next = lifecycle === "proposed" ? (persistent ? "Review every ordered bounded continuation summary and fingerprint. Approval fixes all turns; the scheduler never invents prompts, and private integration waits for the final authorized turn." : "Review the complete contract and fingerprint; approve only after the user explicitly agrees.")
           : lifecycle === "approved" ? (persistent ? "The contract is approved and inert. Start persistent scheduling explicitly when the execution gate is enabled." : "The contract is approved and remains inert until an explicit execution action.")
           : !liveSupported && workspacePolicy === "live" ? "Live projection is unavailable on this platform; inspect existing state without attempting a source mutation."
           : lifecycle === "paused" ? (persistent ? "Scheduling is durably paused; resume_goal explicitly wakes the detached scheduler while existing workers retain approved leases." : "Scheduling is paused; already-running workers retain only their approved leases.")
@@ -923,11 +940,12 @@ export const toolCardWidgetHtml = String.raw`<!doctype html>
           : liveAllowed && /failed|conflict|recovery/.test(projectionStatus) ? "Live projection needs recovery; retry only with the same key or explicitly revert the recorded projection."
           : liveAllowed && integrationHead !== "Not integrated" && !/projected|applied/.test(projectionStatus) ? "Review the exact integration checkpoint, then explicitly project its fingerprint into source."
           : recoveryNeeded ? "Recover only through start_goal with the original start key and the execution gate enabled; passive reads never relaunch work."
-          : /review/.test(lifecycle) ? "Review the private integrated checkpoint and evidence; completion remains an explicit Pro judgment."
+          : work.some((item) => asText(item.status) === "continuing") ? "An intermediate authorized turn succeeded but remains private and non-integrable. The scheduler may execute only the next approved continuation; dependencies stay locked until the final authorized turn succeeds."
+          : /review/.test(lifecycle) ? "All authorized turns finished. Review the private integrated checkpoint and evidence; completion remains an explicit Pro judgment."
           : /failed|blocked/.test(lifecycle) ? "Inspect the blocker and let Pro decide whether a bounded replan is required."
           : "Use authoritative Goal status for the next Pro-supervised action.";
         return card(truncate(asText(goal.title, "Goal"), 180), goalId + " · " + friendly(approvalStatus), friendly(lifecycle), taskTone(lifecycle),
-          state + metrics + context + stages + projectionErrorBlock + workBlock + criteriaFold + recordsFold + reviewFold + actionsFold + '<div class="task-next"><span>' + escapeHtml(next) + '</span></div>', "task-card goal-card");
+          state + metrics + context + stages + projectionErrorBlock + workBlock + criteriaFold + turnHistoryFold + recordsFold + reviewFold + actionsFold + '<div class="task-next"><span>' + escapeHtml(next) + '</span></div>', "task-card goal-card");
       }
 
       function renderGeneric(data) {

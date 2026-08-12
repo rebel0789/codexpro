@@ -148,9 +148,11 @@ Live 会保留既有且不相关的 tracked、staged、untracked 修改。每次
 
 ## 离开 Chat 后，Persistent Goal 会继续吗？
 
-在受支持的 POSIX 主机上可以，但只能执行已批准 envelope 内的机械工作。Persistent Goal 必须使用 Isolated、空 Goal `commands` 列表、network=false、关闭全部 source effect，并限制每个 worker 一个 turn、零次新的自动重试。经过独立的 propose → approve → start 后，本地独立 scheduler 会并行启动依赖已满足的 worker，只把 provenance、scope 与终止状态均通过的 patch 集成到私有 integration worktree，并推进批准过的依赖图。你可以离开页面，之后用被动的 `get_goal` / `review_goal` 重新连接；scheduler 会停在 `waiting_review`，stop reason 为 `semantic_review`，因为只有 Pro 能判断完成，任何后续源码操作都必须在这个 Persistent 契约之外获得用户单独授权。
+在受支持的 POSIX 主机上可以，但只能执行已批准 envelope 内的机械工作。Persistent Goal 必须使用 Isolated、空 Goal `commands` 列表、network=false、关闭全部 source effect，并保持零次新的自动重试。每个 worker 可批准 1–4 个总 turn（包含 initial turn）；超过一个 turn 时，提案必须精确包含少一个、有序且批准后不可修改的 `continuation_intents`，最多三个。经过独立的 propose → approve → start 后，本地独立 scheduler 会并行启动依赖已满足的 worker。中间 turn 成功后仍保持私有，不能集成或解锁依赖，只会在同一 CodingTask、worktree、Codex thread 和 session 上执行下一个已批准 intent。只有最终批准 turn 可以产生一次 cumulative private integration。你可以离开页面，之后用被动的 `get_goal` / `review_goal` 重新连接；scheduler 会停在 `waiting_review`，stop reason 为 `semantic_review`，因为只有 Pro 能判断完成，任何后续源码操作都必须在这个 Persistent 契约之外获得用户单独授权。
 
-工作进行时电脑与独立 scheduler 进程必须保持运行；启动、控制或重新连接时需要 CodexPro server 可用。这不是 ChatGPT 内置 Scheduled Tasks，也不会在断线时让 Pro 继续推理。Persistent start/resume 仍明确要求 workspace write + full bash，因为本地 Codex App Server 可以执行项目命令。同一次 attempt 的 crash recovery 不算新 retry；多轮 worker 和新的自动重试在本阶段仍不支持。worker 失败/取消、过期 provenance、policy 违规或 scheduler 安全错误会停止或失败关闭，不会自动 replan 或创建替代 attempt。
+工作进行时电脑与独立 scheduler 进程必须保持运行；启动、控制或重新连接时需要 CodexPro server 可用。这不是 ChatGPT 内置 Scheduled Tasks，也不会在断线时让 Pro 继续推理。Persistent start/resume 仍明确要求 workspace write + full bash，因为本地 Codex App Server 可以执行项目命令。Continuation 是事先批准预算中必须执行的新 turn，不是 retry；失败或取消不会推进，也不会创建新的替代 attempt。同一 operation 的 crash recovery 仍保留原身份，同样不算 retry。同一 thread 表示向一个持久 Codex thread 追加 turn，不保证 context compaction 后所有早期 token 仍逐字存在。
+
+这个两 turn 流程已在[真实 ordinary Chat](https://chatgpt.com/c/6a7cab4a-fa74-83ee-bb1c-5040c68524c0)通过。Goal `goal_d96c4d1de3d6382cc4ebcc86` 复用了 CodingTask `task_f1c84e9b39654c8aaebb2e6b` 和同一个 thread/session `019ff70a-ea6f-7a83-94d6-f81fe92527a2`；turn 2 运行时 turn 1 仍未集成，最终只有一个私有 integration commit，scheduler 随后停在 `waiting_review` / `semantic_review`。v16 卡片显示 2/2 turn 与 final-only integration。离开再重连没有改变 source 状态，Chat host 重复的被动 status/review 调用也没有修改或重新启动工作。
 
 Pause、resume、cancel 都是显式持久控制。Pause 生效后不会开始新的 worker launch、integration 或依赖推进；重新连接或读取状态不会 resume。Resume 针对同一批准指纹幂等执行，不会重跑已完成工作。Cancel 会 fence 活跃工作并进入 terminal，但不会回滚源码或删除保留的 worktree。
 

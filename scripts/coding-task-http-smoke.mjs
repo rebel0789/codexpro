@@ -456,7 +456,6 @@ async function createQueuedOrphanFixture({ sourceRoot, taskDataRoot, baseSha, fa
   const sourceGitCommonDir = await fs.realpath(path.resolve(sourceRoot, commonDirRaw));
   const now = new Date().toISOString();
   const operationId = 'http-off-mode-queued-orphan';
-  const fingerprint = 'e'.repeat(64);
   const leaseId = 'lease-http-passive';
   const task = {
     version: 1,
@@ -492,7 +491,6 @@ async function createQueuedOrphanFixture({ sourceRoot, taskDataRoot, baseSha, fa
     version: 1,
     taskId,
     operationId,
-    fingerprint,
     prompt: 'queued orphan must stay passive',
     expectedRevision: 1,
     executorEpoch: 1,
@@ -505,6 +503,8 @@ async function createQueuedOrphanFixture({ sourceRoot, taskDataRoot, baseSha, fa
     maxLogBytes: 64 * 1024,
     createdAt: now
   };
+  const fingerprint = runDefinitionFingerprint(definition);
+  definition.fingerprint = fingerprint;
   const run = {
     version: 1,
     taskId,
@@ -534,7 +534,6 @@ async function createDeadRunningFixture({ sourceRoot, taskDataRoot, baseSha, fak
   const sourceGitCommonDir = await fs.realpath(path.resolve(sourceRoot, commonDirRaw));
   const old = new Date(Date.now() - 60_000).toISOString();
   const operationId = 'http-off-mode-dead-running';
-  const fingerprint = 'b'.repeat(64);
   const leaseId = 'lease-http-dead-running';
   const requestFingerprint = createHash('sha256').update(JSON.stringify({
     executor: 'codex',
@@ -592,7 +591,6 @@ async function createDeadRunningFixture({ sourceRoot, taskDataRoot, baseSha, fak
     version: 1,
     taskId,
     operationId,
-    fingerprint,
     prompt: 'dead running operation',
     expectedRevision: 1,
     executorEpoch: 1,
@@ -605,6 +603,8 @@ async function createDeadRunningFixture({ sourceRoot, taskDataRoot, baseSha, fak
     maxLogBytes: 64 * 1024,
     createdAt: old
   };
+  const fingerprint = runDefinitionFingerprint(definition);
+  definition.fingerprint = fingerprint;
   const run = {
     version: 1,
     taskId,
@@ -633,6 +633,28 @@ async function createDeadRunningFixture({ sourceRoot, taskDataRoot, baseSha, fak
     definitionPath,
     runStatePath
   };
+}
+
+function runDefinitionFingerprint(definition) {
+  return createHash('sha256').update(JSON.stringify({
+    schema: 'codexpro-coding-task-run-v1',
+    taskId: definition.taskId,
+    operationId: definition.operationId,
+    prompt: definition.prompt,
+    revision: definition.expectedRevision,
+    epoch: definition.executorEpoch,
+    leaseId: definition.leaseId,
+    threadId: definition.threadId ?? null,
+    expectedSessionId: definition.expectedSessionId ?? null,
+    continuationFingerprint: definition.continuationFingerprint ?? null,
+    model: definition.model,
+    effort: definition.effort,
+    timeoutMs: definition.timeoutMs,
+    worktreeRoot: definition.worktreeRoot,
+    codexBinary: definition.codexBinary,
+    maxLogBytes: definition.maxLogBytes,
+    createdAt: definition.createdAt
+  })).digest('hex');
 }
 
 async function getFreePort() {

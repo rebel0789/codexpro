@@ -158,13 +158,14 @@ Tool cards are opt in:
 CODEXPRO_TOOL_CARDS=1 codexpro start
 ```
 
-The current v15 cards cover selected workspace, analysis, change, Git, handoff,
+The current v16 cards cover selected workspace, analysis, change, Git, handoff,
 CodingTask, Goal, and terminal results. Reads and searches stay in normal chat
-output. v14 through v8 remain compatibility resources. ChatGPT may cache a UI
+output. v15 through v8 remain compatibility resources. ChatGPT may cache a UI
 resource by URI, so every renderer-payload change gets a new URI: a stale v13
 cache prompted v14, and the later authoritative changed-file-count UI required
-v15. After updating the connector, refresh its ChatGPT plugin connection once so
-it loads the current widget resource. The legacy implicit documentation-site
+v15. The bounded Persistent turn-history renderer therefore uses v16. After
+updating the connector, refresh its ChatGPT plugin connection once so it loads
+the current widget resource. The legacy implicit documentation-site
 domain is omitted so ChatGPT can use its default sandbox. Set
 `CODEXPRO_WIDGET_DOMAIN` only to a dedicated HTTPS component origin that you
 control.
@@ -344,19 +345,26 @@ stable idempotency key and explicit confirmation. It never projects unreviewed
 work.
 
 `persistent` is a stricter Isolated-only contract: its Goal `commands` list is
-empty, network is disabled, every source-effect permission is false, each worker
-gets one turn, and there are zero fresh automatic retries. After explicit propose → approve →
-start, the detached local scheduler launches dependency-ready workers in
-parallel and mechanically integrates only terminal, provenance-verified,
-path-policy-visible patches into the private Goal integration worktree. It then
-advances the approved dependency graph without needing the Chat page to stay
-open:
+empty, network is disabled, every source-effect permission is false, and there
+are zero fresh automatic retries. Each worker has 1–4 total turns, including
+the initial turn. A proposal with more than one turn must contain exactly one
+fewer ordered `continuation_intents` (at most three); their prompts and order are
+immutable once approved. After explicit propose → approve → start, the detached
+local scheduler launches dependency-ready workers in parallel. It resumes each
+approved continuation on the same CodingTask, worktree, Codex thread, and
+session, but as a distinct operation and turn. An intermediate success remains
+private and non-integrable, does not unlock dependents, and immediately advances
+to the next already-approved intent. Only the final authorized turn may be
+mechanically integrated once, after its exact terminal provenance and
+path-policy-visible cumulative patch pass validation:
 
 ```text
 propose_goal (persistent + isolated)
   -> approve_goal
   -> start_goal
-  -> local scheduler runs parallel workers and dependency integration
+  -> local scheduler runs each initial turn
+  -> mandatory ordered same-thread continuation turns, if approved
+  -> one cumulative private integration after each worker's final turn
   -> waiting_review (stop reason: semantic_review)
   -> reconnect with get_goal / review_goal
   -> Pro judges completion; any later source action needs separate user authority outside this Persistent contract
@@ -367,13 +375,16 @@ offline Pro judgment. The computer and detached scheduler process must remain
 running while work progresses; the CodexPro server must be available to start,
 control, or reconnect to it. The scheduler cannot invent work, reinterpret completion
 criteria, complete a Goal, project/apply source changes, stage, commit, merge,
-push, or open a PR. The verified Phase 8 contract ends at private integration
-and `waiting_review`; multi-turn workers and fresh automatic retries remain
-roadmap work. Recovering the same reserved attempt after a crash or reconnect
-does not create a fresh retry. Worker failure/cancellation, stale terminal
-provenance, out-of-scope or blocked content, and scheduler safety errors stop or
-fail execution closed; the scheduler never replans or creates a replacement
-attempt on its own.
+push, or open a PR. An approved continuation is not a retry: it is a mandatory
+new turn in the original approved budget. A failed or canceled turn does not
+advance, and the scheduler never creates an unapproved replacement turn.
+Recovering the same reserved operation after a crash or reconnect is also not a
+fresh retry. Same-thread execution means that Codex appends turns to the
+persisted thread identity; it does not promise that every earlier token remains
+verbatim in the model context after compaction. Worker failure/cancellation,
+stale terminal provenance, out-of-scope or blocked content, and scheduler
+safety errors stop or fail execution closed. Fresh automatic retries remain
+roadmap work.
 
 `pause_goal` durably closes the scheduling gate: already-running worker
 processes may finish, but no new launch, integration, or dependency advancement
@@ -394,6 +405,47 @@ unchanged. The built HTTP/MCP flow also passed with an installed real Codex App
 Server, including recovery, interruption, authoritative review counts, and
 process cleanup. Native Windows execution was not run because Goal
 orchestration is unsupported there by contract.
+
+Phase 9's bounded continuation flow is verified through the built public
+HTTP/MCP entry point. A deterministic two-turn run proved that turn one stayed
+private with no integration commit or dependency unlock; turn two reused the
+same task, base, worktree, thread, and session, observed turn one's exact bytes,
+and produced exactly one cumulative integration commit. Disconnecting the MCP
+client and HTTP server did not stop the detached scheduler, and passive
+`get_goal` / `list_goals` / `review_goal` calls after restart caused no launch or
+mutation. An installed real Codex run also passed with Goal
+`goal_f18e1e62ec5797e868fd6421`, CodingTask
+`task_8eb28bf1e327e3cbb2ac2a92`, thread
+`019ff6ef-94b9-7bc3-adbb-ced648a29472`, two distinct turns, and one final
+integration commit. Source HEAD, refs, index, staged, unstaged, and untracked
+state stayed exact.
+
+The same contract also passed through
+[ordinary Chat](https://chatgpt.com/c/6a7cab4a-fa74-83ee-bb1c-5040c68524c0)
+with the installed plugin and real Codex App Server. Goal
+`goal_d96c4d1de3d6382cc4ebcc86` reached revision 15
+`waiting_review` / `semantic_review` under contract fingerprint
+`9851972a680218074a44e12e7830691c0353cf466b92752eb56ffba082ccb8a4`.
+CodingTask `task_f1c84e9b39654c8aaebb2e6b` kept one thread and session
+`019ff70a-ea6f-7a83-94d6-f81fe92527a2` across operations `run:1` and
+`run:2` and two distinct turn IDs. While turn two was running, the integration
+HEAD still equaled Goal base `ce4421d…` and no integrated commit existed. The
+final private integration `124787d868b3d89a1191d394192831cd3fb5c46e`
+contained exactly one commit and the exact two-line
+`phase9-chat/multi-turn.md`; review fingerprint was
+`e36aa461a0ca684d9fe85efd253e0e3431255baf1951e471266d3eedba663c8b`.
+The source path stayed absent and source status, diff, and index stayed
+byte-identical across start, disconnect, and reconnect. An unrelated external
+source commit `cd0f3e18…` predated Goal start; the Goal remained anchored to
+`ce4421d…` and did not create or absorb that commit. The v16 card mounted with
+2/2 turns, stable identities, and final-only integration. Duplicate passive
+get/review calls from the Chat host were harmless and byte-identical.
+The initial Chat attempt also caught an annotation mismatch: `start_goal` was
+hidden while marked destructive even though Persistent start executes only in
+private worktrees and has no source effect. After correcting that hint to
+`false`, rebuilding, restarting, and refreshing the plugin, the canonical
+`start_goal` call succeeded. Source projection/application remain separately
+confirmed actions.
 
 Every Live projection holds a per-repository lock, checks the exact approved source HEAD and changed-path file/index state, and writes a durable journal before changing source. Unrelated pre-existing tracked, staged, and untracked work is preserved. A retry with the same key recovers from the journal; an external edit on a Goal-owned path is never overwritten and leaves the projection `recovery_required` for user action. Unsupported symlink, submodule, conflicted-index, or non-regular-file topology fails closed.
 

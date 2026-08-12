@@ -64,15 +64,19 @@ fingerprinted contract.
 The same Goal engine supports two policies:
 
 - **Supervised:** the user approves the plan, observes the work, and approves each source effect. Its default workspace policy is **Live**, so an exact Pro-reviewed integration checkpoint can be projected promptly into the user's current workspace through a separate confirmed action.
-- **Persistent (Phase 8):** the user separately proposes, approves, and starts a strict **Isolated** contract. The engine launches dependency-ready Codex workers and mechanically integrates verified terminal patches in its private worktree, then stops at `waiting_review` / `semantic_review`. The Goal `commands` list is empty, network and every source-effect permission are false, each worker gets one turn, and there are zero fresh automatic retries.
+- **Persistent (Phase 8 scheduler, Phase 9 continuations):** the user separately proposes, approves, and starts a strict **Isolated** contract. The engine launches dependency-ready Codex workers and mechanically integrates verified final terminal patches in its private worktree, then stops at `waiting_review` / `semantic_review`. The Goal `commands` list is empty, network and every source-effect permission are false, each worker has 1–4 total turns including its initial turn, and there are zero fresh automatic retries. Any turns after the first are mandatory ordered `continuation_intents` whose exact prompts are fingerprinted at approval.
 
 Workers and Pro's integration worktree always remain isolated. `review_goal` attests an exact integration checkpoint; only the separate `project_goal` authority can move that reviewed checkpoint toward source. Live application must stop if source HEAD, changed-path content/index state, or repository topology makes the approved baseline unsafe.
 
 Persistent autonomy is bounded, not unlimited. The current contract retains
-file, network, concurrency, time, and resource boundaries and does not authorize
-source actions. Recovering the same reserved attempt after a crash or reconnect
-does not count as a fresh retry. Multi-turn workers and fresh retries remain
-later contracts rather than implicit extensions of Phase 8 approval.
+file, network, concurrency, time, turn, and resource boundaries and does not
+authorize source actions. A continuation resumes the same CodingTask, worktree,
+Codex thread, and session as a distinct operation. Intermediate success is
+`continuing`: it remains private, cannot integrate, and cannot unlock a
+dependency. Only the exact final authorized successful turn may integrate the
+cumulative patch once. A continuation is not a retry, and a failed or canceled
+turn does not advance. Recovering the same reserved operation after a crash or
+reconnect preserves its identity; fresh retries remain a later contract.
 Abnormal worker termination, stale terminal provenance, out-of-scope or blocked
 content, and scheduler safety/reconciliation errors stop or fail execution
 closed; they never trigger an autonomous replan or replacement attempt.
@@ -85,6 +89,12 @@ envelope, and completed work is not rerun. Cancel fences active workers and is
 terminal, but never reverts source or deletes retained worktrees. Passive
 `get_goal`, `list_goals`, and `review_goal` calls—and store-only
 `refresh_goal`—never launch or resume execution.
+
+Tool metadata follows the same boundary. `start_goal` is execution-bearing and
+still requires explicit start plus workspace-write/full-bash authority, but its
+MCP destructive hint is `false` because Persistent execution stays in private
+isolated worktrees and has no source effect. Projection and application remain
+separate confirmed source actions.
 
 ## Goal experience in Chat
 
@@ -101,10 +111,13 @@ The approved plan is a structured execution contract containing:
 - integration and source-application policy.
 
 A persistent Goal card shows overall state, current phase, approvals, scheduler
-lease/stop reason, worker status, blockers, verification, integration state,
-authoritative changed-file count, and bounded drill-down into each CodingTask.
+lease/stop reason, worker status, authorized/completed/remaining turn counts,
+bounded intent summaries and fingerprints, per-turn identity/status/stop reason,
+blockers, verification, final-only integration state, authoritative changed-file
+count, and bounded drill-down into each CodingTask. `list_goals` stays compact;
+exact prompts, raw state, full ledgers, and Blackboard evidence remain private.
 Server state, not hidden widget state or chat history, is authoritative. The
-current card resource is v15; v14 through v8 remain compatibility resources.
+current card resource is v16; v15 through v8 remain compatibility resources.
 Renderer changes always receive a new URI so a stale Chat cache cannot preserve
 old semantics.
 
@@ -164,7 +177,7 @@ The primary metric is **Goal completion rate**: the share of representative Goal
 | --- | --- |
 | Direct ChatGPT coding | Implemented |
 | Independent persistent CodingTask and Direct↔Codex transfer | Implemented in the current working tree; unreleased |
-| Chat and Work task cards | Current resource is v15 with v14–v8 compatibility. Ordinary Chat mounted the v14 Persistent reconnect card; the later authoritative changed-file-count UI required v15 and passed widget/HTTP regressions. A stale v13 cache established the versioned-URI rule. |
+| Chat and Work task cards | Current resource is v16 with v15–v8 compatibility. Ordinary Chat mounted the v14 Phase 8 reconnect card; the changed-file-count UI required v15, and the bounded Phase 9 turn-history renderer required v16. A real Phase 9 get/review mounted v16 with 2/2 turns, stable identities, stop reason, and final-only integration. A stale v13 cache established the versioned-URI rule. |
 | Durable Goal state and fingerprint-bound approval contract | Implemented in the current working tree; unreleased |
 | Goal platform availability | Supported on POSIX hosts; all Goal tools are hidden on Windows and `server_config.goalOrchestration.supported=false`; Direct/CodingTask remain available |
 | Parallel Goal workers and Pro-supervised Blackboard | Implemented for supervised and Persistent execution; deterministic HTTP/MCP and real ordinary-Chat flows verified |
@@ -172,10 +185,12 @@ The primary metric is **Goal completion rate**: the share of representative Goal
 | Supervised Live reviewed-checkpoint projection and explicit LIFO revert | Implemented and verified through a representative ordinary-Chat happy path on a supported POSIX host with the installed plugin and real `gpt-5.6-sol`/`high` App Server; focused core/HTTP tests separately cover CAS, recovery, LIFO revert, and retry |
 | Persistent Isolated scheduler | Implemented in the current working tree and verified through ordinary Chat plus installed-real-Codex HTTP/MCP: explicit start, disconnect, dependency-safe parallel workers, mechanical private integration, passive reconnect, and `waiting_review` / `semantic_review` stop |
 | Persistent interruption and recovery | Pause/resume/cancel fencing, same-attempt reservation/lease recovery, restart idempotency, and process cleanup pass focused core/HTTP regressions; native Windows was not run and Goal orchestration remains hidden there by contract |
-| Multi-turn Persistent workers | Planned; unsupported values fail closed |
-| Fresh automatic worker retries | Planned; Phase 8 permits zero fresh retries, while same-attempt crash recovery preserves identity |
+| Bounded multi-turn Persistent workers | Implemented and verified through built public HTTP/MCP, an installed real Codex App Server, and canonical ordinary Chat: 1–4 total approved turns, immutable ordered continuation intents, same task/worktree/thread/session, intermediate integration/dependency gate, and one final cumulative integration. |
+| Fresh automatic worker retries | Planned; current Persistent permits zero fresh retries, while same-operation crash recovery preserves identity |
 | Representative real Isolated Goal completion in Chat | Verified in ordinary Chat through the installed private plugin and real Codex App Server: two `gpt-5.6-sol`/`high` workers overlapped, Pro integrated/reviewed/completed, and source application remained unset |
 | Representative real Live Goal completion in Chat | Verified exact review → separate projection approval → completion → zero-write final adoption; projection `proj_32ac83deacc868d2f4799002` was adopted, source HEAD stayed unchanged, and only the approved 2-line/70-byte file was projected |
 | Representative real Persistent Goal stop in Chat | Verified Goal `goal_cd1d3bf868c2bdade5b1c7af` through explicit propose/approve/start, navigation away, real parallel `gpt-5.6-sol`/`high` A/B workers followed by a summary dependency, and reconnect at revision 20. Exactly `a.md`, `b.md`, and `summary.md` reached private integration HEAD prefix `e05a497…`; source HEAD/index/refs and the source target path were unchanged at the semantic-review stop. |
+| Representative real-Codex bounded continuation | Verified through built HTTP/MCP with Goal `goal_f18e1e62ec5797e868fd6421`, CodingTask `task_8eb28bf1e327e3cbb2ac2a92`, thread `019ff6ef-94b9-7bc3-adbb-ced648a29472`, two distinct turns, one final integration commit, and exact source authority preservation. |
+| Representative ordinary-Chat bounded continuation | Verified Goal `goal_d96c4d1de3d6382cc4ebcc86` revision 15 through the installed plugin: one task/thread/session, operations `run:1` / `run:2`, no intermediate integration, exactly one final commit `124787d868b3d89a1191d394192831cd3fb5c46e`, exact two-line path, byte-identical passive reconnect/source readback, and a fully rendered v16 2/2 card. The source's unrelated `cd0f3e18…` commit predated start; Goal base remained `ce4421d…`. |
 
 This status table is part of the contract: documentation and tests must not present planned Goal behavior as a shipped capability.

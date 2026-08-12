@@ -1,10 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { secureCodingTaskDirectory, writeCodingTaskJsonAtomic } from "./codingTaskStore.js";
 import { GOAL_ID_PATTERN, parseGoalState, validateGoalId, type GoalState } from "./goalState.js";
+
+const GOAL_STATE_MAX_BYTES = 4 * 1024 * 1024;
+const GOAL_LIST_MAX_READ_BYTES = 32 * 1024 * 1024;
+const GOAL_LIST_MAX_CANDIDATES = 500;
 
 export interface GoalStoreConfig {
   dataRoot: string;
@@ -185,7 +190,13 @@ export class GoalStore {
     const goalId = validateGoalId(goalIdInput);
     await this.assertGoalDirectory(goalId, false);
     try {
-      return parseGoalState(JSON.parse(await fsp.readFile(this.paths(goalId).state, "utf8")), goalId);
+      const statePath = this.paths(goalId).state;
+      const handle = await fsp.open(statePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile() || stat.size > GOAL_STATE_MAX_BYTES) throw new Error(`Goal state exceeds the ${GOAL_STATE_MAX_BYTES}-byte safety bound.`);
+        return parseGoalState(JSON.parse(await handle.readFile("utf8")), goalId);
+      } finally { await handle.close(); }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`Goal not found: ${goalId}`);
       throw error;
@@ -204,18 +215,27 @@ export class GoalStore {
   async list(options: { sourceRoot?: string; limit?: number } = {}): Promise<GoalState[]> {
     await this.initialize();
     const entries = await fsp.readdir(path.join(this.dataRoot, "goals"), { withFileTypes: true });
+    const requestedLimit = Math.max(1, Math.min(options.limit ?? 100, 500));
+    const candidates = (await Promise.all(entries.slice(0, 2_000).flatMap(async (entry) => {
+      if (!entry.isDirectory() || !GOAL_ID_PATTERN.test(entry.name)) return [];
+      const stat = await fsp.lstat(this.paths(entry.name).state).catch(() => undefined);
+      if (!stat?.isFile() || stat.isSymbolicLink() || stat.size > GOAL_STATE_MAX_BYTES) return [];
+      return [{ goalId: entry.name, size: stat.size, mtimeMs: stat.mtimeMs }];
+    }))).flat().sort((left, right) => right.mtimeMs - left.mtimeMs || left.goalId.localeCompare(right.goalId)).slice(0, GOAL_LIST_MAX_CANDIDATES);
     const goals: GoalState[] = [];
-    for (const entry of entries.slice(0, 2_000)) {
-      if (!entry.isDirectory() || !GOAL_ID_PATTERN.test(entry.name)) continue;
+    let readBytes = 0;
+    for (const candidate of candidates) {
+      if (goals.length >= requestedLimit || readBytes + candidate.size > GOAL_LIST_MAX_READ_BYTES) break;
+      readBytes += candidate.size;
       try {
-        const goal = await this.get(entry.name);
+        const goal = await this.get(candidate.goalId);
         if (!options.sourceRoot || goal.sourceRoot === options.sourceRoot) goals.push(goal);
       } catch {
         // Direct get remains the corruption-reporting path; one malformed Goal cannot hide healthy Goals.
       }
     }
     goals.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.goalId.localeCompare(right.goalId));
-    return goals.slice(0, Math.max(1, Math.min(options.limit ?? 100, 500)));
+    return goals.slice(0, requestedLimit);
   }
 
   async withGoalLock<T>(goalIdInput: string, operation: () => Promise<T>): Promise<T> {
@@ -277,6 +297,7 @@ export class GoalStore {
 
   async writeLocked(state: GoalState): Promise<void> {
     parseGoalState(state, state.goalId);
+    if (Buffer.byteLength(JSON.stringify(state), "utf8") > GOAL_STATE_MAX_BYTES) throw new Error(`Goal state exceeds the ${GOAL_STATE_MAX_BYTES}-byte safety bound.`);
     await writeCodingTaskJsonAtomic(this.paths(state.goalId).state, state);
   }
 

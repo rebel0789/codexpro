@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -30,14 +31,23 @@ async function fixtureProcesses(fixtureRoot) {
 }
 
 async function terminateFixtureProcesses(fixtureRoot) {
-  let processes = await fixtureProcesses(fixtureRoot);
-  for (const item of processes) { try { process.kill(item.pid, 'SIGCONT'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
-  for (const item of processes) { try { process.kill(item.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
-  const deadline = Date.now() + 3_000;
-  while (Date.now() < deadline && (processes = await fixtureProcesses(fixtureRoot)).length) await new Promise((resolve) => setTimeout(resolve, 25));
-  for (const item of processes) { try { process.kill(item.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
-  const killDeadline = Date.now() + 3_000;
-  while (Date.now() < killDeadline && (processes = await fixtureProcesses(fixtureRoot)).length) await new Promise((resolve) => setTimeout(resolve, 25));
+  let processes = []; let stableSince;
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    processes = await fixtureProcesses(fixtureRoot);
+    if (!processes.length) {
+      stableSince ??= Date.now();
+      if (Date.now() - stableSince >= 1_000) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      continue;
+    }
+    stableSince = undefined;
+    for (const item of processes) { try { process.kill(item.pid, 'SIGCONT'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+    for (const item of processes) { try { process.kill(item.pid, 'SIGTERM'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    for (const item of await fixtureProcesses(fixtureRoot)) { try { process.kill(item.pid, 'SIGKILL'); } catch (error) { if (error.code !== 'ESRCH') throw error; } }
+  }
+  processes = await fixtureProcesses(fixtureRoot);
   assert.deepEqual(processes, [], `persistent smoke leaked fixture-owned processes: ${JSON.stringify(processes)}`);
 }
 
@@ -55,11 +65,11 @@ try {
   assert.deepEqual(await fixtureProcesses(cleanupProbeRoot), []);
   await fs.mkdir(path.join(sourceRoot, 'src')); await fs.writeFile(path.join(sourceRoot, 'src', 'a.txt'), 'base a\n'); await fs.writeFile(path.join(sourceRoot, 'src', 'b.txt'), 'base b\n');
   git(sourceRoot, ['add', '--', 'src/a.txt', 'src/b.txt']); git(sourceRoot, ['commit', '-qm', 'base']); const baseSha = git(sourceRoot, ['rev-parse', 'HEAD']); const sourceStatus = git(sourceRoot, ['status', '--porcelain=v1', '--untracked-files=all']);
-  const fakeSource = `#!/usr/bin/env node
+const fakeSource = `#!/usr/bin/env node
 import fs from 'node:fs'; import path from 'node:path';
-const launches=${JSON.stringify(launches)}; let buffer=''; let slot=''; const threadId='thread-'+process.pid; const sessionId='session-'+process.pid; const turnId='turn-'+process.pid;
+const launches=${JSON.stringify(launches)}; let buffer=''; let slot=''; const threadId='thread-stable'; const sessionId='session-stable'; const turnId='turn-'+process.pid;
 function send(v){process.stdout.write(JSON.stringify(v)+'\\n')} function turn(status='inProgress'){return {id:turnId,status,error:null,items:status==='completed'?[{type:'agentMessage',id:'final',text:'persistent '+slot+' complete',phase:'final_answer'}]:[]}}
-function handle(m){ if(m.method==='initialize')return send({id:m.id,result:{}}); if(m.method==='initialized')return; if(m.method==='thread/start'||m.method==='thread/resume')return send({id:m.id,result:{thread:{id:m.params.threadId||threadId,sessionId,ephemeral:false}}}); if(m.method==='turn/start'){const prompt=m.params.input?.map(x=>x.text||'').join('\\n')||''; slot=prompt.includes('work_pause')?'pause':prompt.includes('work_cancel')?'cancel':prompt.includes('work_secret')?'secret':prompt.includes('work_b')?'b':'a'; fs.appendFileSync(launches,'start:'+slot+'\\n'); if(slot==='secret')fs.writeFileSync(path.join(process.cwd(),'src','.ENV'),'TOP_SECRET=1\\n'); else fs.writeFileSync(path.join(process.cwd(),'src',slot==='b'?'b.txt':'a.txt'),'persistent '+slot+'\\n'); send({id:m.id,result:{turn:turn()}}); setTimeout(()=>{fs.appendFileSync(launches,'finish:'+slot+'\\n');send({method:'turn/completed',params:{threadId,turn:turn('completed')}})},slot==='pause'||slot==='cancel'?1500:100); return} if(m.method==='turn/interrupt'){send({id:m.id,result:{}});send({method:'turn/completed',params:{threadId,turn:turn('interrupted')}})}}
+function handle(m){ if(m.method==='initialize')return send({id:m.id,result:{}}); if(m.method==='initialized')return; if(m.method==='thread/start'||m.method==='thread/resume')return send({id:m.id,result:{thread:{id:m.params.threadId||threadId,sessionId,ephemeral:false}}}); if(m.method==='turn/start'){const prompt=m.params.input?.map(x=>x.text||'').join('\\n')||''; slot=prompt.includes('work_noop')?'noop':prompt.includes('work_pause')?'pause':prompt.includes('work_cancel')?'cancel':prompt.includes('work_secret')?'secret':prompt.includes('work_b')?'b':'a'; fs.appendFileSync(launches,'start:'+slot+'\\n'); if(slot==='secret')fs.writeFileSync(path.join(process.cwd(),'src','.ENV'),'TOP_SECRET=1\\n'); else if(slot!=='noop')fs.writeFileSync(path.join(process.cwd(),'src',slot==='b'?'b.txt':'a.txt'),'persistent '+slot+'\\n'); send({id:m.id,result:{turn:turn()}}); setTimeout(()=>{fs.appendFileSync(launches,'finish:'+slot+'\\n');send({method:'turn/completed',params:{threadId,turn:turn('completed')}})},slot==='pause'||slot==='cancel'?1500:100); return} if(m.method==='turn/interrupt'){send({id:m.id,result:{}});send({method:'turn/completed',params:{threadId,turn:turn('interrupted')}})}}
 process.stdin.on('data',c=>{buffer+=c;for(;;){const i=buffer.indexOf('\\n');if(i<0)break;const line=buffer.slice(0,i);buffer=buffer.slice(i+1);if(line.trim())handle(JSON.parse(line))}});`;
   await fs.writeFile(fakeCodex, fakeSource, { mode: 0o700 }); await fs.chmod(fakeCodex, 0o700);
   const storeConfig = { dataRoot, lockTimeoutMs: 60_000 }; const executionConfig = { dataRoot, lockTimeoutMs: 60_000, codexBinary: fakeCodex, codexDir: fixture, maxOutputBytes: 2 * 1024 * 1024 };
@@ -92,6 +102,47 @@ process.stdin.on('data',c=>{buffer+=c;for(;;){const i=buffer.indexOf('\\n');if(i
   const passiveBefore = await fs.readFile(path.join(dataRoot, 'goals', dag.goalId, 'state.json')); await getPersistentGoalScheduler(storeConfig, dag.goalId); assert.deepEqual(await fs.readFile(path.join(dataRoot, 'goals', dag.goalId, 'state.json')), passiveBefore);
   await assert.rejects(pauseGoal(storeConfig, dag.goalId, { expectedRevision: done.goal.revision, requestKey: 'pause-after-review-v1' }), /stopped for Pro semantic review/);
   assert.deepEqual(await fs.readFile(path.join(dataRoot, 'goals', dag.goalId, 'state.json')), passiveBefore, 'persistent waiting_review pause rejection must be zero-mutation');
+
+  const multiInput = { ...baseInput, limits: { ...baseInput.limits, maxConcurrency: 1, maxTurnsPerWorker: 2 } };
+  const multiProposed = await proposeGoal(storeConfig, { root: sourceRoot }, undefined, { ...multiInput, goalKey: 'persistent-multi-v1', work: [{ workId: 'work_multi', title: 'Multi', goal: 'Modify src/a.txt in the initial turn.', acceptanceCriteria: ['Two authorized turns'], fileGlobs: ['src/a.txt'], continuationIntents: [{ intentId: 'verify_final', prompt: 'Inspect the existing src/a.txt change, preserve it, and return the final authorized result.' }] }] });
+  const multi = await approveGoal(storeConfig, multiProposed.goal.goalId, { expectedRevision: multiProposed.goal.revision, contractFingerprint: multiProposed.goal.contractFingerprint, approvalKey: 'approve-multi-v1' });
+  await startPersistentGoal(executionConfig, multi.goalId, { expectedRevision: multi.revision, startKey: 'start-multi-v1' });
+  const multiDone = await poll(() => getPersistentGoalScheduler(storeConfig, multi.goalId), (view) => view.goal.lifecycle === 'waiting_review' && view.runtime?.status === 'stopped', 30_000);
+  const multiWork = multiDone.goal.work[0];
+  assert.equal(multiWork.status, 'integrated'); assert.equal(multiWork.turns.length, 2);
+  assert.deepEqual(multiWork.turns.map((turn) => turn.status), ['succeeded', 'succeeded']);
+  assert.deepEqual(multiWork.turns.map((turn) => turn.operationId), [`goal:${multi.goalId.slice(5)}:work_multi:run:1`, `goal:${multi.goalId.slice(5)}:work_multi:run:2`]);
+  assert.equal(multiWork.turns[0].taskId, multiWork.turns[1].taskId); assert.equal(multiWork.turns[0].threadId, multiWork.turns[1].threadId); assert.equal(multiWork.turns[0].sessionId, multiWork.turns[1].sessionId);
+  assert.equal(multiWork.integrationKey, `goal:${multi.goalId}:work_multi:integrate:1`);
+  assert.equal(git(multiDone.goal.integrationWorktreeRoot, ['rev-list', '--count', `${baseSha}..HEAD`]), '1', 'only the final authorized cumulative checkpoint integrates once');
+
+  const noOpGoal = await approved('persistent-noop-v1', [{ workId: 'work_noop', title: 'No-op', goal: 'Inspect only and make no changes.', acceptanceCriteria: ['No change is a valid authorized result'], fileGlobs: ['src/a.txt'] }]);
+  await startPersistentGoal(executionConfig, noOpGoal.goalId, { expectedRevision: noOpGoal.revision, startKey: 'start-noop-v1' });
+  const noOpDone = await poll(() => getPersistentGoalScheduler(storeConfig, noOpGoal.goalId), (view) => view.goal.lifecycle === 'waiting_review' && view.runtime?.status === 'stopped');
+  assert.equal(noOpDone.goal.work[0].status, 'integrated'); assert.equal(noOpDone.goal.integrationHeadSha, baseSha);
+  assert.deepEqual(noOpDone.goal.work[0].turns[0].terminalObservation.changedPaths, []);
+  assert.equal(git(noOpDone.goal.integrationWorktreeRoot, ['rev-list', '--count', `${baseSha}..HEAD`]), '0', 'valid no-op integration must not fabricate a commit');
+
+  const terminalBarrierGoal = await approved('persistent-terminal-publication-barrier-v1', [{ workId: 'work_pause', title: 'Terminal publication barrier', goal: 'Modify src/a.txt while the test fences terminal task writeback.', acceptanceCriteria: ['Terminal publication is retried'], fileGlobs: ['src/a.txt'] }]);
+  await startPersistentGoal(executionConfig, terminalBarrierGoal.goalId, { expectedRevision: terminalBarrierGoal.revision, startKey: 'start-terminal-publication-barrier-v1' });
+  const barrierRunning = await poll(() => getGoal(storeConfig, terminalBarrierGoal.goalId), (goal) => goal.work[0].status === 'running' && goal.work[0].codingTaskId && goal.work[0].operationId);
+  const barrierWork = barrierRunning.work[0];
+  const barrierRun = await poll(() => getCodingTaskRun(storeConfig, barrierWork.codingTaskId, barrierWork.operationId), (run) => run.status === 'running' && run.runnerAlive && run.runnerPid);
+  const barrierRunStatePath = path.join(dataRoot, 'tasks', barrierWork.codingTaskId, 'runs', `run_${createHash('sha256').update(barrierWork.operationId).digest('hex').slice(0, 32)}`, 'state.json');
+  const runningRunBytes = await fs.readFile(barrierRunStatePath); const syntheticTerminal = JSON.parse(runningRunBytes);
+  process.kill(barrierRun.runnerPid, 'SIGSTOP');
+  try {
+    syntheticTerminal.status = 'waiting_review'; syntheticTerminal.updatedAt = new Date().toISOString(); syntheticTerminal.finishedAt = syntheticTerminal.updatedAt;
+    await fs.writeFile(barrierRunStatePath, `${JSON.stringify(syntheticTerminal, null, 2)}\n`, { mode: 0o600 });
+    const published = await getCodingTaskRun(storeConfig, barrierWork.codingTaskId, barrierWork.operationId);
+    assert.equal(published.status, 'waiting_review'); assert.equal(published.runnerAlive, true, 'fixture must hold the exact window after terminal run publication and before fenced task finish');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const deferred = await getGoal(storeConfig, terminalBarrierGoal.goalId);
+    assert.equal(deferred.lifecycle, 'running'); assert.notEqual(deferred.work[0].status, 'failed');
+    await fs.writeFile(barrierRunStatePath, runningRunBytes, { mode: 0o600 });
+  } finally { process.kill(barrierRun.runnerPid, 'SIGCONT'); }
+  const barrierDone = await poll(() => getPersistentGoalScheduler(storeConfig, terminalBarrierGoal.goalId), (view) => view.goal.lifecycle === 'waiting_review' && view.runtime?.status === 'stopped', 20_000);
+  assert.equal(barrierDone.goal.work[0].status, 'integrated');
 
   const pausedGoal = await approved('persistent-pause-v1', [{ workId: 'work_pause', title: 'Pause', goal: 'Modify src/a.txt slowly.', acceptanceCriteria: ['Pause'], fileGlobs: ['src/a.txt'] }]);
   await startPersistentGoal(executionConfig, pausedGoal.goalId, { expectedRevision: pausedGoal.revision, startKey: 'start-pause-v1' });
@@ -196,8 +247,8 @@ process.stdin.on('data',c=>{buffer+=c;for(;;){const i=buffer.indexOf('\\n');if(i
   const terminalCrashGoal = await approved('persistent-terminal-crash-v1', [{ workId: 'work_terminal_crash', title: 'Terminal crash', goal: 'Exercise terminal run recovery.', acceptanceCriteria: ['Recovered'], fileGlobs: ['src/a.txt'] }]);
   const crashTask = await createCodingTask(storeConfig, { root: sourceRoot }, undefined, { taskKey: `goal:${terminalCrashGoal.goalId}:work_terminal_crash`, title: 'Terminal crash child', goal: 'Modify src/a.txt.', executor: 'codex', baseSha, goalId: terminalCrashGoal.goalId, goalWorkId: 'work_terminal_crash' });
   const crashOperationId = `goal:${terminalCrashGoal.goalId.slice(5)}:work_terminal_crash:run:1`;
-  const begunCrashTask = await beginCodingTaskOperation(storeConfig, crashTask.task.taskId, { expectedRevision: crashTask.task.revision, executor: 'codex', executorEpoch: crashTask.task.executorLease.epoch, leaseId: crashTask.task.executorLease.leaseId, operationId: crashOperationId });
-  await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, crashTask.task.taskId, { operationId: crashOperationId, prompt: 'Work item: work_terminal_crash', expectedRevision: begunCrashTask.revision, executorEpoch: begunCrashTask.executorLease.epoch, leaseId: begunCrashTask.executorLease.leaseId, timeoutMs: 5_000 });
+  await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, crashTask.task.taskId, { operationId: crashOperationId, prompt: 'Work item: work_pause terminal crash', expectedRevision: crashTask.task.revision, executorEpoch: crashTask.task.executorLease.epoch, leaseId: crashTask.task.executorLease.leaseId, timeoutMs: 5_000 });
+  const begunCrashTask = await poll(() => getCodingTask(storeConfig, crashTask.task.taskId), (task) => task.activeOperation?.operationId === crashOperationId && task.codexTurnActive);
   await poll(() => getCodingTaskRun(storeConfig, crashTask.task.taskId, crashOperationId), (run) => ['waiting_review', 'completed'].includes(run.status) && !run.runnerAlive);
   await fs.writeFile(path.join(dataRoot, 'tasks', crashTask.task.taskId, 'state.json'), `${JSON.stringify(begunCrashTask, null, 2)}\n`, { mode: 0o600 });
   const crashNow = new Date().toISOString(); const crashGoalStatePath = path.join(dataRoot, 'goals', terminalCrashGoal.goalId, 'state.json');
@@ -209,6 +260,7 @@ process.stdin.on('data',c=>{buffer+=c;for(;;){const i=buffer.indexOf('\\n');if(i
   const huge = 'x'.repeat(1_000);
   await assert.rejects(proposeGoal(storeConfig, { root: sourceRoot }, undefined, { ...baseInput, goalKey: 'persistent-prompt-bound-v1', work: Array.from({ length: 3 }, (_, index) => ({ workId: `work_huge_${index}`, title: huge.slice(0, 500), goal: 'x'.repeat(20_000), acceptanceCriteria: Array.from({ length: 50 }, () => huge.repeat(2)), verification: Array.from({ length: 50 }, () => huge.repeat(2)), fileGlobs: Array.from({ length: 100 }, (_, item) => `src/${index}/${item}/${huge.slice(0, 900)}`) })) }), /256KiB runner safety bound/);
   assert.equal((await fs.readdir(path.join(dataRoot, 'goals'))).some((name) => name.includes('prompt-bound')), false);
+  await assert.rejects(proposeGoal(storeConfig, { root: sourceRoot }, undefined, { ...baseInput, goalKey: 'persistent-continuation-aggregate-bound-v1', limits: { ...baseInput.limits, maxTurnsPerWorker: 4 }, work: Array.from({ length: 3 }, (_, index) => ({ workId: `work_bound_${index}`, title: 'Bound', goal: 'Remain bounded.', acceptanceCriteria: ['Bounded'], fileGlobs: ['src/**'], continuationIntents: Array.from({ length: 3 }, (_, turn) => ({ intentId: `intent_${turn}`, prompt: 'p'.repeat(32_000) })) })) }), /aggregate 256KiB/);
   assert.equal(git(sourceRoot, ['status', '--porcelain=v1', '--untracked-files=all']), sourceStatus);
   console.log('goal persistent smoke: ok');
 } finally {

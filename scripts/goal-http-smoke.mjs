@@ -584,7 +584,7 @@ process.stdin.on('data', (chunk) => {
   assert.deepEqual(await fs.readFile(path.join(liveRoot, 'src', 'cumulative-b.txt')), cumulativeBBytesBeforeComplete, 'complete conflict must not rewrite disjoint B');
   const cumulativeAfterCompleteFailure = await callTool(client, 'get_goal', { goal_id: cumulativeGoalId });
   assert.equal(cumulativeAfterCompleteFailure.structuredContent.lifecycle, 'waiting_review');
-  assert.equal(cumulativeAfterCompleteFailure.structuredContent.goal.completion, undefined);
+  assert.equal(cumulativeAfterCompleteFailure.structuredContent.goal.completion, null);
 
   await fs.writeFile(path.join(liveRoot, 'src', 'cumulative-a.txt'), 'cumulative A projected\n', 'utf8');
   const cumulativeCompleted = await callTool(client, 'complete_goal', cumulativeCompleteArgs);

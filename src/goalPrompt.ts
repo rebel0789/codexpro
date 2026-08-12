@@ -1,6 +1,20 @@
-import type { GoalState, GoalWorkItem } from "./goalState.js";
+import type { GoalContinuationIntent, GoalState, GoalWorkItem } from "./goalState.js";
 
 export const GOAL_WORKER_PROMPT_MAX_BYTES = 256 * 1024;
+
+export function assertGoalWorkerPromptBudget(initialPrompt: string, continuationIntents: GoalContinuationIntent[]): void {
+  const prompts = [initialPrompt, ...continuationIntents.map((intent) => intent.prompt)];
+  if (prompts.some((prompt) => Buffer.byteLength(prompt, "utf8") > GOAL_WORKER_PROMPT_MAX_BYTES) ||
+      Buffer.byteLength(prompts.join(""), "utf8") > GOAL_WORKER_PROMPT_MAX_BYTES) {
+    throw new Error("Serialized Goal worker prompts exceed the aggregate 256KiB runner safety bound.");
+  }
+}
+
+export function assertGoalPromptContractBudget(entries: Array<{ initialPrompt: string; continuationIntents: GoalContinuationIntent[] }>): void {
+  const total = entries.reduce((bytes, entry) => bytes + Buffer.byteLength(entry.initialPrompt, "utf8") +
+    entry.continuationIntents.reduce((sum, intent) => sum + Buffer.byteLength(intent.prompt, "utf8"), 0), 0);
+  if (total > GOAL_WORKER_PROMPT_MAX_BYTES) throw new Error("Serialized Goal worker prompt contract exceeds the aggregate 256KiB safety bound.");
+}
 
 export function buildGoalWorkerPrompt(goal: Pick<GoalState, "goalId" | "permissions" | "verification">, work: Pick<GoalWorkItem, "workId" | "title" | "goal" | "acceptanceCriteria" | "verification" | "fileGlobs">): string {
   const allowed = work.fileGlobs.length ? work.fileGlobs : goal.permissions.fileGlobs;

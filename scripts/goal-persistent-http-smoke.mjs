@@ -74,6 +74,7 @@ process.stdin.on('data',c=>{buf+=c;for(;;){const i=buf.indexOf('\\n');if(i<0)bre
   const opened = await call('open_current_workspace', { include_tree: false });
 
   // Primary production flow: one start, then both MCP client and HTTP server disappear.
+  if (!realMode) await Promise.all([fs.writeFile(path.join(gates, 'hold-primary-a'), '1'), fs.writeFile(path.join(gates, 'hold-primary-b'), '1')]);
   const primary = await createApprovedGoal(opened.structuredContent.workspace_id, {
     key: 'persistent-http-primary-v1', title: 'Persistent HTTP dependency DAG', maxConcurrency: 2,
     work: [
@@ -87,6 +88,12 @@ process.stdin.on('data',c=>{buf+=c;for(;;){const i=buf.indexOf('\\n');if(i<0)bre
   assert.ok(['queued', 'running'].includes(started.structuredContent.scheduler.authority_status));
   const primaryStatePath = goalStatePath(primary.goalId);
   await pollJson(path.join(dataRoot, 'goals', primary.goalId, 'scheduler', 'runtime.json'), (runtime) => ['starting', 'running'].includes(runtime.status), 10_000);
+  if (!realMode) {
+    const concurrency = await waitPrimaryConcurrency(primaryStatePath);
+    assert.equal(concurrency.peakActive, 2, 'both independent roots must be simultaneously active under max_concurrency=2');
+    assert.equal(concurrency.state.work.find((item) => item.workId === 'work_primary_c').status, 'planned', 'dependent C must remain locked while both roots are active');
+    await Promise.all([fs.writeFile(path.join(gates, 'release-primary-a'), '1'), fs.writeFile(path.join(gates, 'release-primary-b'), '1')]);
+  }
   await client.close(); client = undefined;
   await stopServer(server); server = undefined;
   const completedOnDisk = await pollJson(primaryStatePath, (state) => state.lifecycle === 'waiting_review' && state.scheduler?.status === 'stopped', realMode ? 600_000 : 30_000);
@@ -98,7 +105,6 @@ process.stdin.on('data',c=>{buf+=c;for(;;){const i=buf.indexOf('\\n');if(i<0)bre
   if (!realMode) {
     const launches = await launchLines();
     for (const slot of ['primary-a', 'primary-b', 'primary-c']) assert.equal(launches.filter((line) => line.startsWith(`start:${slot}:`)).length, 1);
-    assert.ok(Math.max(timeOf(launches, 'primary-a', 'start'), timeOf(launches, 'primary-b', 'start')) < Math.min(timeOf(launches, 'primary-a', 'finish'), timeOf(launches, 'primary-b', 'finish')), 'max_concurrency=2 must run both independent roots concurrently');
     assert.ok(timeOf(launches, 'primary-c', 'start') > Math.max(timeOf(launches, 'primary-a', 'finish'), timeOf(launches, 'primary-b', 'finish')), 'dependent C must launch after both parents finish and are integrated');
   }
 
@@ -223,6 +229,7 @@ function goalStatePath(goalId) { return path.join(dataRoot, 'goals', goalId, 'st
 async function launchLines() { return (await fs.readFile(launchLog, 'utf8')).trim().split('\n').filter(Boolean); }
 function timeOf(lines, slot, kind) { return Number(lines.find((line) => line.startsWith(`${kind}:${slot}:`))?.split(':').at(-1) || 0); }
 async function waitLaunch(slot) { const deadline = Date.now() + 10_000; while (Date.now() < deadline) { if ((await launchLines()).some((line) => line.startsWith(`start:${slot}:`))) return; await delay(25); } throw new Error(`Timed out waiting for ${slot} launch`); }
+async function waitPrimaryConcurrency(statePath) { const deadline = Date.now() + 10_000; let peakActive = 0; let state; while (Date.now() < deadline) { state = JSON.parse(await fs.readFile(statePath, 'utf8')); const active = state.work.filter((item) => ['launching', 'running'].includes(item.status)).length; peakActive = Math.max(peakActive, active); assert.ok(active <= 2, `persistent scheduler exceeded max_concurrency=2 with ${active} active work items`); const launches = await launchLines(); if (active === 2 && ['primary-a', 'primary-b'].every((slot) => launches.some((line) => line.startsWith(`start:${slot}:`)))) return { peakActive, state }; await delay(25); } throw new Error(`Timed out waiting for deterministic primary concurrency: peak=${peakActive}, state=${JSON.stringify(state)}`); }
 async function pollJson(filename, predicate, timeout) { const deadline = Date.now() + timeout; let value; while (Date.now() < deadline) { try { value = JSON.parse(await fs.readFile(filename, 'utf8')); } catch (error) { if (error?.code !== 'ENOENT') throw error; } if (value && predicate(value)) return value; await delay(50); } throw new Error(`Timed out polling ${filename}: ${JSON.stringify(value)}`); }
 async function pollTool(name, args, predicate, timeout) { const deadline = Date.now() + timeout; let result; while (Date.now() < deadline) { result = await call(name, args); if (predicate(result)) return result; await delay(100); } throw new Error(`Timed out polling ${name}: ${JSON.stringify(result?.structuredContent)}`); }
 async function requestCancel(goalId, cancelKey, reason) { for (let attempt=0;attempt<30;attempt+=1) { const current=await call('get_goal',{goal_id:goalId}); const result=await client.callTool({name:'cancel_goal',arguments:{goal_id:goalId,expected_revision:current.structuredContent.revision,cancel_key:cancelKey,reason}}); if(!result.isError)return result; if(!/revision conflict/i.test(JSON.stringify(result)))throw new Error(`cancel_goal failed: ${JSON.stringify(result)}`); await delay(20); } throw new Error('cancel_goal could not linearize against scheduler revisions'); }

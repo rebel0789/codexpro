@@ -4,7 +4,7 @@
 Deliver the first real vertical slice in which ChatGPT Pro plans and supervises a durable local Goal, Codex workers execute isolated CodingTasks, and the user can observe, interrupt, resume, review, and apply an integrated result from ordinary Chat.
 
 ## Current Phase
-Phase 9 next
+Phase 10 next
 
 ## Phases
 
@@ -65,11 +65,11 @@ Phase 9 next
 - **Status:** complete
 
 ### Phase 9: Multi-turn workers
-- [ ] Preserve one Codex thread per Goal work item across bounded continuation turns
-- [ ] Keep every continuation inside the approved work goal, file scope, commands, network policy, and turn budget
-- [ ] Persist turn identity, prompt intent, results, and stop reason for Pro inspection
-- [ ] Verify a real worker needs and completes a second turn through the intended Goal flow
-- **Status:** pending
+- [x] Preserve one Codex thread per Goal work item across bounded continuation turns
+- [x] Keep every continuation inside the approved work goal, file scope, commands, network policy, and turn budget
+- [x] Persist turn identity, prompt intent, results, and stop reason for Pro inspection
+- [x] Verify a real worker needs and completes a second turn through the intended Goal flow
+- **Status:** complete
 
 ### Phase 10: Bounded automatic retries
 - [ ] Define retryable infrastructure failures separately from semantic, policy, validation, and conflict failures
@@ -117,6 +117,7 @@ Phase 9 next
 | The Phase 8 card HTML changed while its prior template URI remained cached | 1 | Treated the Apps SDK resource URI as the cache key, published the final v15 URI, retained v14-v8 read compatibility, refreshed the plugin, and re-verified the card in ordinary Chat |
 | Goal review counted a clean private integration worktree as zero changed files | 1 | Bound `changedFileCount` to the same policy-filtered base-to-HEAD `changedPaths`, added core/HTTP/widget regressions, and confirmed all three public count forms equal 3 in the ordinary-Chat card |
 | A failed scheduler smoke left two deliberately SIGSTOPed fixture processes alive after deleting their temp roots | 1 | Made cleanup track exact fixture-owned processes, always continue and terminate them before removing state, and assert no scheduler process remains |
+| Ordinary Chat hid canonical `start_goal` while it was annotated as destructive even though it cannot mutate the source workspace | 1 | Corrected start/resume to non-read-only, non-destructive private execution mutations, rebuilt and refreshed the plugin, then completed the canonical ordinary-Chat two-turn flow |
 
 ## Notes
 - Existing user and prior-worker changes are preserved. No reset, checkout, broad cleanup, commit, push, or PR is authorized.

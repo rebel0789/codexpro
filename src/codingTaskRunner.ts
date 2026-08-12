@@ -45,6 +45,8 @@ export interface LaunchCodingTaskRunInput {
   executorEpoch: number;
   leaseId: string;
   threadId?: string;
+  expectedSessionId?: string;
+  continuationFingerprint?: string;
   model?: string;
   effort?: string;
   timeoutMs?: number;
@@ -62,6 +64,8 @@ export interface CodingTaskRunDefinition {
   worktreeRoot: string;
   codexBinary: string;
   threadId?: string;
+  expectedSessionId?: string;
+  continuationFingerprint?: string;
   model: string;
   effort: string;
   timeoutMs: number;
@@ -183,6 +187,55 @@ export type CodingTaskFollowupResult =
   | { mode: "steer"; decision: CodingTaskFollowupDecision; steer: CodingTaskSteerAck; reused: boolean }
   | { mode: "run"; decision: CodingTaskFollowupDecision; run: CodingTaskRunView; reused: boolean };
 
+export interface SubmitCodingTaskContinuationInput {
+  requestKey: string;
+  operationId: string;
+  turnOrdinal: number;
+  previousOperationId: string;
+  prompt: string;
+  expectedRevision: number;
+  executorEpoch: number;
+  leaseId: string;
+  expectedThreadId: string;
+  expectedSessionId: string;
+  expectedPreviousTurnId: string;
+  model?: string;
+  effort?: string;
+  timeoutMs?: number;
+}
+
+export interface CodingTaskContinuationDecision {
+  version: typeof RUN_VERSION;
+  taskId: string;
+  requestKey: string;
+  fingerprint: string;
+  operationId: string;
+  turnOrdinal: number;
+  previousOperationId: string;
+  expectedRevision: number;
+  executorEpoch: number;
+  leaseId: string;
+  expectedThreadId: string;
+  expectedSessionId: string;
+  expectedPreviousTurnId: string;
+  prompt: string;
+  model: string;
+  effort: string;
+  timeoutMs: number;
+  createdAt: string;
+}
+
+export interface CodingTaskContinuationResult {
+  decision: CodingTaskContinuationDecision;
+  run: CodingTaskRunView;
+  reused: boolean;
+}
+
+export interface CodingTaskContinuationView {
+  decision: CodingTaskContinuationDecision;
+  run?: CodingTaskRunView;
+}
+
 interface RunPaths {
   runDir: string;
   definition: string;
@@ -272,6 +325,24 @@ function runPaths(store: CodingTaskStore, taskId: string, operationId: string): 
     steerInbox: path.join(runDir, "steer", "inbox"),
     steerAcks: path.join(runDir, "steer", "acks")
   };
+}
+
+function isAtomicTempFor(entry: string, canonicalName: string): boolean {
+  const escaped = canonicalName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${escaped}\\.\\d+\\.[0-9a-f-]{16,64}\\.tmp$`, "i").test(entry);
+}
+
+async function cleanPublicationTemps(
+  paths: RunPaths,
+  options: { definitionExists: boolean; stateExists: boolean }
+): Promise<string[]> {
+  const entries = await fsp.readdir(paths.runDir);
+  for (const entry of entries) {
+    const staleDefinitionTemp = !options.definitionExists && isAtomicTempFor(entry, path.basename(paths.definition));
+    const staleStateTemp = options.definitionExists && !options.stateExists && isAtomicTempFor(entry, path.basename(paths.state));
+    if (staleDefinitionTemp || staleStateTemp) await fsp.unlink(path.join(paths.runDir, entry));
+  }
+  return fsp.readdir(paths.runDir);
 }
 
 async function readJson<T>(filePath: string): Promise<T> {
@@ -399,6 +470,47 @@ async function acquireRunLock(
   return lease;
 }
 
+async function acquireRunnerLockAfterHandoff(
+  paths: RunPaths,
+  definition: CodingTaskRunDefinition
+): Promise<RunLockLease | undefined> {
+  const smokeTimeout = process.env.CODEXPRO_RUNNER_SMOKE === "1"
+    ? Number.parseInt(process.env.CODEXPRO_RUNNER_HANDOFF_TIMEOUT_MS ?? "10000", 10) : 10_000;
+  const timeoutMs = Number.isSafeInteger(smokeTimeout) ? Math.max(100, Math.min(smokeTimeout, 10_000)) : 10_000;
+  const deadline = Date.now() + timeoutMs;
+  do {
+    const lease = await acquireRunLock(paths, definition, "runner");
+    if (lease) return lease;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  } while (Date.now() < deadline);
+  return undefined;
+}
+
+/** Test-only lock barrier used by the runner smoke to force a child/reconciler handoff collision. */
+export async function holdCodingTaskRunLockForTest(
+  config: CodingTaskStoreConfig,
+  taskIdInput: string,
+  operationIdInput: string,
+  holdMs: number
+): Promise<void> {
+  if (process.env.CODEXPRO_RUNNER_SMOKE !== "1") throw new Error("Run lock barrier is available only to the runner smoke.");
+  const taskId = validateCodingTaskId(taskIdInput);
+  const operationId = validateOperationId(operationIdInput);
+  const store = new CodingTaskStore(config);
+  const paths = runPaths(store, taskId, operationId);
+  const definition = await readJson<CodingTaskRunDefinition>(paths.definition);
+  assertDefinition(definition, paths.definition, store.dataRoot);
+  let lease: RunLockLease | undefined;
+  const deadline = Date.now() + 5_000;
+  while (!lease && Date.now() < deadline) {
+    lease = await acquireRunLock(paths, definition, "reconcile");
+    if (!lease) await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  if (!lease) throw new Error("Run lock barrier could not acquire the test lock.");
+  try { await new Promise((resolve) => setTimeout(resolve, Math.max(0, Math.min(holdMs, 2_000)))); }
+  finally { await releaseRunLock(paths, lease); }
+}
+
 async function refreshRunLock(paths: RunPaths, lease: RunLockLease): Promise<void> {
   if (lease.child.exitCode !== null) throw new Error("Detached Codex runner lost its exclusive run lock.");
   const current = await readRunLock(paths, lease.record);
@@ -446,27 +558,35 @@ function assertDefinition(definition: CodingTaskRunDefinition, definitionPath: s
   if (definition.version !== RUN_VERSION || path.resolve(definitionPath) !== path.resolve(expected)) {
     throw new Error("Coding task run definition identity mismatch.");
   }
-  if (!/^[0-9a-f]{64}$/.test(definition.fingerprint)) throw new Error("Invalid run fingerprint.");
+  if (!/^[0-9a-f]{64}$/.test(definition.fingerprint) || definition.fingerprint !== runDefinitionFingerprint(definition)) {
+    throw new Error("Invalid or tampered run fingerprint.");
+  }
   if (!Number.isSafeInteger(definition.expectedRevision) || definition.expectedRevision < 1) throw new Error("Invalid expected revision.");
   if (!Number.isSafeInteger(definition.executorEpoch) || definition.executorEpoch < 1) throw new Error("Invalid executor epoch.");
-  if (!path.isAbsolute(definition.worktreeRoot) || !definition.codexBinary.trim()) throw new Error("Invalid runner paths.");
+  if (!definition.leaseId.trim() || !path.isAbsolute(definition.worktreeRoot) || !definition.codexBinary.trim()) throw new Error("Invalid runner paths.");
+  if (definition.threadId !== undefined && !definition.threadId.trim()) throw new Error("Invalid runner thread identity.");
+  if (definition.expectedSessionId !== undefined && !definition.expectedSessionId.trim()) throw new Error("Invalid runner session identity.");
+  if (definition.continuationFingerprint !== undefined && !/^[0-9a-f]{64}$/.test(definition.continuationFingerprint)) {
+    throw new Error("Invalid continuation fingerprint.");
+  }
+  if (!definition.model.trim() || definition.model.length > 160 || !definition.effort.trim() || definition.effort.length > 160 ||
+      !Number.isSafeInteger(definition.timeoutMs) || definition.timeoutMs < 1_000 || definition.timeoutMs > 24 * 60 * 60_000 ||
+      !Number.isSafeInteger(definition.maxLogBytes) || definition.maxLogBytes < 64 * 1024 ||
+      definition.maxLogBytes > 64 * 1024 * 1024 || !Number.isFinite(Date.parse(definition.createdAt))) {
+    throw new Error("Invalid runner model, effort, or timeout.");
+  }
   if (Buffer.byteLength(definition.prompt, "utf8") > MAX_PROMPT_BYTES) throw new Error("Run prompt exceeds the size limit.");
 }
 
-function definitionFingerprint(task: CodingTaskState, input: Required<Omit<LaunchCodingTaskRunInput, "threadId">> & { threadId?: string }): string {
+function runDefinitionFingerprint(definition: Omit<CodingTaskRunDefinition, "version" | "fingerprint">): string {
   return sha256(JSON.stringify({
     schema: "codexpro-coding-task-run-v1",
-    taskId: task.taskId,
-    operationId: input.operationId,
-    prompt: input.prompt,
-    revision: input.expectedRevision,
-    epoch: input.executorEpoch,
-    leaseId: input.leaseId,
-    threadId: input.threadId ?? null,
-    model: input.model,
-    effort: input.effort,
-    timeoutMs: input.timeoutMs,
-    worktreeRoot: task.worktreeRoot
+    taskId: definition.taskId, operationId: definition.operationId, prompt: definition.prompt,
+    revision: definition.expectedRevision, epoch: definition.executorEpoch, leaseId: definition.leaseId,
+    threadId: definition.threadId ?? null, expectedSessionId: definition.expectedSessionId ?? null,
+    continuationFingerprint: definition.continuationFingerprint ?? null, model: definition.model,
+    effort: definition.effort, timeoutMs: definition.timeoutMs, worktreeRoot: definition.worktreeRoot,
+    codexBinary: definition.codexBinary, maxLogBytes: definition.maxLogBytes, createdAt: definition.createdAt
   }));
 }
 
@@ -511,6 +631,83 @@ function stateWithoutViewFields(view: CodingTaskRunView): CodingTaskRunState {
   return state;
 }
 
+function continuationDecisionFingerprint(input: Omit<CodingTaskContinuationDecision, "version" | "fingerprint">): string {
+  return sha256(JSON.stringify({
+    schema: "codexpro-continuation-v1", taskId: input.taskId, requestKey: input.requestKey,
+    operationId: input.operationId, turnOrdinal: input.turnOrdinal,
+    previousOperationId: input.previousOperationId, prompt: input.prompt,
+    expectedRevision: input.expectedRevision, executorEpoch: input.executorEpoch, leaseId: input.leaseId,
+    expectedThreadId: input.expectedThreadId, expectedSessionId: input.expectedSessionId ?? null,
+    expectedPreviousTurnId: input.expectedPreviousTurnId, model: input.model,
+    effort: input.effort, timeoutMs: input.timeoutMs, createdAt: input.createdAt
+  }));
+}
+
+function continuationDecisionMatchesInput(
+  decision: CodingTaskContinuationDecision,
+  input: Omit<CodingTaskContinuationDecision, "version" | "fingerprint" | "createdAt">
+): boolean {
+  return decision.taskId === input.taskId && decision.requestKey === input.requestKey &&
+    decision.operationId === input.operationId && decision.turnOrdinal === input.turnOrdinal &&
+    decision.previousOperationId === input.previousOperationId && decision.prompt === input.prompt &&
+    decision.expectedRevision === input.expectedRevision && decision.executorEpoch === input.executorEpoch &&
+    decision.leaseId === input.leaseId && decision.expectedThreadId === input.expectedThreadId &&
+    decision.expectedSessionId === input.expectedSessionId &&
+    decision.expectedPreviousTurnId === input.expectedPreviousTurnId && decision.model === input.model &&
+    decision.effort === input.effort && decision.timeoutMs === input.timeoutMs;
+}
+
+function definitionMatchesLaunch(
+  definition: CodingTaskRunDefinition,
+  config: CodingTaskRunnerConfig,
+  input: LaunchCodingTaskRunInput,
+  prompt: string,
+  worktreeRoot: string
+): boolean {
+  return definition.prompt === prompt && definition.executorEpoch === input.executorEpoch &&
+    definition.leaseId === input.leaseId && definition.expectedRevision === input.expectedRevision &&
+    definition.threadId === (input.threadId?.trim() || undefined) &&
+    definition.model === (input.model?.trim() || "gpt-5.6-sol") &&
+    definition.expectedSessionId === (input.expectedSessionId?.trim() || undefined) &&
+    definition.continuationFingerprint === (input.continuationFingerprint?.trim() || undefined) &&
+    definition.effort === (input.effort?.trim() || "high") &&
+    definition.timeoutMs === Math.max(1_000, Math.min(input.timeoutMs ?? 30 * 60_000, 24 * 60 * 60_000)) &&
+    definition.worktreeRoot === worktreeRoot && definition.codexBinary === config.codexBinary &&
+    definition.maxLogBytes === Math.max(64 * 1024,
+      Math.min(config.maxLogBytes ?? 2 * 1024 * 1024, 64 * 1024 * 1024));
+}
+
+function assertContinuationDecision(
+  decision: CodingTaskContinuationDecision,
+  expected: { taskId: string; requestKey: string }
+): void {
+  if (decision.version !== RUN_VERSION || decision.taskId !== expected.taskId || decision.requestKey !== expected.requestKey ||
+      validateCodingTaskId(decision.taskId) !== decision.taskId || validateRequestKey(decision.requestKey) !== decision.requestKey ||
+      validateOperationId(decision.operationId) !== decision.operationId ||
+      validateOperationId(decision.previousOperationId) !== decision.previousOperationId ||
+      decision.operationId === decision.previousOperationId || !Number.isSafeInteger(decision.turnOrdinal) ||
+      decision.turnOrdinal < 2 || decision.turnOrdinal > 100 || !Number.isSafeInteger(decision.expectedRevision) ||
+      decision.expectedRevision < 1 || !Number.isSafeInteger(decision.executorEpoch) || decision.executorEpoch < 1 ||
+      !decision.leaseId.trim() || !decision.expectedThreadId.trim() || !decision.expectedPreviousTurnId.trim() ||
+      typeof decision.expectedSessionId !== "string" || !decision.expectedSessionId.trim() ||
+      !decision.prompt.trim() || Buffer.byteLength(decision.prompt, "utf8") > MAX_PROMPT_BYTES ||
+      !decision.model.trim() || decision.model.length > 160 || !decision.effort.trim() || decision.effort.length > 160 ||
+      !Number.isSafeInteger(decision.timeoutMs) || decision.timeoutMs < 1_000 || decision.timeoutMs > 24 * 60 * 60_000 ||
+      !Number.isFinite(Date.parse(decision.createdAt)) ||
+      decision.fingerprint !== continuationDecisionFingerprint({
+        taskId: decision.taskId, requestKey: decision.requestKey, operationId: decision.operationId,
+        turnOrdinal: decision.turnOrdinal, previousOperationId: decision.previousOperationId,
+        expectedRevision: decision.expectedRevision, executorEpoch: decision.executorEpoch,
+        leaseId: decision.leaseId, expectedThreadId: decision.expectedThreadId,
+        expectedSessionId: decision.expectedSessionId,
+        expectedPreviousTurnId: decision.expectedPreviousTurnId, prompt: decision.prompt,
+        model: decision.model, effort: decision.effort, timeoutMs: decision.timeoutMs,
+        createdAt: decision.createdAt
+      })) {
+    throw new Error("Coding task continuation decision identity or fingerprint mismatch.");
+  }
+}
+
 export async function launchCodingTaskRun(
   config: CodingTaskRunnerConfig,
   taskIdInput: string,
@@ -523,87 +720,97 @@ export async function launchCodingTaskRun(
   const prompt = bounded(rawPrompt, MAX_PROMPT_BYTES);
   const store = new CodingTaskStore(config);
   const paths = runPaths(store, taskId, operationId);
-  const existing = await readJson<CodingTaskRunDefinition>(paths.definition).catch((error) => {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  });
-  if (existing) {
-    const sameSemanticContract = existing.prompt === prompt && existing.executorEpoch === input.executorEpoch &&
-      existing.leaseId === input.leaseId && existing.model === (input.model?.trim() || "gpt-5.6-sol") &&
-      existing.effort === (input.effort?.trim() || "high") &&
-      existing.timeoutMs === Math.max(1_000, Math.min(input.timeoutMs ?? 30 * 60_000, 24 * 60 * 60_000));
-    if (!sameSemanticContract) throw new Error("operationId is already bound to a different Codex run contract.");
-    const view = await reconcileCodingTaskRun(config, taskId, operationId, { relaunchQueued: true });
-    return { ...view, reused: true };
+  if (input.continuationFingerprint !== undefined && !/^[0-9a-f]{64}$/.test(input.continuationFingerprint.trim())) {
+    throw new Error("continuationFingerprint must be a SHA-256 hex digest.");
   }
-  const task = await store.get(taskId);
-  if (task.executor !== "codex") throw new Error("Coding task is not owned by Codex.");
-  if (task.executorLease.epoch !== input.executorEpoch || task.executorLease.leaseId !== input.leaseId) {
-    throw new Error("Coding task executor lease changed.");
-  }
-  if (task.revision !== input.expectedRevision) throw new Error(`Coding task CAS conflict: observed revision ${task.revision}.`);
-  if (task.activeOperation && task.activeOperation.operationId !== operationId) throw new Error("Coding task already has an active operation.");
-  await assertTaskWorktreeIdentity(store, task);
-  const normalized = {
-    ...input,
-    operationId,
-    prompt,
-    threadId: input.threadId?.trim() || task.codexThreadId,
-    model: input.model?.trim() || "gpt-5.6-sol",
-    effort: input.effort?.trim() || "high",
-    timeoutMs: Math.max(1_000, Math.min(input.timeoutMs ?? 30 * 60_000, 24 * 60 * 60_000))
-  } as Required<Omit<LaunchCodingTaskRunInput, "threadId">> & { threadId?: string };
-  const fingerprint = definitionFingerprint(task, normalized);
-  const definition: CodingTaskRunDefinition = {
-    version: RUN_VERSION,
-    taskId,
-    operationId,
-    fingerprint,
-    prompt,
-    expectedRevision: input.expectedRevision,
-    executorEpoch: input.executorEpoch,
-    leaseId: input.leaseId,
-    worktreeRoot: task.worktreeRoot,
-    codexBinary: config.codexBinary,
-    ...(normalized.threadId ? { threadId: normalized.threadId } : {}),
-    model: normalized.model,
-    effort: normalized.effort,
-    timeoutMs: normalized.timeoutMs,
-    maxLogBytes: Math.max(64 * 1024, Math.min(config.maxLogBytes ?? 2 * 1024 * 1024, 64 * 1024 * 1024)),
-    createdAt: new Date().toISOString()
-  };
-  await ensurePrivateDirectory(path.dirname(paths.runDir));
-  try {
-    await fsp.mkdir(paths.runDir, { mode: 0o700 });
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    let raced: CodingTaskRunDefinition | undefined;
-    for (let attempt = 0; attempt < 30 && !raced; attempt += 1) {
-      raced = await readJson<CodingTaskRunDefinition>(paths.definition).catch(() => undefined);
-      if (!raced) await new Promise((resolve) => setTimeout(resolve, 25));
+  const publication = await store.withTaskLock(taskId, async () => {
+    const task = await store.get(taskId);
+    const existing = await readJson<CodingTaskRunDefinition>(paths.definition).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    const stateExists = Boolean(await fsp.stat(paths.state).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }));
+    if (existing) {
+      assertDefinition(existing, paths.definition, store.dataRoot);
+      if (!definitionMatchesLaunch(existing, config, input, prompt, task.worktreeRoot)) {
+        throw new Error("operationId is already bound to a different Codex run contract.");
+      }
+      if (stateExists) return { definition: existing, reused: true };
+      if (task.executor !== "codex" || task.executorLease.epoch !== input.executorEpoch ||
+          task.executorLease.leaseId !== input.leaseId || task.revision !== input.expectedRevision || task.activeOperation ||
+          task.worktreeRoot !== existing.worktreeRoot) {
+        throw new Error("Definition-only Codex run recovery diverged from the authoritative task reservation.");
+      }
+      await assertTaskWorktreeIdentity(store, task);
+      const entries = await cleanPublicationTemps(paths, { definitionExists: true, stateExists: false });
+      const allowedHandoffArtifacts = new Set([
+        path.basename(paths.definition), path.basename(paths.runnerGuard), path.basename(paths.runnerLock)
+      ]);
+      if (entries.some((entry) => !allowedHandoffArtifacts.has(entry))) {
+        throw new Error("Definition-only Codex run recovery found ambiguous run artifacts.");
+      }
+      await writeCodingTaskJsonAtomic(paths.state, {
+        version: RUN_VERSION, taskId, operationId, fingerprint: existing.fingerprint, status: "queued",
+        createdAt: existing.createdAt, updatedAt: new Date().toISOString(), events: []
+      } satisfies CodingTaskRunState);
+      return { definition: existing, reused: true };
     }
-    if (!raced) throw new Error("Concurrent Codex run creation did not publish its definition.");
-    if (raced.fingerprint !== fingerprint) throw new Error("operationId is already bound to a different Codex run contract.");
-    return { ...(await getCodingTaskRun(config, taskId, operationId)), reused: true };
-  }
-  await ensurePrivateDirectory(paths.runDir);
-  await writeCodingTaskJsonAtomic(paths.definition, definition);
-  await writeCodingTaskJsonAtomic(paths.state, {
-    version: RUN_VERSION, taskId, operationId, fingerprint, status: "queued",
-    createdAt: definition.createdAt, updatedAt: definition.createdAt, events: []
-  } satisfies CodingTaskRunState);
-  try {
-    await spawnDetachedRunner(config, definition, paths, task.worktreeRoot);
-  } catch (error) {
-    const now = new Date().toISOString();
+    if (stateExists) throw new Error("Codex run state exists without its immutable definition.");
+    if (task.executor !== "codex") throw new Error("Coding task is not owned by Codex.");
+    if (task.executorLease.epoch !== input.executorEpoch || task.executorLease.leaseId !== input.leaseId) {
+      throw new Error("Coding task executor lease changed.");
+    }
+    if (task.revision !== input.expectedRevision) throw new Error(`Coding task CAS conflict: observed revision ${task.revision}.`);
+    if (input.threadId !== undefined && input.threadId.trim() !== task.codexThreadId) {
+      throw new Error("Requested Codex thread does not match the task thread identity.");
+    }
+    if (input.expectedSessionId !== undefined && input.expectedSessionId.trim() !== task.codexSessionId) {
+      throw new Error("Requested Codex session does not match the task session identity.");
+    }
+    if (task.activeOperation) throw new Error("Coding task already has an active operation.");
+    await assertTaskWorktreeIdentity(store, task);
+    await ensurePrivateDirectory(path.dirname(paths.runDir));
+    const runDirStat = await fsp.lstat(paths.runDir).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (runDirStat) {
+      await ensurePrivateDirectory(paths.runDir);
+      if ((await cleanPublicationTemps(paths, { definitionExists: false, stateExists: false })).length !== 0) {
+        throw new Error("Codex run directory exists without a definition and contains ambiguous artifacts.");
+      }
+    } else {
+      await fsp.mkdir(paths.runDir, { mode: 0o700 });
+      await ensurePrivateDirectory(paths.runDir);
+    }
+    const normalizedThreadId = input.threadId?.trim() || task.codexThreadId;
+    const definitionFields = {
+      taskId, operationId, prompt, expectedRevision: input.expectedRevision,
+      executorEpoch: input.executorEpoch, leaseId: input.leaseId, worktreeRoot: task.worktreeRoot,
+      ...(normalizedThreadId ? { threadId: normalizedThreadId } : {}),
+      ...(input.expectedSessionId?.trim() ? { expectedSessionId: input.expectedSessionId.trim() } : {}),
+      ...(input.continuationFingerprint?.trim() ? { continuationFingerprint: input.continuationFingerprint.trim() } : {}),
+      model: input.model?.trim() || "gpt-5.6-sol", effort: input.effort?.trim() || "high",
+      timeoutMs: Math.max(1_000, Math.min(input.timeoutMs ?? 30 * 60_000, 24 * 60 * 60_000)),
+      codexBinary: config.codexBinary,
+      maxLogBytes: Math.max(64 * 1024, Math.min(config.maxLogBytes ?? 2 * 1024 * 1024, 64 * 1024 * 1024)),
+      createdAt: new Date().toISOString()
+    };
+    const definition: CodingTaskRunDefinition = {
+      version: RUN_VERSION, ...definitionFields, fingerprint: runDefinitionFingerprint(definitionFields)
+    };
+    await writeCodingTaskJsonAtomic(paths.definition, definition);
     await writeCodingTaskJsonAtomic(paths.state, {
-      version: RUN_VERSION, taskId, operationId, fingerprint, status: "failed",
-      createdAt: definition.createdAt, updatedAt: now, finishedAt: now,
-      error: bounded(errorMessage(error), 20_000), events: []
+      version: RUN_VERSION, taskId, operationId, fingerprint: definition.fingerprint, status: "queued",
+      createdAt: definition.createdAt, updatedAt: new Date().toISOString(), events: []
     } satisfies CodingTaskRunState);
-    throw error;
-  }
-  return waitForCodingTaskRun(config, taskId, operationId, { timeoutMs: 1_500, terminal: false });
+    return { definition, reused: false };
+  });
+  const view = await reconcileCodingTaskRun(config, taskId, operationId, { relaunchQueued: true });
+  return { ...view, ...(publication.reused ? { reused: true } : {}) };
 }
 
 async function spawnDetachedRunner(
@@ -612,8 +819,15 @@ async function spawnDetachedRunner(
   paths: RunPaths,
   worktreeRoot: string
 ): Promise<void> {
+  const env = sanitizedRuntimeEnv(config.env);
+  if (process.env.CODEXPRO_RUNNER_SMOKE === "1") {
+    env.CODEXPRO_RUNNER_SMOKE = "1";
+    if (process.env.CODEXPRO_RUNNER_HANDOFF_TIMEOUT_MS) {
+      env.CODEXPRO_RUNNER_HANDOFF_TIMEOUT_MS = process.env.CODEXPRO_RUNNER_HANDOFF_TIMEOUT_MS;
+    }
+  }
   const runner = spawn(process.execPath, [RUNNER_PATH, paths.definition, path.resolve(config.dataRoot)], {
-    cwd: worktreeRoot, env: sanitizedRuntimeEnv(config.env), shell: false, stdio: "ignore", detached: true, windowsHide: true
+    cwd: worktreeRoot, env, shell: false, stdio: "ignore", detached: true, windowsHide: true
   });
   await new Promise<void>((resolve, reject) => { runner.once("spawn", resolve); runner.once("error", reject); });
   runner.unref();
@@ -718,9 +932,15 @@ export async function reconcileCodingTaskRun(
     }
     if (options.relaunchQueued !== true) return view;
     if (!config.codexBinary?.trim()) throw new Error("codexBinary is required when queued-run relaunch is authorized.");
+    const initialStaleMs = Math.max(0, Math.min(options.staleMs ?? 5_000, 10 * 60_000));
+    if (view.runnerNonce?.startsWith("launch:") &&
+        Date.now() - Date.parse(view.heartbeatAt ?? view.updatedAt) <= initialStaleMs) {
+      return waitForCodingTaskRun(config, taskId, operationId, { timeoutMs: 12_000, terminal: false });
+    }
     const lock = await acquireRunLock(paths, definition, "reconcile");
     if (!lock) return { ...view, runnerAlive: true };
     let launchNonce: string | undefined;
+    let handoffPending = false;
     try {
       view = await getCodingTaskRunState(config, taskId, operationId);
       task = await store.get(taskId);
@@ -735,18 +955,27 @@ export async function reconcileCodingTaskRun(
       }
       const staleMs = Math.max(0, Math.min(options.staleMs ?? 5_000, 10 * 60_000));
       if (view.runnerNonce?.startsWith("launch:") && Date.now() - Date.parse(view.heartbeatAt ?? view.updatedAt) <= staleMs) {
-        return { ...view, runnerAlive: false };
+        handoffPending = true;
+      } else {
+        launchNonce = `launch:${randomUUID()}`;
+        const now = new Date().toISOString();
+        await writeCodingTaskJsonAtomic(paths.state, compactRunState({
+          ...stateWithoutViewFields(view), heartbeatAt: now, updatedAt: now,
+          runnerNonce: launchNonce, runnerStartedAt: now, runnerPid: undefined
+        }, definition.maxLogBytes));
       }
-      launchNonce = `launch:${randomUUID()}`;
-      const now = new Date().toISOString();
-      await writeCodingTaskJsonAtomic(paths.state, compactRunState({
-        ...stateWithoutViewFields(view), heartbeatAt: now, updatedAt: now,
-        runnerNonce: launchNonce, runnerStartedAt: now, runnerPid: undefined
-      }, definition.maxLogBytes));
     } finally {
       await releaseRunLock(paths, lock);
     }
+    if (handoffPending) {
+      return waitForCodingTaskRun(config, taskId, operationId, { timeoutMs: 12_000, terminal: false });
+    }
     try {
+      const testDelay = process.env.CODEXPRO_RUNNER_SMOKE === "1"
+        ? Number.parseInt(process.env.CODEXPRO_RUNNER_HANDOFF_DELAY_MS ?? "0", 10) : 0;
+      if (Number.isSafeInteger(testDelay) && testDelay > 0) {
+        await new Promise((resolve) => setTimeout(resolve, Math.min(testDelay, 2_000)));
+      }
       await spawnDetachedRunner(config as CodingTaskRunnerConfig, definition, paths, task.worktreeRoot);
     } catch (error) {
       const current = await getCodingTaskRunState(config, taskId, operationId);
@@ -757,7 +986,11 @@ export async function reconcileCodingTaskRun(
       }
       throw error;
     }
-    return waitForCodingTaskRun(config, taskId, operationId, { timeoutMs: 1_500, terminal: false });
+    const launched = await waitForCodingTaskRun(config, taskId, operationId, { timeoutMs: 12_000, terminal: false });
+    if (launched.status === "queued") {
+      throw new Error(`Detached Codex runner launch handoff did not become authoritative: ${launched.error ?? "no runner acknowledgement"}`);
+    }
+    return launched;
   }
   const staleMs = Math.max(0, Math.min(options.staleMs ?? 5_000, 10 * 60_000));
   if (Date.now() - Date.parse(view.heartbeatAt ?? view.updatedAt) <= staleMs) return view;
@@ -1077,6 +1310,137 @@ export async function submitCodingTaskFollowup(
   return { mode: "run", decision, run, reused };
 }
 
+export async function submitCodingTaskContinuation(
+  config: CodingTaskRunnerConfig,
+  taskIdInput: string,
+  input: SubmitCodingTaskContinuationInput
+): Promise<CodingTaskContinuationResult> {
+  const taskId = validateCodingTaskId(taskIdInput);
+  const requestKey = validateRequestKey(input.requestKey);
+  const operationId = validateOperationId(input.operationId);
+  const previousOperationId = validateOperationId(input.previousOperationId);
+  if (operationId === previousOperationId) throw new Error("Continuation operationId must differ from previousOperationId.");
+  if (!Number.isSafeInteger(input.turnOrdinal) || input.turnOrdinal < 2 || input.turnOrdinal > 100) {
+    throw new Error("Continuation turnOrdinal must be an integer from 2 through 100.");
+  }
+  if (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1 ||
+      !Number.isSafeInteger(input.executorEpoch) || input.executorEpoch < 1 || !input.leaseId.trim()) {
+    throw new Error("Continuation task revision and executor lease identity are required.");
+  }
+  const expectedThreadId = input.expectedThreadId.trim();
+  if (typeof input.expectedSessionId !== "string") throw new Error("Continuation expectedSessionId is required.");
+  const expectedSessionId = input.expectedSessionId.trim();
+  const expectedPreviousTurnId = input.expectedPreviousTurnId.trim();
+  if (!expectedThreadId) throw new Error("Continuation expectedThreadId is required.");
+  if (!expectedSessionId) throw new Error("Continuation expectedSessionId is required.");
+  if (!expectedPreviousTurnId) throw new Error("Continuation expectedPreviousTurnId is required.");
+  const rawPrompt = input.prompt.trim();
+  if (!rawPrompt || Buffer.byteLength(rawPrompt, "utf8") > MAX_PROMPT_BYTES) {
+    throw new Error("continuation prompt is required and must fit the size limit.");
+  }
+  const prompt = bounded(rawPrompt, MAX_PROMPT_BYTES);
+  const model = input.model?.trim() || "gpt-5.6-sol";
+  const effort = input.effort?.trim() || "high";
+  const timeoutMs = Math.max(1_000, Math.min(input.timeoutMs ?? 30 * 60_000, 24 * 60 * 60_000));
+  const normalizedDecisionInput = {
+    taskId, requestKey, operationId, turnOrdinal: input.turnOrdinal, previousOperationId,
+    expectedRevision: input.expectedRevision, executorEpoch: input.executorEpoch, leaseId: input.leaseId,
+    expectedThreadId, expectedSessionId, expectedPreviousTurnId,
+    prompt, model, effort, timeoutMs
+  };
+  const store = new CodingTaskStore(config);
+  const ledgerDir = path.join(store.paths(taskId).taskDir, "continuations", `request_${sha256(requestKey).slice(0, 32)}`);
+  const decisionPath = path.join(ledgerDir, "decision.json");
+  let reused = true;
+  let decision = await readJson<CodingTaskContinuationDecision>(decisionPath).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!decision) {
+    decision = await store.withTaskLock(taskId, async () => {
+      const raced = await readJson<CodingTaskContinuationDecision>(decisionPath).catch((error) => {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw error;
+      });
+      if (raced) return raced;
+      const task = await store.get(taskId);
+      if (task.executor !== "codex" || task.executorLease.epoch !== input.executorEpoch ||
+          task.executorLease.leaseId !== input.leaseId) {
+        throw new Error("Coding task continuation executor lease changed.");
+      }
+      if (task.revision !== input.expectedRevision) {
+        throw new Error(`Coding task CAS conflict: observed revision ${task.revision}.`);
+      }
+      if (task.lifecycle !== "waiting_review" || task.activeOperation || task.codexTurnActive) {
+        throw new Error("Coding task continuation requires an idle waiting_review task.");
+      }
+      if (task.cancelRequestedAt) throw new Error("Coding task cancellation is pending; continuation is not accepted.");
+      if (task.lastCompletedOperation?.operationId !== previousOperationId ||
+          task.lastCompletedOperation.executor !== "codex" ||
+          task.lastCompletedOperation.executorEpoch !== input.executorEpoch ||
+          task.lastCompletedOperation.lifecycle !== "waiting_review") {
+        throw new Error("Coding task continuation previous operation identity changed.");
+      }
+      if (task.codexThreadId !== expectedThreadId ||
+          task.codexSessionId !== expectedSessionId ||
+          task.codexTurnId !== expectedPreviousTurnId) {
+        throw new Error("Coding task continuation thread, session, or previous turn identity changed.");
+      }
+      const previousRun = await getCodingTaskRunState(config, taskId, previousOperationId);
+      if (previousRun.status !== "waiting_review" || previousRun.threadId !== expectedThreadId ||
+          previousRun.turnId !== expectedPreviousTurnId ||
+          previousRun.sessionId !== expectedSessionId) {
+        throw new Error("Coding task continuation previous terminal run identity changed.");
+      }
+      const created: CodingTaskContinuationDecision = {
+        version: RUN_VERSION, ...normalizedDecisionInput,
+        fingerprint: "",
+        createdAt: new Date().toISOString()
+      };
+      created.fingerprint = continuationDecisionFingerprint(created);
+      await ensurePrivateDirectory(path.dirname(ledgerDir));
+      await ensurePrivateDirectory(ledgerDir);
+      await writeCodingTaskJsonAtomic(decisionPath, created);
+      reused = false;
+      return created;
+    });
+  }
+  assertContinuationDecision(decision, { taskId, requestKey });
+  if (!continuationDecisionMatchesInput(decision, normalizedDecisionInput)) {
+    throw new Error("requestKey is already bound to a different continuation contract.");
+  }
+  const run = await launchCodingTaskRun(config, taskId, {
+    operationId: decision.operationId, prompt: decision.prompt, expectedRevision: decision.expectedRevision,
+    executorEpoch: decision.executorEpoch, leaseId: decision.leaseId, threadId: decision.expectedThreadId,
+    expectedSessionId: decision.expectedSessionId,
+    continuationFingerprint: decision.fingerprint,
+    model: decision.model, effort: decision.effort, timeoutMs: decision.timeoutMs
+  });
+  return { decision, run, reused };
+}
+
+export async function getCodingTaskContinuation(
+  config: CodingTaskStoreConfig,
+  taskIdInput: string,
+  requestKeyInput: string
+): Promise<CodingTaskContinuationView> {
+  const taskId = validateCodingTaskId(taskIdInput);
+  const requestKey = validateRequestKey(requestKeyInput);
+  const store = new CodingTaskStore(config);
+  const decisionPath = path.join(store.paths(taskId).taskDir, "continuations",
+    `request_${sha256(requestKey).slice(0, 32)}`, "decision.json");
+  const decision = await readJson<CodingTaskContinuationDecision>(decisionPath);
+  assertContinuationDecision(decision, { taskId, requestKey });
+  const run = await getCodingTaskRun(config, taskId, decision.operationId).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (run && run.definitionFingerprint && run.operationId !== decision.operationId) {
+    throw new Error("Coding task continuation run identity mismatch.");
+  }
+  return { decision, ...(run ? { run } : {}) };
+}
+
 async function runDetached(definitionPath: string, dataRoot: string): Promise<void> {
   const definition = await readJson<CodingTaskRunDefinition>(definitionPath);
   assertDefinition(definition, definitionPath, dataRoot);
@@ -1085,7 +1449,12 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
   await ensurePrivateDirectory(paths.runDir);
   await ensurePrivateDirectory(paths.steerInbox);
   await ensurePrivateDirectory(paths.steerAcks);
-  const runnerLock = await acquireRunLock(paths, definition, "runner");
+  // A relaunch authority writes the launch marker while holding the same advisory lock, then
+  // releases it immediately before spawning us. Concurrent idempotent reconcilers may briefly
+  // probe that lock during the handoff, so a one-shot acquisition could strand an exact queued run.
+  const runnerLock = await acquireRunnerLockAfterHandoff(paths, definition);
+  // A losing child must not mutate queued/canceled state without the advisory lease. The persisted
+  // launch marker becomes stale and a later execution-authorized reconciliation may relaunch it.
   if (!runnerLock) return;
 
   let runState = await readJson<CodingTaskRunState>(paths.state);
@@ -1184,6 +1553,15 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
       if (await fsp.stat(ackPath).catch(() => undefined)) { await fsp.unlink(claimPath).catch(() => undefined); continue; }
       let ack: CodingTaskSteerAck;
       try {
+        const cancellation = await readCodingTaskCancellation({ dataRoot }, definition.taskId, {
+          operationId: definition.operationId, executorEpoch: definition.executorEpoch
+        });
+        if (cancellation) {
+          cancelRequested = true;
+          controller.abort();
+          await client.interrupt();
+          throw new Error("Coding task cancellation won before the steering request was delivered.");
+        }
         const turnId = await client.steer(request.prompt, request.requestKey);
         ack = { version: RUN_VERSION, taskId: definition.taskId, operationId: definition.operationId,
           requestKey: request.requestKey, fingerprint: request.fingerprint, status: "delivered",
@@ -1195,6 +1573,7 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
       }
       await writeCodingTaskJsonAtomic(ackPath, ack);
       await fsp.unlink(claimPath).catch(() => undefined);
+      if (cancelRequested) return;
     }
   };
 
@@ -1254,6 +1633,9 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
       }), inheritEnv: false, turnTimeoutMs: definition.timeoutMs, onEvent: recordEvent });
     const identity = await client.startOrResumeThread({ threadId: definition.threadId, model: definition.model,
       effort: definition.effort, approvalPolicy: "never", networkAccess: false });
+    if (definition.expectedSessionId && identity.sessionId !== definition.expectedSessionId) {
+      throw new Error("Codex thread resume returned an unexpected session identity.");
+    }
     runState.threadId = identity.threadId;
     runState.sessionId = identity.sessionId;
     heartbeat({ threadId: identity.threadId, sessionId: identity.sessionId });
