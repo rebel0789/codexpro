@@ -86,6 +86,8 @@ export interface CodingTaskRunState {
   finishedAt?: string;
   heartbeatAt?: string;
   runnerPid?: number;
+  runnerNonce?: string;
+  runnerStartedAt?: string;
   threadId?: string;
   sessionId?: string;
   turnId?: string;
@@ -140,6 +142,17 @@ export interface CodingTaskSteerAck {
   reused?: boolean;
 }
 
+interface QueuedRunCancellation {
+  version: typeof RUN_VERSION;
+  taskId: string;
+  operationId: string;
+  fingerprint: string;
+  executorEpoch: number;
+  leaseId: string;
+  requestedAt: string;
+  reason?: string;
+}
+
 export interface SubmitCodingTaskFollowupInput {
   requestKey: string;
   prompt: string;
@@ -175,8 +188,28 @@ interface RunPaths {
   definition: string;
   state: string;
   runnerLock: string;
+  runnerGuard: string;
+  queuedCancel: string;
   steerInbox: string;
   steerAcks: string;
+}
+
+interface RunLockRecord {
+  version: typeof RUN_VERSION;
+  role: "runner" | "reconcile";
+  taskId: string;
+  operationId: string;
+  fingerprint: string;
+  pid: number;
+  nonce: string;
+  processStartedAt: string;
+  acquiredAt: string;
+  heartbeatAt: string;
+}
+
+interface RunLockLease {
+  child: ReturnType<typeof spawn>;
+  record: RunLockRecord;
 }
 
 function sha256(value: string): string {
@@ -194,7 +227,10 @@ function sanitizedRuntimeEnv(overrides?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const allowed = ["HOME", "PATH", "TMPDIR", "TMP", "TEMP", "USER", "SHELL", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "CI",
     "SYSTEMROOT", "WINDIR", "PATHEXT", "COMSPEC"];
   const result: NodeJS.ProcessEnv = {};
-  for (const key of allowed) if (source[key] !== undefined) result[key] = source[key];
+  for (const key of allowed) {
+    const sourceKey = Object.keys(source).find((candidate) => candidate.toUpperCase() === key);
+    if (sourceKey && source[sourceKey] !== undefined) result[key] = source[sourceKey];
+  }
   const explicit = ["CODEX_HOME", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "NO_PROXY", "no_proxy"];
   for (const key of explicit) if (overrides?.[key] !== undefined) result[key] = overrides[key];
   result.NO_COLOR = "1";
@@ -231,6 +267,8 @@ function runPaths(store: CodingTaskStore, taskId: string, operationId: string): 
     definition: path.join(runDir, "definition.json"),
     state: path.join(runDir, "state.json"),
     runnerLock: path.join(runDir, "runner.lock"),
+    runnerGuard: path.join(runDir, "runner.lock.guard"),
+    queuedCancel: path.join(runDir, "queued-cancel.json"),
     steerInbox: path.join(runDir, "steer", "inbox"),
     steerAcks: path.join(runDir, "steer", "acks")
   };
@@ -240,42 +278,164 @@ async function readJson<T>(filePath: string): Promise<T> {
   return JSON.parse(await fsp.readFile(filePath, "utf8")) as T;
 }
 
+async function readQueuedRunCancellation(
+  paths: RunPaths,
+  definition: CodingTaskRunDefinition
+): Promise<QueuedRunCancellation | undefined> {
+  const request = await readJson<QueuedRunCancellation>(paths.queuedCancel).catch((error) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (!request) return undefined;
+  if (request.version !== RUN_VERSION || request.taskId !== definition.taskId ||
+      request.operationId !== definition.operationId || request.fingerprint !== definition.fingerprint ||
+      request.executorEpoch !== definition.executorEpoch || request.leaseId !== definition.leaseId ||
+      !Number.isFinite(Date.parse(request.requestedAt))) {
+    throw new Error("Queued Codex cancellation identity mismatch.");
+  }
+  return request;
+}
+
 async function ensurePrivateDirectory(directory: string): Promise<void> {
   await fsp.mkdir(directory, { recursive: true, mode: 0o700 });
   await secureCodingTaskDirectory(directory, "Coding task runner state directory");
 }
 
-function processAlive(pid?: number): boolean {
-  if (!pid || !Number.isSafeInteger(pid) || pid < 1) return false;
+type RunLockIdentity = Pick<CodingTaskRunDefinition, "taskId" | "operationId" | "fingerprint">;
+
+function validRunLockRecord(value: unknown, definition: RunLockIdentity): value is RunLockRecord {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Partial<RunLockRecord>;
+  return record.version === RUN_VERSION && (record.role === "runner" || record.role === "reconcile") &&
+    record.taskId === definition.taskId && record.operationId === definition.operationId &&
+    record.fingerprint === definition.fingerprint && Number.isSafeInteger(record.pid) && record.pid! > 0 &&
+    typeof record.nonce === "string" && /^[0-9a-f-]{16,64}$/i.test(record.nonce) &&
+    typeof record.processStartedAt === "string" && Number.isFinite(Date.parse(record.processStartedAt)) &&
+    typeof record.acquiredAt === "string" && Number.isFinite(Date.parse(record.acquiredAt)) &&
+    typeof record.heartbeatAt === "string" && Number.isFinite(Date.parse(record.heartbeatAt));
+}
+
+async function readRunLock(paths: RunPaths, definition: RunLockIdentity): Promise<RunLockRecord | undefined> {
   try {
-    process.kill(pid, 0);
-    return true;
+    const value = await readJson<unknown>(paths.runnerLock);
+    return validRunLockRecord(value, definition) ? value : undefined;
   } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    return undefined;
   }
 }
 
-async function acquireRunLock(paths: RunPaths): Promise<fsp.FileHandle | undefined> {
-  try {
-    const handle = await fsp.open(paths.runnerLock, "wx", 0o600);
-    await handle.writeFile(`${process.pid}\n`, "utf8");
-    return handle;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const pid = Number.parseInt(await fsp.readFile(paths.runnerLock, "utf8").catch(() => "0"), 10);
-    if (processAlive(pid)) return undefined;
-    await fsp.rename(paths.runnerLock, `${paths.runnerLock}.stale.${Date.now()}.${randomUUID()}`).catch((renameError) => {
-      if ((renameError as NodeJS.ErrnoException).code !== "ENOENT") throw renameError;
+async function writeRunLockRecord(paths: RunPaths, lease: RunLockLease): Promise<void> {
+  await writeCodingTaskJsonAtomic(paths.runnerLock, lease.record);
+}
+
+async function acquireRunLock(
+  paths: RunPaths,
+  definition: CodingTaskRunDefinition,
+  role: RunLockRecord["role"]
+): Promise<RunLockLease | undefined> {
+  const now = new Date().toISOString();
+  const record: RunLockRecord = {
+    version: RUN_VERSION, role, taskId: definition.taskId, operationId: definition.operationId,
+    fingerprint: definition.fingerprint, pid: process.pid, nonce: randomUUID(),
+    processStartedAt: now, acquiredAt: now, heartbeatAt: now
+  };
+  let executable: string;
+  let args: string[];
+  let env = sanitizedRuntimeEnv();
+  if (process.platform === "win32") {
+    const systemRoot = process.env.SystemRoot ?? process.env.SYSTEMROOT;
+    executable = systemRoot
+      ? path.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+      : "powershell.exe";
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      "try {$s=[IO.File]::Open($env:CODEXPRO_RUN_LOCK_PATH,[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None)} catch [IO.IOException] {exit 75}",
+      "try {$o=[Console]::OpenStandardOutput();[byte[]]$r=76,79,67,75,69,68,10;$o.Write($r,0,$r.Length);$o.Flush();while($null -ne [Console]::In.ReadLine()) {}} finally {$s.Dispose()}"
+    ].join(";");
+    const encoded = Buffer.from(script, "utf16le").toString("base64");
+    args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded];
+    env = { ...env, CODEXPRO_RUN_LOCK_PATH: paths.runnerGuard };
+  } else {
+    await fsp.open(paths.runnerGuard, "a", 0o600).then((handle) => handle.close());
+    executable = process.platform === "darwin" ? "/usr/bin/lockf" : "/usr/bin/flock";
+    const helper = "process.stdout.write('LOCKED\\n');process.stdin.resume();process.stdin.on('end',()=>process.exit(0));";
+    args = process.platform === "darwin"
+      ? ["-t", "0", paths.runnerGuard, process.execPath, "-e", helper]
+      : ["-n", paths.runnerGuard, process.execPath, "-e", helper];
+  }
+  const child = spawn(executable, args, {
+    env, stdio: ["pipe", "pipe", "pipe"], shell: false, windowsHide: true
+  });
+  let output = "";
+  let stderr = "";
+  const acquired = await new Promise<boolean>((resolve, reject) => {
+    let settled = false;
+    const finish = (value: boolean): void => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } };
+    const timer = setTimeout(() => { child.kill(); reject(new Error("Timed out probing the Codex run advisory lock.")); },
+      process.platform === "win32" ? 5_000 : 2_000);
+    child.stdout?.on("data", (chunk: Buffer) => {
+      output += chunk.toString("utf8");
+      if (output.includes("LOCKED\n")) finish(true);
     });
-    try {
-      const handle = await fsp.open(paths.runnerLock, "wx", 0o600);
-      await handle.writeFile(`${process.pid}\n`, "utf8");
-      return handle;
-    } catch (retryError) {
-      if ((retryError as NodeJS.ErrnoException).code === "EEXIST") return undefined;
-      throw retryError;
+    child.stderr?.on("data", (chunk: Buffer) => { if (stderr.length < 8_192) stderr += chunk.toString("utf8"); });
+    child.once("error", (error) => { clearTimeout(timer); reject(new Error(`Could not start Codex advisory lock helper: ${error.message}`)); });
+    child.once("exit", (code, signal) => {
+      if (output.includes("LOCKED\n")) return finish(true);
+      if (code === 75 || (process.platform !== "win32" && code === 1)) return finish(false);
+      clearTimeout(timer);
+      reject(new Error(`Codex advisory lock helper failed (${code ?? signal}): ${stderr.trim()}`));
+    });
+  });
+  if (!acquired) return undefined;
+  const lease: RunLockLease = { child, record };
+  try {
+    await writeRunLockRecord(paths, lease);
+  } catch (error) {
+    child.stdin?.end();
+    child.kill();
+    throw error;
+  }
+  return lease;
+}
+
+async function refreshRunLock(paths: RunPaths, lease: RunLockLease): Promise<void> {
+  if (lease.child.exitCode !== null) throw new Error("Detached Codex runner lost its exclusive run lock.");
+  const current = await readRunLock(paths, lease.record);
+  if (!current || current.nonce !== lease.record.nonce ||
+      current.pid !== lease.record.pid || current.processStartedAt !== lease.record.processStartedAt || current.role !== lease.record.role) {
+    throw new Error("Detached Codex runner lost its exclusive run lock.");
+  }
+  lease.record.heartbeatAt = new Date().toISOString();
+  await writeRunLockRecord(paths, lease);
+}
+
+async function releaseRunLock(paths: RunPaths, lease: RunLockLease): Promise<void> {
+  if (lease.child.exitCode === null) {
+    const current = await readRunLock(paths, lease.record);
+    if (current?.nonce === lease.record.nonce && current.processStartedAt === lease.record.processStartedAt) {
+      await fsp.unlink(paths.runnerLock).catch(() => undefined);
     }
   }
+  lease.child.stdin?.end();
+  await new Promise<void>((resolve) => {
+    if (lease.child.exitCode !== null) return resolve();
+    const timer = setTimeout(() => { lease.child.kill(); resolve(); }, 2_000);
+    lease.child.once("exit", () => { clearTimeout(timer); resolve(); });
+  });
+}
+
+async function observedRunnerAlive(
+  paths: RunPaths,
+  definition: CodingTaskRunDefinition,
+  state: CodingTaskRunState
+): Promise<boolean> {
+  if (!state.runnerNonce || !state.runnerStartedAt || !state.heartbeatAt) return false;
+  const record = await readRunLock(paths, definition);
+  return Boolean(record && record.role === "runner" && record.nonce === state.runnerNonce &&
+    record.processStartedAt === state.runnerStartedAt && record.pid === state.runnerPid &&
+    Date.now() - Date.parse(record.heartbeatAt) <= HEARTBEAT_MS * 3 &&
+    Date.now() - Date.parse(state.heartbeatAt) <= HEARTBEAT_MS * 3);
 }
 
 function assertDefinition(definition: CodingTaskRunDefinition, definitionPath: string, dataRoot: string): void {
@@ -308,6 +468,47 @@ function definitionFingerprint(task: CodingTaskState, input: Required<Omit<Launc
     timeoutMs: input.timeoutMs,
     worktreeRoot: task.worktreeRoot
   }));
+}
+
+function operationRequestFingerprint(definition: CodingTaskRunDefinition): string {
+  return sha256(JSON.stringify({
+    executor: "codex",
+    operationId: definition.operationId,
+    codexThreadId: definition.threadId ?? null,
+    codexSessionId: null,
+    codexTurnId: null
+  }));
+}
+
+function assertMatchingTaskIdentity(
+  task: CodingTaskState,
+  definition: CodingTaskRunDefinition,
+  options: { requireActive?: boolean } = {}
+): void {
+  if (task.executor !== "codex" || task.executorLease.epoch !== definition.executorEpoch ||
+      task.executorLease.leaseId !== definition.leaseId || task.worktreeRoot !== definition.worktreeRoot) {
+    throw new Error("Codex run diverged from the authoritative CodingTask lease or worktree identity.");
+  }
+  if (options.requireActive) {
+    const active = task.activeOperation;
+    if (!active || active.operationId !== definition.operationId || active.executor !== "codex" ||
+        active.kind !== "codex_run" || active.requestFingerprint !== operationRequestFingerprint(definition)) {
+      throw new Error("Codex run diverged from the authoritative active operation identity.");
+    }
+  }
+}
+
+function terminalLifecycle(status: CodingTaskRunStatus): "waiting_review" | "completed" | "failed" | "canceled" {
+  if (status === "waiting_review" || status === "completed" || status === "failed" || status === "canceled") return status;
+  throw new Error(`Codex run status ${status} is not terminal.`);
+}
+
+function stateWithoutViewFields(view: CodingTaskRunView): CodingTaskRunState {
+  const state = { ...view } as CodingTaskRunState & Partial<CodingTaskRunView>;
+  delete state.definitionFingerprint;
+  delete state.runnerAlive;
+  delete state.reused;
+  return state;
 }
 
 export async function launchCodingTaskRun(
@@ -431,8 +632,58 @@ export async function reconcileCodingTaskRun(
   const definition = await readJson<CodingTaskRunDefinition>(paths.definition);
   assertDefinition(definition, paths.definition, store.dataRoot);
   let view = await getCodingTaskRun(config, taskId, operationId);
-  if (!["queued", "running"].includes(view.status) || view.runnerAlive) return view;
-  const task = await store.get(taskId);
+  let task = await store.get(taskId);
+
+  if (["waiting_review", "completed", "failed", "canceled"].includes(view.status)) {
+    if (!task.activeOperation) {
+      if (task.lastCompletedOperation?.operationId === operationId &&
+          (task.lastCompletedOperation.executorEpoch !== definition.executorEpoch ||
+           task.lastCompletedOperation.lifecycle !== terminalLifecycle(view.status))) {
+        throw new Error("Terminal Codex run diverged from the authoritative completed operation outcome.");
+      }
+      if ((view.status === "waiting_review" || view.status === "completed") &&
+          task.lastCompletedOperation?.operationId !== operationId) {
+        throw new Error("Terminal Codex run has no matching authoritative completed operation.");
+      }
+      return view;
+    }
+    assertMatchingTaskIdentity(task, definition, { requireActive: true });
+    const lock = await acquireRunLock(paths, definition, "reconcile");
+    if (!lock) return { ...view, runnerAlive: true };
+    try {
+      view = await getCodingTaskRunState(config, taskId, operationId);
+      if (!["waiting_review", "completed", "failed", "canceled"].includes(view.status)) {
+        return { ...view, runnerAlive: false };
+      }
+      task = await store.get(taskId);
+      assertMatchingTaskIdentity(task, definition, { requireActive: true });
+      await assertTaskWorktreeIdentity(store, task);
+      const gitObservation = await observeCodingTask(config, taskId, {
+        executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
+        operationId, maxGitOutputBytes: definition.maxLogBytes
+      });
+      const finished = await finishCodingTaskOperationFenced(config, taskId, {
+        executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
+        operationId, lifecycle: terminalLifecycle(view.status), resultSummary: view.finalText?.slice(0, 20_000),
+        error: view.status === "failed" ? view.error : undefined, codexThreadId: view.threadId,
+        codexSessionId: view.sessionId, codexTurnId: view.turnId, gitObservation,
+        logs: [runLogMetadata(paths, stateWithoutViewFields(view))]
+      });
+      const effectiveStatus: CodingTaskRunStatus = finished.lifecycle === "canceled" ? "canceled" : view.status;
+      if (effectiveStatus !== view.status) {
+        const now = finished.finishedAt ?? new Date().toISOString();
+        await writeCodingTaskJsonAtomic(paths.state, compactRunState({
+          ...stateWithoutViewFields(view), status: effectiveStatus, updatedAt: now, finishedAt: now,
+          error: effectiveStatus === "canceled" ? undefined : view.error
+        }, definition.maxLogBytes));
+      }
+      return { ...(await getCodingTaskRunState(config, taskId, operationId)), runnerAlive: false };
+    } finally {
+      await releaseRunLock(paths, lock);
+    }
+  }
+
+  if (view.runnerAlive) return view;
   if (view.status === "queued") {
     const persistedCancel = task.activeOperation?.operationId === operationId
       ? await readCodingTaskCancellation(config, taskId, {
@@ -440,9 +691,13 @@ export async function reconcileCodingTaskRun(
         })
       : undefined;
     if (persistedCancel && !view.runnerAlive) {
-      const lock = await acquireRunLock(paths);
+      const lock = await acquireRunLock(paths, definition, "reconcile");
       if (!lock) return view;
       try {
+        view = await getCodingTaskRunState(config, taskId, operationId);
+        task = await store.get(taskId);
+        if (view.status !== "queued") return { ...view, runnerAlive: false };
+        assertMatchingTaskIdentity(task, definition, { requireActive: true });
         const gitObservation = await observeCodingTask(config, taskId, {
           executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
           operationId, maxGitOutputBytes: definition.maxLogBytes
@@ -456,50 +711,83 @@ export async function reconcileCodingTaskRun(
           version: RUN_VERSION, taskId, operationId, fingerprint: definition.fingerprint, status: "canceled",
           createdAt: view.createdAt, updatedAt: now, finishedAt: now, events: view.events
         }, definition.maxLogBytes));
-        return getCodingTaskRun(config, taskId, operationId);
+        return { ...(await getCodingTaskRunState(config, taskId, operationId)), runnerAlive: false };
       } finally {
-        await lock.close().catch(() => undefined);
-        await fsp.unlink(paths.runnerLock).catch(() => undefined);
+        await releaseRunLock(paths, lock);
       }
     }
     if (options.relaunchQueued !== true) return view;
     if (!config.codexBinary?.trim()) throw new Error("codexBinary is required when queued-run relaunch is authorized.");
-    if (task.executor !== "codex" || task.executorLease.epoch !== definition.executorEpoch ||
-        task.executorLease.leaseId !== definition.leaseId || task.revision !== definition.expectedRevision || task.activeOperation) {
-      throw new Error("Queued Codex run cannot be relaunched because its immutable task lease changed.");
+    const lock = await acquireRunLock(paths, definition, "reconcile");
+    if (!lock) return { ...view, runnerAlive: true };
+    let launchNonce: string | undefined;
+    try {
+      view = await getCodingTaskRunState(config, taskId, operationId);
+      task = await store.get(taskId);
+      if (view.status !== "queued") return { ...view, runnerAlive: false };
+      assertMatchingTaskIdentity(task, definition, { requireActive: Boolean(task.activeOperation) });
+      if (!task.activeOperation && task.revision !== definition.expectedRevision) {
+        throw new Error("Queued Codex run cannot be relaunched because its immutable task revision changed.");
+      }
+      await assertTaskWorktreeIdentity(store, task);
+      if (definition.worktreeRoot !== task.worktreeRoot || definition.codexBinary !== config.codexBinary) {
+        throw new Error("Queued Codex run definition no longer matches the configured runner identity.");
+      }
+      const staleMs = Math.max(0, Math.min(options.staleMs ?? 5_000, 10 * 60_000));
+      if (view.runnerNonce?.startsWith("launch:") && Date.now() - Date.parse(view.heartbeatAt ?? view.updatedAt) <= staleMs) {
+        return { ...view, runnerAlive: false };
+      }
+      launchNonce = `launch:${randomUUID()}`;
+      const now = new Date().toISOString();
+      await writeCodingTaskJsonAtomic(paths.state, compactRunState({
+        ...stateWithoutViewFields(view), heartbeatAt: now, updatedAt: now,
+        runnerNonce: launchNonce, runnerStartedAt: now, runnerPid: undefined
+      }, definition.maxLogBytes));
+    } finally {
+      await releaseRunLock(paths, lock);
     }
-    await assertTaskWorktreeIdentity(store, task);
-    if (definition.worktreeRoot !== task.worktreeRoot || definition.codexBinary !== config.codexBinary) {
-      throw new Error("Queued Codex run definition no longer matches the configured runner identity.");
+    try {
+      await spawnDetachedRunner(config as CodingTaskRunnerConfig, definition, paths, task.worktreeRoot);
+    } catch (error) {
+      const current = await getCodingTaskRunState(config, taskId, operationId);
+      if (current.status === "queued" && current.runnerNonce === launchNonce) {
+        await writeCodingTaskJsonAtomic(paths.state, compactRunState({ ...stateWithoutViewFields(current),
+          status: "running", heartbeatAt: new Date(0).toISOString(), error: bounded(errorMessage(error), 20_000)
+        }, definition.maxLogBytes));
+      }
+      throw error;
     }
-    await spawnDetachedRunner(config as CodingTaskRunnerConfig, definition, paths, task.worktreeRoot);
     return waitForCodingTaskRun(config, taskId, operationId, { timeoutMs: 1_500, terminal: false });
   }
   const staleMs = Math.max(0, Math.min(options.staleMs ?? 5_000, 10 * 60_000));
   if (Date.now() - Date.parse(view.heartbeatAt ?? view.updatedAt) <= staleMs) return view;
-  if (task.executor !== "codex" || task.executorLease.epoch !== definition.executorEpoch ||
-      task.executorLease.leaseId !== definition.leaseId || task.activeOperation?.operationId !== operationId) {
-    throw new Error("Dead Codex run diverged from the authoritative CodingTask lease; refusing run-only reconciliation.");
+  assertMatchingTaskIdentity(task, definition, { requireActive: true });
+  const lock = await acquireRunLock(paths, definition, "reconcile");
+  if (!lock) return { ...view, runnerAlive: true };
+  try {
+    view = await getCodingTaskRunState(config, taskId, operationId);
+    task = await store.get(taskId);
+    if (view.status !== "running") return { ...view, runnerAlive: false };
+    assertMatchingTaskIdentity(task, definition, { requireActive: true });
+    const error = "Detached Codex runner stopped without recording a terminal result.";
+    const gitObservation = await observeCodingTask(config, taskId, {
+      executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
+      operationId, maxGitOutputBytes: definition.maxLogBytes
+    });
+    const finishedTask = await finishCodingTaskOperationFenced(config, taskId, {
+      executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
+      operationId, lifecycle: "failed", error, gitObservation,
+      codexThreadId: view.threadId, codexSessionId: view.sessionId, codexTurnId: view.turnId
+    });
+    const now = finishedTask.finishedAt ?? new Date().toISOString();
+    const state: CodingTaskRunState = { ...stateWithoutViewFields(view),
+      status: finishedTask.lifecycle === "canceled" ? "canceled" : "failed",
+      updatedAt: now, finishedAt: now, error: finishedTask.lifecycle === "canceled" ? undefined : error };
+    await writeCodingTaskJsonAtomic(paths.state, compactRunState(state, definition.maxLogBytes));
+    return { ...(await getCodingTaskRunState(config, taskId, operationId)), runnerAlive: false };
+  } finally {
+    await releaseRunLock(paths, lock);
   }
-  const error = "Detached Codex runner stopped without recording a terminal result.";
-  const gitObservation = await observeCodingTask(config, taskId, {
-    executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
-    operationId, maxGitOutputBytes: definition.maxLogBytes
-  });
-  const finishedTask = await finishCodingTaskOperationFenced(config, taskId, {
-    executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
-    operationId, lifecycle: "failed", error, gitObservation,
-    codexThreadId: view.threadId, codexSessionId: view.sessionId, codexTurnId: view.turnId
-  });
-  const now = finishedTask.finishedAt ?? new Date().toISOString();
-  const state: CodingTaskRunState = { ...view, status: finishedTask.lifecycle === "canceled" ? "canceled" : "failed",
-    updatedAt: now, finishedAt: now, error: finishedTask.lifecycle === "canceled" ? undefined : error,
-    events: view.events, runnerPid: view.runnerPid };
-  delete (state as Partial<CodingTaskRunView>).definitionFingerprint;
-  delete (state as Partial<CodingTaskRunView>).runnerAlive;
-  delete (state as Partial<CodingTaskRunView>).reused;
-  await writeCodingTaskJsonAtomic(paths.state, compactRunState(state, definition.maxLogBytes));
-  return getCodingTaskRun(config, taskId, operationId);
 }
 
 export async function cancelQueuedCodingTaskRun(
@@ -517,14 +805,10 @@ export async function cancelQueuedCodingTaskRun(
   const view = await getCodingTaskRun(config, taskId, operationId);
   if (view.status === "canceled") return { ...view, reused: true };
   if (view.status !== "queued") throw new Error(`Only a queued Codex run can use queued cancellation; observed ${view.status}.`);
-  if (view.runnerAlive) throw new Error("Queued Codex run runner is alive; use active cancellation instead.");
-  const lock = await acquireRunLock(paths);
-  if (!lock) throw new Error("Queued Codex run became active; use active cancellation instead.");
-  try {
-    return await store.withTaskLock(taskId, async () => {
-      const currentView = await getCodingTaskRun(config, taskId, operationId);
+  return store.withTaskLock(taskId, async () => {
+      const currentView = await getCodingTaskRunState(config, taskId, operationId);
       if (currentView.status === "canceled") return { ...currentView, reused: true };
-      if (currentView.status !== "queued" || currentView.runnerAlive) throw new Error("Queued Codex run is no longer safely cancelable.");
+      if (currentView.status !== "queued") throw new Error("Queued Codex run is no longer safely cancelable.");
       const task = await store.get(taskId);
       if (task.executor !== "codex" || task.executorLease.epoch !== definition.executorEpoch ||
           task.executorLease.leaseId !== definition.leaseId || task.revision !== definition.expectedRevision || task.activeOperation) {
@@ -535,6 +819,19 @@ export async function cancelQueuedCodingTaskRun(
         throw new Error("Queued Codex run cancellation definition no longer matches the task worktree identity.");
       }
       const now = new Date().toISOString();
+      const queuedCancel: QueuedRunCancellation = {
+        version: RUN_VERSION, taskId, operationId, fingerprint: definition.fingerprint,
+        executorEpoch: definition.executorEpoch, leaseId: definition.leaseId, requestedAt: now,
+        ...(reason?.trim() ? { reason: bounded(reason.trim(), 20_000) } : {})
+      };
+      try {
+        const handle = await fsp.open(paths.queuedCancel, "wx", 0o600);
+        try { await handle.writeFile(`${JSON.stringify(queuedCancel)}\n`, "utf8"); await handle.sync(); }
+        finally { await handle.close(); }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        await readQueuedRunCancellation(paths, definition);
+      }
       const canceled: CodingTaskRunState = {
         version: RUN_VERSION, taskId, operationId, fingerprint: definition.fingerprint, status: "canceled",
         createdAt: currentView.createdAt, updatedAt: now, finishedAt: now,
@@ -542,15 +839,23 @@ export async function cancelQueuedCodingTaskRun(
         events: currentView.events
       };
       await writeCodingTaskJsonAtomic(paths.state, compactRunState(canceled, definition.maxLogBytes));
-      return getCodingTaskRun(config, taskId, operationId);
-    });
-  } finally {
-    await lock.close().catch(() => undefined);
-    await fsp.unlink(paths.runnerLock).catch(() => undefined);
-  }
+      return { ...(await getCodingTaskRunState(config, taskId, operationId)), runnerAlive: false };
+  });
 }
 
 export async function getCodingTaskRun(
+  config: CodingTaskStoreConfig,
+  taskIdInput: string,
+  operationId: string
+): Promise<CodingTaskRunView> {
+  const view = await getCodingTaskRunState(config, taskIdInput, operationId);
+  const store = new CodingTaskStore(config);
+  const paths = runPaths(store, view.taskId, view.operationId);
+  const definition = await readJson<CodingTaskRunDefinition>(paths.definition);
+  return { ...view, runnerAlive: await observedRunnerAlive(paths, definition, view) };
+}
+
+async function getCodingTaskRunState(
   config: CodingTaskStoreConfig,
   taskIdInput: string,
   operationId: string
@@ -566,7 +871,7 @@ export async function getCodingTaskRun(
   if (state.taskId !== taskId || state.operationId !== definition.operationId || state.fingerprint !== definition.fingerprint) {
     throw new Error("Coding task run state identity mismatch.");
   }
-  return { ...state, definitionFingerprint: definition.fingerprint, runnerAlive: processAlive(state.runnerPid) };
+  return { ...state, definitionFingerprint: definition.fingerprint, runnerAlive: false };
 }
 
 export async function getLatestCodingTaskRun(
@@ -780,13 +1085,12 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
   await ensurePrivateDirectory(paths.runDir);
   await ensurePrivateDirectory(paths.steerInbox);
   await ensurePrivateDirectory(paths.steerAcks);
-  const runnerLock = await acquireRunLock(paths);
+  const runnerLock = await acquireRunLock(paths, definition, "runner");
   if (!runnerLock) return;
 
   let runState = await readJson<CodingTaskRunState>(paths.state);
   if (["waiting_review", "completed", "failed", "canceled"].includes(runState.status)) {
-    await runnerLock.close().catch(() => undefined);
-    await fsp.unlink(paths.runnerLock).catch(() => undefined);
+    await releaseRunLock(paths, runnerLock);
     return;
   }
   let taskState: CodingTaskState | undefined;
@@ -797,6 +1101,7 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
   let cancelRequested = false;
   let mutationChain: Promise<void> = Promise.resolve();
   let mutationError: Error | undefined;
+  let lockRefresh: Promise<void> = Promise.resolve();
   let stateWrites: Promise<void> | undefined;
   let stateDirty = false;
   let stateWriteError: Error | undefined;
@@ -896,18 +1201,48 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
   try {
     const current = await store.get(definition.taskId);
     if (current.worktreeRoot !== definition.worktreeRoot || current.executor !== "codex" ||
-        current.executorLease.epoch !== definition.executorEpoch || current.executorLease.leaseId !== definition.leaseId ||
-        current.revision !== definition.expectedRevision) throw new Error("Coding task run lease or identity changed before runner start.");
+        current.executorLease.epoch !== definition.executorEpoch || current.executorLease.leaseId !== definition.leaseId) {
+      throw new Error("Coding task run lease or identity changed before runner start.");
+    }
+    if (current.activeOperation) {
+      assertMatchingTaskIdentity(current, definition, { requireActive: true });
+    } else if (current.revision !== definition.expectedRevision) {
+      throw new Error("Coding task run revision changed before runner start.");
+    }
     await assertTaskWorktreeIdentity(store, current);
     const realWorktree = await fsp.realpath(definition.worktreeRoot);
     if (realWorktree !== definition.worktreeRoot) throw new Error("Coding task worktree real path changed.");
+    const queuedCancellation = await readQueuedRunCancellation(paths, definition);
+    if (queuedCancellation && !current.activeOperation) {
+      const now = new Date().toISOString();
+      await persistRun({ status: "canceled", finishedAt: now, heartbeatAt: now,
+        error: queuedCancellation.reason ? bounded(`Canceled before launch: ${queuedCancellation.reason}`, 20_000) : undefined });
+      return;
+    }
     taskState = await beginCodingTaskOperation({ dataRoot }, definition.taskId, {
       expectedRevision: definition.expectedRevision, executor: "codex", executorEpoch: definition.executorEpoch,
       leaseId: definition.leaseId, operationId: definition.operationId, codexRunnerPid: process.pid,
       ...(definition.threadId ? { codexThreadId: definition.threadId } : {})
     });
+    const cancellationAfterBegin = await readQueuedRunCancellation(paths, definition);
+    if (cancellationAfterBegin) {
+      const gitObservation = await observeCodingTask({ dataRoot }, definition.taskId, {
+        executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
+        operationId: definition.operationId, maxGitOutputBytes: definition.maxLogBytes
+      });
+      taskState = await finishCodingTaskOperationFenced({ dataRoot }, definition.taskId, {
+        executor: "codex", executorEpoch: definition.executorEpoch, leaseId: definition.leaseId,
+        operationId: definition.operationId, lifecycle: "canceled", error: cancellationAfterBegin.reason,
+        gitObservation
+      });
+      const canceledAt = taskState.finishedAt ?? new Date().toISOString();
+      await persistRun({ status: "canceled", finishedAt: canceledAt, heartbeatAt: canceledAt,
+        error: cancellationAfterBegin.reason ? bounded(`Canceled before launch: ${cancellationAfterBegin.reason}`, 20_000) : undefined });
+      return;
+    }
     const startedAt = new Date().toISOString();
-    await persistRun({ status: "running", startedAt, heartbeatAt: startedAt, runnerPid: process.pid });
+    await persistRun({ status: "running", startedAt, heartbeatAt: startedAt, runnerPid: process.pid,
+      runnerNonce: runnerLock.record.nonce, runnerStartedAt: runnerLock.record.processStartedAt });
     client = new CodexAppServerClient({ codexBinary: definition.codexBinary, cwd: definition.worktreeRoot,
       env: sanitizedRuntimeEnv({
         CODEX_HOME: process.env.CODEX_HOME,
@@ -925,6 +1260,10 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
     await mutationChain;
     heartbeatTimer = setInterval(() => {
       runState.heartbeatAt = new Date().toISOString();
+      lockRefresh = lockRefresh.then(() => refreshRunLock(paths, runnerLock)).catch((error) => {
+        mutationError = error instanceof Error ? error : new Error(String(error));
+        controller.abort();
+      });
       heartbeat();
       void persistRun().catch(() => controller.abort());
     }, HEARTBEAT_MS);
@@ -946,6 +1285,7 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
       approvalPolicy: "never", networkAccess: false, timeoutMs: definition.timeoutMs, signal: controller.signal,
       clientUserMessageId: definition.operationId });
     await mutationChain;
+    await lockRefresh;
     if (mutationError) throw mutationError;
     await finishSuccessfulResult(result);
   } catch (error) {
@@ -997,8 +1337,8 @@ async function runDetached(definitionPath: string, dataRoot: string): Promise<vo
     if (requestTimer) clearInterval(requestTimer);
     await client?.close().catch(() => undefined);
     await stateWrites?.catch(() => undefined);
-    await runnerLock.close().catch(() => undefined);
-    await fsp.unlink(paths.runnerLock).catch(() => undefined);
+    await lockRefresh.catch(() => undefined);
+    await releaseRunLock(paths, runnerLock);
   }
 
   async function finishSuccessfulResult(result: CodexTurnResult): Promise<void> {

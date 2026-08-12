@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
@@ -71,7 +71,7 @@ try {
   await fs.writeFile(fakeCodex, fakeSource, { mode: 0o755 });
   const { CodingTaskStore } = await import(pathToFileURL(path.join(root, 'dist', 'codingTaskStore.js')).href);
   const { beginCodingTaskOperation, requestCodingTaskCancellation } = await import(pathToFileURL(path.join(root, 'dist', 'codingTaskOps.js')).href);
-  const { launchCodingTaskRun, waitForCodingTaskRun, submitCodingTaskFollowup, getCodingTaskSteer, reconcileCodingTaskRun, cancelQueuedCodingTaskRun } = await import(
+  const { launchCodingTaskRun, waitForCodingTaskRun, submitCodingTaskFollowup, getCodingTaskSteer, getCodingTaskRun, reconcileCodingTaskRun, cancelQueuedCodingTaskRun } = await import(
     pathToFileURL(path.join(root, 'dist', 'codingTaskRunner.js')).href
   );
   const taskId = 'task_0123456789abcdef01234567';
@@ -117,6 +117,8 @@ try {
   const launched = await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, launchInput);
   assert.notEqual(launched.status, 'queued');
   await waitFor(async () => (await store.get(taskId)).codexTurnActive === true);
+  assert.equal((await getCodingTaskRun({ dataRoot }, taskId, 'run-one')).runnerAlive, true,
+    'live runner metadata must report the exact held lock generation');
   const task = await store.get(taskId);
   assert.equal(task.codexThreadId, 'thread-smoke');
   assert.equal(task.codexSessionId, 'session-smoke');
@@ -166,6 +168,7 @@ try {
   assert.equal(boundaryFollowup.mode, 'steer');
   const boundaryFinished = await waitForCodingTaskRun({ dataRoot }, taskId, boundaryOperationId, { timeoutMs: 5_000 });
   assert.equal(boundaryFinished.status, 'waiting_review');
+  await waitFor(async () => (await store.get(taskId)).activeOperation === undefined);
   const boundaryTask = await store.get(taskId);
   const boundaryLog = boundaryTask.logs.find((entry) => entry.relativePath.includes(boundaryFinished.operationId) || entry.name.startsWith('codex-run-'));
   assert(boundaryLog);
@@ -292,6 +295,128 @@ try {
   );
   assert.notEqual(executionRecovery.status, 'queued');
   assert.equal((await store.get(passiveTaskId)).activeOperation?.operationId, recoveryOperation);
+  const recoveryFollowup = await submitCodingTaskFollowup({ dataRoot, codexBinary: fakeCodex }, passiveTaskId, {
+    requestKey: 'finish-execution-recovery', prompt: 'Finish recovered execution.', timeoutMs: 5_000
+  });
+  assert.equal(recoveryFollowup.mode, 'steer');
+  await waitForCodingTaskRun({ dataRoot }, passiveTaskId, recoveryOperation, { timeoutMs: 5_000 });
+  await waitFor(async () => (await store.get(passiveTaskId)).activeOperation === undefined);
+
+  // Crash after begin but before the queued run-state transition: exact active identity may relaunch once.
+  const beforeQueuedActive = await store.get(passiveTaskId);
+  const queuedActiveOperation = 'queued-active-crash-window';
+  const queuedActiveDefinition = {
+    ...passiveDefinition, operationId: queuedActiveOperation, fingerprint: '1'.repeat(64),
+    prompt: 'recover queued active crash', expectedRevision: beforeQueuedActive.revision,
+    leaseId: beforeQueuedActive.executorLease.leaseId, createdAt: new Date().toISOString()
+  };
+  await beginCodingTaskOperation({ dataRoot }, passiveTaskId, {
+    expectedRevision: beforeQueuedActive.revision, executor: 'codex', executorEpoch: beforeQueuedActive.executorLease.epoch,
+    leaseId: beforeQueuedActive.executorLease.leaseId, operationId: queuedActiveOperation, codexRunnerPid: 999998
+  });
+  const queuedActiveDir = path.join(store.paths(passiveTaskId).taskDir, 'runs', `run_${createHash('sha256').update(queuedActiveOperation).digest('hex').slice(0, 32)}`);
+  await fs.mkdir(queuedActiveDir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(queuedActiveDir, 'definition.json'), JSON.stringify(queuedActiveDefinition), { mode: 0o600 });
+  await fs.writeFile(path.join(queuedActiveDir, 'state.json'), JSON.stringify({
+    version: 1, taskId: passiveTaskId, operationId: queuedActiveOperation, fingerprint: queuedActiveDefinition.fingerprint,
+    status: 'queued', createdAt: queuedActiveDefinition.createdAt, updatedAt: queuedActiveDefinition.createdAt, events: []
+  }), { mode: 0o600 });
+  await fs.writeFile(path.join(queuedActiveDir, 'runner.lock'), JSON.stringify({
+    version: 1, role: 'runner', taskId: passiveTaskId, operationId: queuedActiveOperation,
+    fingerprint: queuedActiveDefinition.fingerprint, pid: 999996,
+    nonce: 'deadbeef-dead-beef-dead-beefdeadbeef', processStartedAt: terminalCreatedFallback(),
+    acquiredAt: terminalCreatedFallback(), heartbeatAt: terminalCreatedFallback()
+  }), { mode: 0o600 });
+  const beforeConcurrentRecoveryLaunches = await readLaunchCount();
+  await Promise.all([
+    reconcileCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, passiveTaskId, queuedActiveOperation, { relaunchQueued: true }),
+    reconcileCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, passiveTaskId, queuedActiveOperation, { relaunchQueued: true }),
+    reconcileCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, passiveTaskId, queuedActiveOperation, { relaunchQueued: true })
+  ]);
+  await waitFor(async () => (await getCodingTaskRun({ dataRoot }, passiveTaskId, queuedActiveOperation)).status === 'running');
+  assert.equal(await readLaunchCount(), beforeConcurrentRecoveryLaunches + 1, 'exclusive run lock must prevent duplicate App Server launch');
+  if (process.platform === 'win32') {
+    await assert.rejects(fs.access(path.join(queuedActiveDir, 'runner.lock.recovery')), /ENOENT/,
+      'Windows kernel lock recovery must not depend on a recursively stale recovery sentinel');
+  }
+  await submitCodingTaskFollowup({ dataRoot, codexBinary: fakeCodex }, passiveTaskId, {
+    requestKey: 'finish-queued-active-recovery', prompt: 'Finish queued active recovery.', timeoutMs: 5_000
+  });
+  await waitForCodingTaskRun({ dataRoot }, passiveTaskId, queuedActiveOperation, { timeoutMs: 5_000 });
+  await waitFor(async () => (await store.get(passiveTaskId)).activeOperation === undefined);
+
+  // Crash after terminal run persistence but before task finish: reconcile run outcome back to the task idempotently.
+  const beforeTerminalRecovery = await store.get(passiveTaskId);
+  const terminalOperation = 'terminal-task-writeback-crash';
+  const terminalCreatedAt = new Date(Date.now() - 10_000).toISOString();
+  const terminalDefinition = {
+    ...passiveDefinition, operationId: terminalOperation, fingerprint: '2'.repeat(64),
+    prompt: 'recover terminal writeback', expectedRevision: beforeTerminalRecovery.revision,
+    leaseId: beforeTerminalRecovery.executorLease.leaseId, createdAt: terminalCreatedAt
+  };
+  await beginCodingTaskOperation({ dataRoot }, passiveTaskId, {
+    expectedRevision: beforeTerminalRecovery.revision, executor: 'codex', executorEpoch: beforeTerminalRecovery.executorLease.epoch,
+    leaseId: beforeTerminalRecovery.executorLease.leaseId, operationId: terminalOperation, codexRunnerPid: 999997
+  });
+  const terminalDir = path.join(store.paths(passiveTaskId).taskDir, 'runs', `run_${createHash('sha256').update(terminalOperation).digest('hex').slice(0, 32)}`);
+  await fs.mkdir(terminalDir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(terminalDir, 'definition.json'), JSON.stringify(terminalDefinition), { mode: 0o600 });
+  await fs.writeFile(path.join(terminalDir, 'state.json'), JSON.stringify({
+    version: 1, taskId: passiveTaskId, operationId: terminalOperation, fingerprint: terminalDefinition.fingerprint,
+    status: 'waiting_review', createdAt: terminalCreatedAt, updatedAt: terminalCreatedAt,
+    finishedAt: terminalCreatedAt, finalText: 'persisted terminal outcome', events: []
+  }), { mode: 0o600 });
+  const terminalRecovered = await reconcileCodingTaskRun({ dataRoot }, passiveTaskId, terminalOperation);
+  assert.equal(terminalRecovered.status, 'waiting_review');
+  assert.equal((await store.get(passiveTaskId)).activeOperation, undefined);
+  assert.equal((await store.get(passiveTaskId)).lifecycle, 'waiting_review');
+  const terminalRetry = await reconcileCodingTaskRun({ dataRoot }, passiveTaskId, terminalOperation);
+  assert.equal(terminalRetry.status, 'waiting_review');
+
+  // The ordinary fake-App-Server flow above also runs on Windows and covers its generation-fenced wx fallback.
+  // POSIX additionally proves that a stale informational heartbeat cannot steal a live advisory lock.
+  if (process.platform !== 'win32') {
+  const lockOperation = 'live-advisory-owner';
+  const lockDir = path.join(store.paths(passiveTaskId).taskDir, 'runs', `run_${createHash('sha256').update(lockOperation).digest('hex').slice(0, 32)}`);
+  const lockCreatedAt = new Date().toISOString();
+  const lockDefinition = { ...passiveDefinition, operationId: lockOperation, fingerprint: '3'.repeat(64),
+    prompt: 'live advisory owner', expectedRevision: (await store.get(passiveTaskId)).revision, createdAt: lockCreatedAt };
+  await fs.mkdir(lockDir, { recursive: true, mode: 0o700 });
+  await fs.writeFile(path.join(lockDir, 'definition.json'), JSON.stringify(lockDefinition), { mode: 0o600 });
+  const lockPath = path.join(lockDir, 'runner.lock');
+  const lockGuardPath = path.join(lockDir, 'runner.lock.guard');
+  await fs.writeFile(lockGuardPath, '', { mode: 0o600 });
+  const lockHelper = spawn(process.platform === 'darwin' ? '/usr/bin/lockf' : '/usr/bin/flock', process.platform === 'darwin'
+    ? ['-t', '0', lockGuardPath, process.execPath, '-e', "process.stdout.write('LOCKED\\n');process.stdin.resume()"]
+    : ['-n', lockGuardPath, process.execPath, '-e', "process.stdout.write('LOCKED\\n');process.stdin.resume()"],
+    { stdio: ['pipe', 'pipe', 'inherit'] });
+  await waitForOutput(lockHelper.stdout, 'LOCKED\n');
+  const lockNonce = '12345678-1234-1234-1234-123456789abc';
+  const staleHeartbeat = new Date(Date.now() - 60_000).toISOString();
+  await fs.writeFile(lockPath, JSON.stringify({ version: 1, role: 'runner', taskId: passiveTaskId,
+    operationId: lockOperation, fingerprint: lockDefinition.fingerprint, pid: lockHelper.pid, nonce: lockNonce,
+    processStartedAt: lockCreatedAt, acquiredAt: lockCreatedAt, heartbeatAt: staleHeartbeat }), { mode: 0o600 });
+  await fs.writeFile(path.join(lockDir, 'state.json'), JSON.stringify({
+    version: 1, taskId: passiveTaskId, operationId: lockOperation, fingerprint: lockDefinition.fingerprint,
+    status: 'queued', createdAt: lockCreatedAt, updatedAt: staleHeartbeat, heartbeatAt: staleHeartbeat,
+    runnerPid: lockHelper.pid, runnerNonce: lockNonce, runnerStartedAt: lockCreatedAt, events: []
+  }), { mode: 0o600 });
+  assert.equal((await getCodingTaskRun({ dataRoot }, passiveTaskId, lockOperation)).runnerAlive, false,
+    'stale heartbeat is only an informational passive observation');
+  const launchesBeforeLiveOwner = await readLaunchCount();
+  const liveOwner = await reconcileCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, passiveTaskId, lockOperation, { relaunchQueued: true });
+  assert.equal(liveOwner.runnerAlive, true, 'advisory lock is authoritative during active reconciliation');
+  assert.equal(await readLaunchCount(), launchesBeforeLiveOwner);
+  lockHelper.stdin.end();
+  await new Promise((resolve) => lockHelper.once('exit', resolve));
+  const reusedPidState = JSON.parse(await fs.readFile(path.join(lockDir, 'state.json'), 'utf8'));
+  reusedPidState.runnerPid = process.pid;
+  reusedPidState.runnerNonce = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
+  reusedPidState.heartbeatAt = new Date().toISOString();
+  await fs.writeFile(path.join(lockDir, 'state.json'), JSON.stringify(reusedPidState), { mode: 0o600 });
+  assert.equal((await getCodingTaskRun({ dataRoot }, passiveTaskId, lockOperation)).runnerAlive, false,
+    'a live reused PID without the exact lock generation is not accepted');
+  }
 
   console.log('coding task runner smoke: ok');
 } finally {
@@ -318,4 +443,19 @@ async function waitFor(check, timeoutMs = 4_000) {
 async function readLaunchCount() {
   try { return Number.parseInt(await fs.readFile(fakeLaunchCount, 'utf8'), 10) || 0; }
   catch (error) { if (error?.code === 'ENOENT') return 0; throw error; }
+}
+
+async function waitForOutput(stream, expected, timeoutMs = 2_000) {
+  let output = '';
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`timed out waiting for ${expected}`)), timeoutMs);
+    stream.on('data', (chunk) => {
+      output += chunk.toString('utf8');
+      if (output.includes(expected)) { clearTimeout(timer); resolve(); }
+    });
+  });
+}
+
+function terminalCreatedFallback() {
+  return new Date(Date.now() - 60_000).toISOString();
 }

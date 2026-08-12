@@ -158,12 +158,16 @@ Tool cards are opt in:
 CODEXPRO_TOOL_CARDS=1 codexpro start
 ```
 
-The v13 cards cover selected workspace, analysis, change, Git, handoff,
-CodingTask, Goal, and terminal results. Reads and searches stay in normal chat output. After updating
-the connector, refresh its ChatGPT plugin connection once so it loads the new
-widget resource. The legacy implicit documentation-site domain is omitted so
-ChatGPT can use its default sandbox. Set `CODEXPRO_WIDGET_DOMAIN` only to a
-dedicated HTTPS component origin that you control.
+The current v15 cards cover selected workspace, analysis, change, Git, handoff,
+CodingTask, Goal, and terminal results. Reads and searches stay in normal chat
+output. v14 through v8 remain compatibility resources. ChatGPT may cache a UI
+resource by URI, so every renderer-payload change gets a new URI: a stale v13
+cache prompted v14, and the later authoritative changed-file-count UI required
+v15. After updating the connector, refresh its ChatGPT plugin connection once so
+it loads the current widget resource. The legacy implicit documentation-site
+domain is omitted so ChatGPT can use its default sandbox. Set
+`CODEXPRO_WIDGET_DOMAIN` only to a dedicated HTTPS component origin that you
+control.
 
 ## Public URL Options
 
@@ -305,9 +309,14 @@ CodingTask never commits, merges, pushes, opens a PR, or deletes its worktree au
 
 ## Pro-Orchestrated Goals (Unreleased)
 
-Use a Goal when Pro should decompose a larger request and supervise multiple isolated CodingTasks. The ordinary Chat flow is:
+Use a Goal when Pro should decompose a larger request and supervise multiple
+isolated CodingTasks. Goal orchestration requires POSIX advisory locking. In
+this release every Goal tool is unsupported and intentionally hidden on
+Windows, and `server_config.goalOrchestration.supported` reports `false` with
+the platform reason. Windows users can continue to use Direct coding and
+independent CodingTasks, including Direct↔Codex ownership transfer.
 
-Goal orchestration requires POSIX advisory locking. In this release every Goal tool is unsupported and intentionally hidden on Windows, and `server_config.goalOrchestration.supported` reports `false` with the platform reason. Windows users can continue to use Direct coding and independent CodingTasks, including Direct↔Codex ownership transfer.
+The supervised ordinary-Chat flow is:
 
 ```text
 propose_goal (inert plan + contract fingerprint)
@@ -324,7 +333,67 @@ approve_goal (records approval; still starts nothing)
 
 Goal workers use the configured Codex model and reasoning effort, defaulting to `gpt-5.6-sol` and `high`. They always write isolated CodingTask worktrees. Pro controls work assignment and integration; worker Blackboard records can report discoveries, contracts, blockers, paths, and verification but cannot change the approved work graph or publish decisions.
 
-The current unreleased slice accepts `execution_policy=supervised` with `workspace_policy=isolated` or `live`, one turn per worker, and zero automatic retries. Live changes only the separately approved source-effect step: workers and the private Pro integration worktree remain isolated. After `review_goal`, `project_goal` requires the exact returned integration HEAD and review fingerprint plus a stable idempotency key and explicit confirmation. It never projects unreviewed work. Parallel detached workers survive Chat or connector disconnects, but Pro must still refresh, review, integrate, and start newly unblocked dependency work. Persistent autonomous scheduling and automatic multi-turn/retry behavior remain roadmap capabilities.
+The current unreleased slice supports two separately fingerprinted execution
+policies. `supervised` accepts `workspace_policy=isolated` or `live`, one turn
+per worker, and zero automatic retries. Pro explicitly refreshes, reviews, and
+integrates each result and starts newly unblocked dependency work. Live changes
+only the separately approved source-effect step: workers and the private Pro
+integration worktree remain isolated. After `review_goal`, `project_goal`
+requires the exact returned integration HEAD and review fingerprint plus a
+stable idempotency key and explicit confirmation. It never projects unreviewed
+work.
+
+`persistent` is a stricter Isolated-only contract: its Goal `commands` list is
+empty, network is disabled, every source-effect permission is false, each worker
+gets one turn, and there are zero fresh automatic retries. After explicit propose → approve →
+start, the detached local scheduler launches dependency-ready workers in
+parallel and mechanically integrates only terminal, provenance-verified,
+path-policy-visible patches into the private Goal integration worktree. It then
+advances the approved dependency graph without needing the Chat page to stay
+open:
+
+```text
+propose_goal (persistent + isolated)
+  -> approve_goal
+  -> start_goal
+  -> local scheduler runs parallel workers and dependency integration
+  -> waiting_review (stop reason: semantic_review)
+  -> reconnect with get_goal / review_goal
+  -> Pro judges completion; any later source action needs separate user authority outside this Persistent contract
+```
+
+This is local persistence, not ChatGPT's built-in Scheduled Tasks and not
+offline Pro judgment. The computer and detached scheduler process must remain
+running while work progresses; the CodexPro server must be available to start,
+control, or reconnect to it. The scheduler cannot invent work, reinterpret completion
+criteria, complete a Goal, project/apply source changes, stage, commit, merge,
+push, or open a PR. The verified Phase 8 contract ends at private integration
+and `waiting_review`; multi-turn workers and fresh automatic retries remain
+roadmap work. Recovering the same reserved attempt after a crash or reconnect
+does not create a fresh retry. Worker failure/cancellation, stale terminal
+provenance, out-of-scope or blocked content, and scheduler safety errors stop or
+fail execution closed; the scheduler never replans or creates a replacement
+attempt on its own.
+
+`pause_goal` durably closes the scheduling gate: already-running worker
+processes may finish, but no new launch, integration, or dependency advancement
+begins after the pause linearizes. `resume_goal` is an explicit, idempotent
+execution action against the same approved fingerprint and resource envelope;
+it does not rerun completed work. `cancel_goal` fences and terminates active
+workers and becomes terminal, but never reverts source, deletes worktrees, or
+performs another source effect. `get_goal`, `list_goals`, and `review_goal` are
+passive; `refresh_goal` is store-only. Reading or reconnecting never silently
+resumes execution.
+
+This Phase 8 path is verified on a supported POSIX host through actual ordinary
+Chat: Goal `goal_cd1d3bf868c2bdade5b1c7af` continued after navigation away,
+ran real `gpt-5.6-sol`/`high` A/B workers in parallel followed by a summary
+dependency, then stopped for semantic review with exactly `a.md`, `b.md`, and
+`summary.md` in private integration while source HEAD/index/refs stayed
+unchanged. The built HTTP/MCP flow also passed with an installed real Codex App
+Server, including recovery, interruption, authoritative review counts, and
+process cleanup. Native Windows execution was not run because Goal
+orchestration is unsupported there by contract.
 
 Every Live projection holds a per-repository lock, checks the exact approved source HEAD and changed-path file/index state, and writes a durable journal before changing source. Unrelated pre-existing tracked, staged, and untracked work is preserved. A retry with the same key recovers from the journal; an external edit on a Goal-owned path is never overwritten and leaves the projection `recovery_required` for user action. Unsupported symlink, submodule, conflicted-index, or non-regular-file topology fails closed.
 

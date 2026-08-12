@@ -380,6 +380,133 @@ assert.match(liveRecoveryGoal.root.innerHTML, /Recovery required/);
 assert.match(liveRecoveryGoal.root.innerHTML, /external same-path edit/);
 assert.match(liveRecoveryGoal.root.innerHTML, /retry only with the same key or explicitly revert/i);
 
+const proposedPersistentGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "propose_goal",
+      available_actions: [{ tool: "approve_goal", label: "Approve exact contract" }],
+      goal: {
+        goalId: "goal_1123456789abcdef01234567",
+        title: "Persistent dependency scheduler",
+        lifecycle: "proposed",
+        revision: 1,
+        executionPolicy: "persistent",
+        workspacePolicy: "isolated",
+        permissions: { commands: [], sourceEffects: { apply: false, commit: false, push: false, draftPr: false } },
+        limits: { maxTurnsPerWorker: 1, maxRetriesPerWorker: 0 },
+        baseSha: "a".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "pending" },
+        completionCriteria: ["Pro reviews the private integration checkpoint"],
+        blackboard: [],
+        work: [{ workId: "work_one", title: "Implement bounded change", status: "planned", dependsOn: [] }]
+      }
+    }
+  }
+});
+assert.match(proposedPersistentGoal.root.innerHTML, /Persistent/);
+assert.match(proposedPersistentGoal.root.innerHTML, /automatic dependency scheduling and deterministic private integration/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /never source application or completion/i);
+assert.match(proposedPersistentGoal.root.innerHTML, /Approve exact contract/);
+
+const strandedPersistentGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "get_goal",
+      scheduler_alive: false,
+      scheduler_stranded: true,
+      recovery_needed: true,
+      scheduler_health_authority: "read_only_observation",
+      scheduler: { status: "failed", runner_alive: false, stranded: true, recovery_needed: true, recovery_action: "start_goal", start_key: "persistent-start" },
+      available_actions: [
+        { tool: "start_goal", label: "Recover scheduler" },
+        { tool: "cancel_goal", label: "Cancel Goal" }
+      ],
+      goal: {
+        goalId: "goal_2123456789abcdef01234567",
+        title: "Recover persistent scheduling",
+        lifecycle: "running",
+        revision: 6,
+        executionPolicy: "persistent",
+        workspacePolicy: "isolated",
+        permissions: { sourceEffects: { apply: false } },
+        baseSha: "a".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "approved" },
+        completionCriteria: ["Scheduler reaches Pro review"],
+        blackboard: [],
+        work: [{ workId: "work_one", title: "Implement bounded change", status: "running", dependsOn: [] }]
+      }
+    }
+  }
+});
+assert.match(strandedPersistentGoal.root.innerHTML, /Observed stranded · recovery needed/i);
+assert.match(strandedPersistentGoal.root.innerHTML, /passive health observation/i);
+assert.match(strandedPersistentGoal.root.innerHTML, /Recover scheduler/);
+assert.match(strandedPersistentGoal.root.innerHTML, /passive reads never relaunch work/i);
+
+const reviewedPersistentGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "review_goal",
+      changed_files_count: 3,
+      review: {
+        changedFileCount: 0,
+        changedPaths: ["src/a.txt", "src/b.txt", "src/c.txt"],
+        additions: 3,
+        deletions: 0,
+        diff: "diff --git a/src/a.txt b/src/a.txt"
+      },
+      goal: {
+        goalId: "goal_4123456789abcdef01234567",
+        title: "Review persistent integration",
+        lifecycle: "waiting_review",
+        revision: 9,
+        executionPolicy: "persistent",
+        workspacePolicy: "isolated",
+        permissions: { sourceEffects: { apply: false } },
+        baseSha: "a".repeat(40),
+        integrationHeadSha: "c".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "approved" },
+        completionCriteria: ["Review three integrated files"],
+        blackboard: [],
+        work: [{ workId: "work_one", title: "Integrate files", status: "integrated", dependsOn: [] }]
+      }
+    }
+  }
+});
+assert.match(reviewedPersistentGoal.root.innerHTML, />3<\/div><div class="metric-label">changed files/);
+assert.match(reviewedPersistentGoal.root.innerHTML, /Automatic private integration is complete/i);
+
+const cancelingPersistentGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "cancel_goal",
+      scheduler: { status: "stopped", runner_alive: false },
+      available_actions: [{ tool: "refresh_goal", label: "Refresh cancellation" }],
+      goal: {
+        goalId: "goal_3123456789abcdef01234567",
+        title: "Drain persistent scheduling",
+        lifecycle: "canceling",
+        revision: 8,
+        executionPolicy: "persistent",
+        workspacePolicy: "isolated",
+        permissions: { sourceEffects: { apply: false } },
+        baseSha: "a".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "approved" },
+        completionCriteria: ["Cancel workers"],
+        blackboard: [],
+        work: [{ workId: "work_one", title: "Drain child", status: "running", dependsOn: [] }]
+      }
+    }
+  }
+});
+assert.match(cancelingPersistentGoal.root.innerHTML, /Cancellation authority is persisted/i);
+assert.match(cancelingPersistentGoal.root.innerHTML, /store-only reconciliation/i);
+assert.match(cancelingPersistentGoal.root.innerHTML, /Refresh cancellation/);
+
 const transitionTask = mount({
   toolOutput: {
     structuredContent: {

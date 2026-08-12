@@ -1,14 +1,55 @@
+import { createHash } from "node:crypto";
+
 export const GOAL_STATE_VERSION = 1 as const;
 export const GOAL_ID_PATTERN = /^goal_[a-f0-9]{24}$/;
 export const GOAL_WORK_ID_PATTERN = /^work_[a-z0-9][a-z0-9_-]{0,63}$/;
 
-export type GoalLifecycle = "proposed" | "approved" | "running" | "paused" | "waiting_review" | "completed" | "failed" | "canceled";
+export type GoalLifecycle = "proposed" | "approved" | "running" | "paused" | "canceling" | "waiting_review" | "completed" | "failed" | "canceled";
 export type GoalExecutionPolicy = "supervised" | "persistent";
 export type GoalWorkspacePolicy = "live" | "isolated";
 export type GoalApprovalStatus = "pending" | "approved" | "rejected";
-export type GoalWorkStatus = "planned" | "ready" | "running" | "waiting_review" | "integrating" | "integrated" | "blocked" | "failed" | "canceled";
+export type GoalWorkStatus = "planned" | "ready" | "launching" | "running" | "waiting_review" | "integrating" | "integrated" | "blocked" | "failed" | "canceled";
 export type GoalBlackboardKind = "discovery" | "contract" | "file_ownership" | "question" | "answer" | "blocker" | "verification" | "decision";
-export type GoalEventKind = "proposed" | "approved" | "approval_rejected" | "started" | "paused" | "resumed" | "canceled" | "work_updated" | "blackboard_published" | "integration_updated" | "projection_updated" | "completed" | "failed";
+export type GoalEventKind = "proposed" | "approved" | "approval_rejected" | "started" | "paused" | "resumed" | "cancel_requested" | "canceled" | "scheduler_updated" | "work_updated" | "blackboard_published" | "integration_updated" | "projection_updated" | "completed" | "failed";
+
+export interface GoalContentPolicySnapshot {
+  version: 1;
+  algorithm: "blocked-globs-ci-v1";
+  blockedGlobs: string[];
+  fingerprint: string;
+}
+
+export type GoalSchedulerStatus = "queued" | "running" | "stopped" | "failed";
+
+export interface GoalSchedulerAuthority {
+  epoch: number;
+  leaseId: string;
+  startKey: string;
+  definitionFingerprint: string;
+  status: GoalSchedulerStatus;
+  requestedAt: string;
+  acquiredAt?: string;
+  stoppedAt?: string;
+  stopReason?: "paused" | "canceled" | "failed" | "semantic_review" | "scheduler_failed";
+  error?: string;
+}
+
+export interface GoalCancelRequest {
+  cancelKey: string;
+  reason?: string;
+  requestedAt: string;
+}
+
+export interface GoalWorkLaunchReservation {
+  launchKey: string;
+  taskKey: string;
+  taskId: string;
+  schedulerEpoch: number;
+  schedulerLeaseId: string;
+  operationId: string;
+  baseSha: string;
+  reservedAt: string;
+}
 
 export interface GoalResourceLimits {
   maxConcurrency: number;
@@ -42,6 +83,7 @@ export interface GoalWorkItem {
   parallelGroup?: string;
   fileGlobs: string[];
   status: GoalWorkStatus;
+  launch?: GoalWorkLaunchReservation;
   baseSha?: string;
   codingTaskId?: string;
   operationId?: string;
@@ -165,6 +207,7 @@ export interface GoalState {
   workerEffort: "low" | "medium" | "high" | "xhigh";
   limits: GoalResourceLimits;
   permissions: GoalPermissions;
+  contentPolicy?: GoalContentPolicySnapshot;
   lifecycle: GoalLifecycle;
   approval: GoalApproval;
   sourceRoot: string;
@@ -179,6 +222,8 @@ export interface GoalState {
   pauseKey?: string;
   resumeKey?: string;
   cancelKey?: string;
+  cancelRequest?: GoalCancelRequest;
+  scheduler?: GoalSchedulerAuthority;
   revision: number;
   work: GoalWorkItem[];
   blackboard: GoalBlackboardRecord[];
@@ -193,10 +238,10 @@ export interface GoalState {
   live?: GoalLiveState;
 }
 
-const LIFECYCLES = new Set<GoalLifecycle>(["proposed", "approved", "running", "paused", "waiting_review", "completed", "failed", "canceled"]);
-const WORK_STATUSES = new Set<GoalWorkStatus>(["planned", "ready", "running", "waiting_review", "integrating", "integrated", "blocked", "failed", "canceled"]);
+const LIFECYCLES = new Set<GoalLifecycle>(["proposed", "approved", "running", "paused", "canceling", "waiting_review", "completed", "failed", "canceled"]);
+const WORK_STATUSES = new Set<GoalWorkStatus>(["planned", "ready", "launching", "running", "waiting_review", "integrating", "integrated", "blocked", "failed", "canceled"]);
 const BLACKBOARD_KINDS = new Set<GoalBlackboardKind>(["discovery", "contract", "file_ownership", "question", "answer", "blocker", "verification", "decision"]);
-const EVENT_KINDS = new Set<GoalEventKind>(["proposed", "approved", "approval_rejected", "started", "paused", "resumed", "canceled", "work_updated", "blackboard_published", "integration_updated", "projection_updated", "completed", "failed"]);
+const EVENT_KINDS = new Set<GoalEventKind>(["proposed", "approved", "approval_rejected", "started", "paused", "resumed", "cancel_requested", "canceled", "scheduler_updated", "work_updated", "blackboard_published", "integration_updated", "projection_updated", "completed", "failed"]);
 const FULL_SHA = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
 
@@ -295,6 +340,21 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
   for (const field of ["apply", "commit", "push", "draftPr"] as const) {
     if (typeof value.permissions.sourceEffects[field] !== "boolean") invalid(`permissions.sourceEffects.${field}`);
   }
+  if (value.contentPolicy !== undefined) {
+    if (!record(value.contentPolicy) || value.contentPolicy.version !== 1 || value.contentPolicy.algorithm !== "blocked-globs-ci-v1") invalid("contentPolicy");
+    stringArray(value.contentPolicy.blockedGlobs, "contentPolicy.blockedGlobs", 500, 1_000);
+    if (typeof value.contentPolicy.fingerprint !== "string" || !HASH.test(value.contentPolicy.fingerprint)) invalid("contentPolicy.fingerprint");
+    const canonicalGlobs = [...new Set((value.contentPolicy.blockedGlobs as string[]).map((glob) => glob.trim()))].sort();
+    if ((value.contentPolicy.blockedGlobs as string[]).some((glob) => glob !== glob.trim()) || JSON.stringify(canonicalGlobs) !== JSON.stringify(value.contentPolicy.blockedGlobs)) invalid("contentPolicy.blockedGlobs canonical order");
+    const expectedPolicyFingerprint = createHash("sha256").update(`codexpro-goal-content-policy-ci-v1\0${JSON.stringify(canonicalGlobs)}`).digest("hex");
+    if (value.contentPolicy.fingerprint !== expectedPolicyFingerprint) invalid("contentPolicy fingerprint binding");
+  }
+  if (value.executionPolicy === "persistent") {
+    if (value.workspacePolicy !== "isolated") invalid("persistent workspacePolicy");
+    if (value.contentPolicy === undefined) invalid("persistent contentPolicy");
+    if (value.limits.maxTurnsPerWorker !== 1 || value.limits.maxRetriesPerWorker !== 0) invalid("persistent limits");
+    if (value.permissions.commands.length || value.permissions.network || Object.values(value.permissions.sourceEffects).some(Boolean)) invalid("persistent permissions");
+  }
   if (!LIFECYCLES.has(value.lifecycle as GoalLifecycle)) invalid("lifecycle");
   if (!record(value.approval)) invalid("approval");
   if (!["pending", "approved", "rejected"].includes(String(value.approval.status))) invalid("approval.status");
@@ -315,6 +375,37 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
   stringField(value.pauseKey, "pauseKey", 160, true);
   stringField(value.resumeKey, "resumeKey", 160, true);
   stringField(value.cancelKey, "cancelKey", 160, true);
+  if (value.cancelRequest !== undefined) {
+    if (!record(value.cancelRequest)) invalid("cancelRequest");
+    stringField(value.cancelRequest.cancelKey, "cancelRequest.cancelKey", 160);
+    stringField(value.cancelRequest.reason, "cancelRequest.reason", 2_000, true);
+    timestamp(value.cancelRequest.requestedAt, "cancelRequest.requestedAt");
+    if (value.cancelKey !== value.cancelRequest.cancelKey || !["canceling", "canceled"].includes(String(value.lifecycle))) invalid("cancelRequest authority");
+  }
+  if (value.scheduler !== undefined) {
+    if (!record(value.scheduler)) invalid("scheduler");
+    integer(value.scheduler.epoch, "scheduler.epoch", 1, Number.MAX_SAFE_INTEGER);
+    stringField(value.scheduler.leaseId, "scheduler.leaseId", 160);
+    stringField(value.scheduler.startKey, "scheduler.startKey", 160);
+    if (typeof value.scheduler.definitionFingerprint !== "string" || !HASH.test(value.scheduler.definitionFingerprint)) invalid("scheduler.definitionFingerprint");
+    if (!["queued", "running", "stopped", "failed"].includes(String(value.scheduler.status))) invalid("scheduler.status");
+    timestamp(value.scheduler.requestedAt, "scheduler.requestedAt");
+    timestamp(value.scheduler.acquiredAt, "scheduler.acquiredAt", true);
+    timestamp(value.scheduler.stoppedAt, "scheduler.stoppedAt", true);
+    if (value.scheduler.stopReason !== undefined && !["paused", "canceled", "failed", "semantic_review", "scheduler_failed"].includes(String(value.scheduler.stopReason))) invalid("scheduler.stopReason");
+    stringField(value.scheduler.error, "scheduler.error", 20_000, true);
+    if (value.executionPolicy !== "persistent") invalid("scheduler executionPolicy");
+    if (value.startKey !== value.scheduler.startKey) invalid("scheduler startKey authority");
+    if (value.scheduler.status === "queued" && (value.scheduler.acquiredAt !== undefined || value.scheduler.stoppedAt !== undefined || value.scheduler.stopReason !== undefined)) invalid("scheduler queued timestamps");
+    if (value.scheduler.status === "running" && (value.scheduler.acquiredAt === undefined || value.scheduler.stoppedAt !== undefined || value.scheduler.stopReason !== undefined)) invalid("scheduler running timestamps");
+    if (["stopped", "failed"].includes(String(value.scheduler.status)) && (value.scheduler.acquiredAt === undefined || value.scheduler.stoppedAt === undefined || value.scheduler.stopReason === undefined)) invalid("scheduler stopped authority");
+    if (value.scheduler.status === "queued" && !["running", "canceling"].includes(String(value.lifecycle))) invalid("scheduler queued lifecycle");
+    if (value.scheduler.status === "failed" && value.lifecycle !== "failed") invalid("scheduler failed lifecycle");
+    if (value.scheduler.status === "stopped") {
+      const expectedLifecycle = value.scheduler.stopReason === "paused" ? "paused" : value.scheduler.stopReason === "canceled" ? "canceled" : value.scheduler.stopReason === "semantic_review" ? "waiting_review" : "failed";
+      if (value.lifecycle !== expectedLifecycle && !(value.lifecycle === "canceling" && value.cancelRequest !== undefined)) invalid("scheduler stopped lifecycle");
+    }
+  }
   integer(value.revision, "revision", 1, Number.MAX_SAFE_INTEGER);
   if (!Array.isArray(value.work) || value.work.length < 1 || value.work.length > 50) invalid("work");
   for (const [index, item] of value.work.entries()) {
@@ -328,6 +419,26 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
     stringField(item.parallelGroup, `work[${index}].parallelGroup`, 100, true);
     stringArray(item.fileGlobs, `work[${index}].fileGlobs`, 100, 1_000);
     if (!WORK_STATUSES.has(item.status as GoalWorkStatus)) invalid(`work[${index}].status`);
+    if (item.launch !== undefined) {
+      if (!record(item.launch)) invalid(`work[${index}].launch`);
+      stringField(item.launch.launchKey, `work[${index}].launch.launchKey`, 160);
+      stringField(item.launch.taskKey, `work[${index}].launch.taskKey`, 160);
+      if (typeof item.launch.taskId !== "string" || !/^task_[a-f0-9]{24}$/.test(item.launch.taskId)) invalid(`work[${index}].launch.taskId`);
+      integer(item.launch.schedulerEpoch, `work[${index}].launch.schedulerEpoch`, 1, Number.MAX_SAFE_INTEGER);
+      stringField(item.launch.schedulerLeaseId, `work[${index}].launch.schedulerLeaseId`, 160);
+      stringField(item.launch.operationId, `work[${index}].launch.operationId`, 160);
+      if (typeof item.launch.baseSha !== "string" || !FULL_SHA.test(item.launch.baseSha)) invalid(`work[${index}].launch.baseSha`);
+      timestamp(item.launch.reservedAt, `work[${index}].launch.reservedAt`);
+      if (value.executionPolicy !== "persistent") invalid(`work[${index}].launch executionPolicy`);
+      if (!["launching", "running", "waiting_review", "integrating", "integrated", "failed", "canceled"].includes(String(item.status))) invalid(`work[${index}].launch status`);
+      if (item.operationId !== undefined && item.operationId !== item.launch.operationId) invalid(`work[${index}].launch operation binding`);
+      if (item.baseSha !== undefined && item.baseSha !== item.launch.baseSha) invalid(`work[${index}].launch base binding`);
+      if (item.codingTaskId !== undefined && item.codingTaskId !== item.launch.taskId) invalid(`work[${index}].launch task binding`);
+      const expectedTaskKey = `goal:${goalId}:${item.workId}`;
+      const expectedTaskId = `task_${createHash("sha256").update(`${value.sourceGitCommonDir}\0${expectedTaskKey}`).digest("hex").slice(0, 24)}`;
+      if (item.launch.launchKey !== `goal:${goalId}:${item.workId}:launch:1` || item.launch.taskKey !== expectedTaskKey || item.launch.taskId !== expectedTaskId || item.launch.operationId !== `goal:${goalId.slice(5)}:${item.workId}:run:1`) invalid(`work[${index}].launch deterministic identity`);
+      if (record(value.scheduler) && (item.launch.schedulerEpoch as number) > (value.scheduler.epoch as number)) invalid(`work[${index}].launch future epoch`);
+    }
     if (item.baseSha !== undefined && (typeof item.baseSha !== "string" || !FULL_SHA.test(item.baseSha))) invalid(`work[${index}].baseSha`);
     if (item.codingTaskId !== undefined && (typeof item.codingTaskId !== "string" || !/^task_[a-f0-9]{24}$/.test(item.codingTaskId))) invalid(`work[${index}].codingTaskId`);
     stringField(item.operationId, `work[${index}].operationId`, 160, true);
@@ -338,7 +449,10 @@ export function assertGoalState(value: unknown, expectedGoalId?: string): assert
     stringField(item.error, `work[${index}].error`, 20_000, true);
     timestamp(item.startedAt, `work[${index}].startedAt`, true);
     timestamp(item.finishedAt, `work[${index}].finishedAt`, true);
+    if (value.executionPolicy === "persistent" && ["launching", "running", "waiting_review", "integrating", "integrated"].includes(String(item.status)) && item.launch === undefined) invalid(`work[${index}].launch required`);
   }
+  if (value.lifecycle === "canceling" && value.cancelRequest === undefined) invalid("canceling request");
+  if (value.executionPolicy === "persistent" && value.startKey !== undefined && value.scheduler === undefined) invalid("persistent scheduler authority");
   assertGoalDag(value.work as GoalWorkItem[]);
   if (!Array.isArray(value.blackboard) || value.blackboard.length > 500) invalid("blackboard");
   for (const [index, item] of value.blackboard.entries()) {

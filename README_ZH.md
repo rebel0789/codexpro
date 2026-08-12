@@ -138,7 +138,7 @@ ChatGPT Web 可以操作：
 
 默认工具数量较少是故意的：ChatGPT 面对少量高信号工具时更稳定。workspace open 默认不做 skill discovery；需要 repo-local skills 时传 `include_skills=true`，需要 user/plugin skills 时再加 `include_global_skills=true`。然后用 `load_skill` 按名称、source 和显示出的 path 加载需要的 `SKILL.md`；如果仍有重名匹配，CodexPro 会报歧义错误，不会随便选一个，也不会把几十个 skill 变成单独 action。
 
-CodexPro 默认给 ChatGPT 暴露纯 MCP 工具描述，不附带 widget/card metadata。需要紧凑 v13 卡片时用 `CODEXPRO_TOOL_CARDS=1` 启动；workspace、分析、改动、Git、handoff、CodingTask、Goal 和 bash 验证会使用结构化卡片，read/search 保持为普通聊天输出。终端输出和 raw diff 会折叠或截断，避免在聊天里刷出大段原始数据。更新 connector 后，刷新一次 ChatGPT plugin connection 以加载新的 widget resource。隐式的旧文档站域名不会再作为 iframe origin 声明，因此 ChatGPT 可以使用默认 sandbox；只有在你拥有独立的 HTTPS component origin 时才设置 `CODEXPRO_WIDGET_DOMAIN`，正式提交 app 前也应配置这种独立域名。
+CodexPro 默认给 ChatGPT 暴露纯 MCP 工具描述，不附带 widget/card metadata。需要紧凑卡片时用 `CODEXPRO_TOOL_CARDS=1` 启动；当前资源是 v15，v14 到 v8 继续作为兼容资源。workspace、分析、改动、Git、handoff、CodingTask、Goal 和 bash 验证会使用结构化卡片，read/search 保持为普通聊天输出。ChatGPT 可能按 URI 缓存 UI，因此 renderer payload 每次变化都必须使用新 URI：v13 的旧缓存问题促成 v14，之后权威 changed-file-count UI 的变化又要求 v15。终端输出和 raw diff 会折叠或截断，避免在聊天里刷出大段原始数据。更新 connector 后，刷新一次 ChatGPT plugin connection 以加载当前 widget resource。隐式的旧文档站域名不会再作为 iframe origin 声明，因此 ChatGPT 可以使用默认 sandbox；只有在你拥有独立的 HTTPS component origin 时才设置 `CODEXPRO_WIDGET_DOMAIN`，正式提交 app 前也应配置这种独立域名。
 
 ## 其他启动方式
 
@@ -425,15 +425,23 @@ CodingTask 不会自动 commit、merge、push、创建 PR 或删除 worktree。�
 
 ## Pro 编排的 Goal（尚未发布）
 
-复杂任务可以由 Pro 先调用 `propose_goal` 保存一份不执行任何工作的指纹化计划。用户审查 Goal 卡片后，`approve_goal` 只记录对该精确契约的批准；`start_goal` 才会并行启动依赖已满足的隔离 CodingTask。之后由 Pro 显式刷新状态、审查 worker 证据、按依赖顺序集成、检查完整 diff，并针对所有完成标准记录最终判断。
-
 Goal 编排依赖 POSIX advisory lock。本版本在 Windows 上不支持并会隐藏全部 Goal 工具，`server_config.goalOrchestration.supported` 会返回 `false` 及平台原因。Windows 用户仍可使用 Direct coding 和独立 CodingTask，包括 Direct↔Codex 所有权切换。
 
-当前尚未发布的切片支持 supervised + isolated 或 supervised + live；每个 worker 一次 turn、零自动重试。Live 只改变单独批准的 source-effect 步骤：worker 与 Pro 的私有 integration worktree 始终隔离。`review_goal` 返回精确的 integration HEAD 和 review fingerprint；`project_goal` 只有在用户再次确认、revision/key 匹配且两者仍与权威复查一致时，才会投影该 checkpoint。
+复杂任务可以由 Pro 先调用 `propose_goal` 保存一份不执行任何工作的指纹化计划。用户审查 Goal 卡片后，`approve_goal` 只记录对该精确契约的批准；`start_goal` 才会启动执行。当前尚未发布的切片支持两个独立指纹化的执行策略。
+
+`supervised` 支持 isolated 或 live，每个 worker 一次 turn、零自动重试。Pro 显式刷新、审查并按依赖顺序集成结果，再启动新解锁的工作。Live 只改变单独批准的 source-effect 步骤：worker 与 Pro 的私有 integration worktree 始终隔离。`review_goal` 返回精确的 integration HEAD 和 review fingerprint；`project_goal` 只有在用户再次确认、revision/key 匹配且两者仍与权威复查一致时，才会投影该 checkpoint。
+
+`persistent` 是更严格的 Isolated-only 契约：Goal 的 `commands` 列表为空、network=false、全部 source-effect 权限为 false，每个 worker 一次 turn，零次新的自动重试。经过明确的 propose → approve → start 后，本地独立 scheduler 会并行启动依赖已满足的 worker，只把已终止且 provenance 与 path policy 均通过的 patch 机械地集成到私有 Goal integration worktree，再继续批准过的依赖图。用户可以离开 Chat 页面；最终状态是 `waiting_review`，stop reason 为 `semantic_review`。重新连接后使用 `get_goal` / `review_goal`，由 Pro 判断语义完成情况；任何后续源码操作都必须在这个 Persistent 契约之外获得用户单独授权。
+
+这属于本地持久执行，不是 ChatGPT 内置 Scheduled Tasks，也不是 Pro 在离线状态下继续判断。工作进行时电脑与独立 scheduler 进程必须保持运行；启动、控制或重新连接时需要 CodexPro server 可用。scheduler 不能发明新工作、重新解释完成标准、完成 Goal、project/apply 源码、stage、commit、merge、push 或创建 PR。已验证的 Phase 8 契约在私有集成与 `waiting_review` 停止；多轮 worker 和新的自动重试仍属于路线图。同一次已预留 attempt 在 crash/reconnect 后恢复，不算新的 retry。worker 失败/取消、过期 terminal provenance、scope/blocked-path 违规或 scheduler 安全错误都会停止或失败关闭；scheduler 不会自行 replan 或创建替代 attempt。
+
+`pause_goal` 会先持久关闭调度门；已运行的 worker 进程可能完成，但 pause 线性化后不会开始新的 launch、integration 或依赖推进。`resume_goal` 是针对同一批准指纹和资源 envelope 的显式幂等执行动作，不会重跑已完成工作。`cancel_goal` 会 fence 并终止活跃 worker，随后进入 terminal，但不会回滚源码、删除 worktree 或执行其他 source effect。`get_goal`、`list_goals`、`review_goal` 是被动读取，`refresh_goal` 只读写 store；读取或重新连接都不会暗中 resume。
+
+Phase 8 已在受支持的 POSIX 主机上通过真实 ordinary Chat 验证：Goal `goal_cd1d3bf868c2bdade5b1c7af` 在用户离开页面后继续，真实 `gpt-5.6-sol`/`high` A/B worker 并行运行，再执行 summary 依赖，最后停在 semantic review；私有集成只有 `a.md`、`b.md`、`summary.md`，source HEAD/index/refs 保持不变。使用已安装真实 Codex App Server 的 built HTTP/MCP 流程也通过了 recovery、pause/resume/cancel、权威 review count 和进程清理。由于 Goal 在 Windows 上按契约不受支持，因此没有运行原生 Windows 执行测试。
 
 每次 Live 投影都会取得 per-repository lock，检查批准的精确 HEAD 以及目标路径的文件/索引 CAS，并在写源工作区前保存持久 journal。既有但不相关的 tracked、staged、untracked 改动会保留；同 key 重试会从 journal 恢复。用户若修改 Goal 拥有的同一路径，系统不会覆盖，而会进入 `recovery_required`。symlink、submodule、冲突 index 或非普通文件会失败关闭。
 
-`cancel_goal` 不会自动回滚已经投影的源码。回滚必须单独确认 `revert_goal_projection`，并且只能按 latest-applied-first 的 LIFO 顺序执行；它复用相同的 lock、CAS、journal 和 no-overwrite 规则。完成最终判断后，若最终 Live checkpoint 已在源工作区，`apply_goal` 会 zero-write 地采用并封存它。任何 Goal source effect 都不会 stage、commit、merge、push 或创建 PR。worker 执行需要可信的 full bash；只操作源工作区的 project/revert/apply 只要求 workspace write，不需要 bash 或 Codex 可执行文件。持续自治调度和自动多轮/重试仍是路线图能力。
+`cancel_goal` 不会自动回滚已经投影的源码。回滚必须单独确认 `revert_goal_projection`，并且只能按 latest-applied-first 的 LIFO 顺序执行；它复用相同的 lock、CAS、journal 和 no-overwrite 规则。完成最终判断后，若最终 Live checkpoint 已在源工作区，`apply_goal` 会 zero-write 地采用并封存它。任何 Goal source effect 都不会 stage、commit、merge、push 或创建 PR。worker 执行需要可信的 full bash；只操作源工作区的 project/revert/apply 只要求 workspace write，不需要 bash 或 Codex 可执行文件。自动多轮与新的自动重试仍是路线图能力。
 
 ## 安全边界
 

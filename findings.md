@@ -35,7 +35,14 @@
 - A representative Supervised Live happy path passed in ordinary Chat through the installed private plugin and a real `gpt-5.6-sol`/`high` Codex App Server turn: exact integration review, separate projection approval, completion, and zero-write final adoption all used the intended public tool flow.
 - The durable evidence is Goal `goal_660f5139b15aae20456ed421` revision 13, CodingTask `task_aa18164b7d2a7357a6270545`, thread `019ff637-6f0f-75c0-b40f-e3d6f28ca8c6`, turn `019ff637-6fd9-7652-8835-aec10bc230f1`, integration `a4f0277f6822754ba0b9931b7a77e51ee36eb175`, review fingerprint `b6025428e44e79c0cd28770274fb9feda2bf68a571e31aeb5ea0547371c5068c`, and adopted projection `proj_32ac83deacc868d2f4799002`.
 - Source authority remained bounded: HEAD was unchanged with reported pre/post prefix `037e…`, the approved 2-line/70-byte file was the only projected source change, and the flow did not stage, commit, push, or open a PR.
-- The real v13 default sandbox-fallback card rendered without increasing the template error count. Repeated explicit endpoint-domain runs had intermittent card fetch errors, so that alternate card-delivery route remains an open surface-specific reliability limit; it does not convert the successful default-path Goal/source-effect flow into a failure.
+- The real v13 default sandbox-fallback card rendered without increasing the template error count, but Chat could retain stale renderer bytes when a payload changed under the same resource URI. The first cache-safe fix moved to v14; a later authoritative changed-file-count UI change correctly moved again to current v15. v14 through v8 remain compatibility resources.
+- OpenAI's long-running-work guidance treats pause/resume and return-for-decisions as explicit lifecycle boundaries, while its local automation guidance requires the user's computer to remain available for local-file work. CodexPro Persistent's actual execution authority is its detached local scheduler; the CodexPro server starts, controls, and reconnects to it. It does not claim ChatGPT built-in Scheduled Tasks or offline Pro judgment.
+- Phase 8 Persistent passed through the intended ordinary-Chat surface with Goal `goal_cd1d3bf868c2bdade5b1c7af`: explicit propose/approve/start, navigation away, real parallel `gpt-5.6-sol`/`high` A/B workers, then a dependent summary worker, followed by reconnect `get_goal` / `review_goal` at revision 20.
+- The real Persistent scheduler stopped at `waiting_review` with stop reason `semantic_review`. Private integration contained exactly `a.md`, `b.md`, and `summary.md` at reported integration HEAD prefix `e05a497…`; source HEAD/index/refs and the source target path were unchanged, so disconnected mechanical execution did not cross the source or semantic authority boundary.
+- The production built HTTP/MCP path also passed with an installed real Codex App Server. Verified behavior included disconnect/reconnect, pause/resume/cancel fencing, same-attempt reservation/restart idempotency, dependency-safe integration, passive reads, authoritative review, and clean scheduler/runner process termination.
+- Review counts must derive from the Goal base→private-integration HEAD diff, not private worktree status: internal integration commits make the worktree clean even while the Goal has real changes. The final API returns `changedFileCount=3`, `changed_files_count=3`, and the same three policy-visible paths.
+- Persistent Phase 8 deliberately remains one turn per worker and zero fresh retries. Same-attempt crash recovery preserves the original attempt identity; multi-turn continuation and a new automatic attempt remain separate later-phase authorities.
+- Native Windows execution was not run. This is not a coverage gap for a supported path: the entire Goal surface is intentionally hidden/unsupported on Windows because the accepted GoalStore locking contract requires POSIX advisory locks; Direct and independent CodingTask remain supported.
 
 ## Technical Decisions
 | Decision | Rationale |
@@ -58,6 +65,11 @@
 | Restrict revert to latest applied projection (LIFO) | Earlier inverses are unsafe while a later dependent projection remains applied |
 | Adopt an already-projected final checkpoint with zero writes | Separates final approval/sealing from redundant filesystem mutation |
 | Fail closed for all Goal orchestration on Windows | Avoids presenting an unsafe process-local or stale-lock fallback as equivalent to the POSIX advisory-locking contract; Direct and CodingTask provide the supported Windows paths |
+| Make `persistent` a separately fingerprinted Isolated execution contract | Automatic dependency scheduling and mechanical private integration are materially different authority from supervised per-worker integration and cannot be inferred from an older approval |
+| Keep passive reads passive and require explicit execution recovery | `get_goal`, `list_goals`, and `review_goal` may observe scheduler health but never resolve Codex, reconcile, spawn, or persist; the original `start_key` or an explicit persistent resume owns recovery |
+| Stop persistent execution at final Pro review | The local engine may execute the approved DAG and deterministic policy checks, but it cannot invent work, reinterpret criteria, complete the Goal, project/apply source changes, or make new semantic decisions while Pro is absent |
+| Persist cancel/pause authority before touching child processes | A detached scheduler makes child-first cancellation or unfenced launch/integration races unacceptable; lifecycle intent must dominate every later side effect |
+| Keep Phase 8 single-turn and zero-retry | Same-attempt crash recovery is required now, while new continuation turns and fresh automatic attempts remain separate Phase 9/10 contracts |
 
 ## Issues Encountered
 | Issue | Resolution |
@@ -66,15 +78,19 @@
 | Pro treated a generic `open_workspace` denial for the private Goal worktree as a Goal verification failure | Keep the denial, add integrated `git diff --check` to `review_goal`, and explicitly route Pro away from generic workspace tools |
 | Early Live projection draft accepted a caller fingerprint without authoritative comparison | Recompute the full review attestation under the locked operation and reject any HEAD/fingerprint mismatch before preparing source artifacts |
 | Early path classification recorded each current path twice | Keep one current observation per manifest path so apply/revert CAS indexes remain aligned |
-| Explicit endpoint-domain runs intermittently failed to fetch the v13 Goal card | Keep the verified default sandbox-fallback route as the current real-web evidence and track endpoint-domain delivery as a separate reliability follow-up; do not infer a Goal/source-effect failure from a card-only fetch error |
+| Chat could fetch stale v13 Goal renderer bytes after the payload changed without a resource-URI change | Treat the UI resource URI as part of the renderer contract: v14 carried the initial cache-key fix, and the later changed-file-count UI moved to current v15; retain v14–v8 only for legacy descriptors |
+| Persistent review reported zero changed files because it counted clean integration-worktree status | Count policy-visible paths from the authoritative Goal base→integration HEAD diff and keep `changedFileCount`, `changed_files_count`, and `changedPaths` consistent |
+| Stopped scheduler fixtures could leave an owned process after state cleanup | Terminate/continue owned children before deleting fixtures, then verify scheduler, CodingTask runner, and App Server PIDs are absent from the final process table |
 
 ## Resources
 - https://developers.openai.com/plugins/build/mcp-server
 - https://developers.openai.com/plugins/build/chatgpt-ui
 - https://developers.openai.com/plugins/plan/tools
 - https://developers.openai.com/plugins/reference
+- https://learn.chatgpt.com/docs/long-running-work
+- https://learn.chatgpt.com/docs/automations
 - [Ordinary Chat Supervised Live verification](https://chatgpt.com/c/6a7c7597-7e44-83ee-b412-4248eea6202e)
-- `/Users/lyeun0314/Desktop/coding/codexpro-upstream/task_plan.md`
+- [Task plan](task_plan.md)
 
 ## Visual/Browser Findings
 - Prior real Chat verification rendered the CodingTask card in both ordinary Chat and Work.
@@ -82,4 +98,5 @@
 - Ordinary Chat rendered multiple CodingTask cards across Direct creation, Codex collaboration, review, and ownership transfer. The final transcript included task/workspace/revision/thread/turn identifiers and a completed verification report.
 - During the active-to-review transition, the visible card clearly said `Waiting review` but also showed `0 changed files`, `+0 additions`, `−0 deletions`, and no tests, which conflicts with the actual changed probe file.
 - After refreshing the installed plugin, ordinary Chat rendered v11 proposal, approval, running/review, integration, and final `Completed` Goal cards. The final card showed both work items and explained that source application still requires a separate approved action.
-- In the real Supervised Live flow, the v13 default sandbox-fallback card rendered and the template error count stayed flat. Explicit endpoint-domain variants intermittently failed at card fetch, so their delivery reliability is not yet verified.
+- In the real Supervised Live flow, the v13 default sandbox-fallback card rendered and the template error count stayed flat; the later stale-cache finding established that renderer changes must use a new URI.
+- In the real Persistent flow, reconnect mounted the v14 Goal card after the user navigated away, and the authoritative tools showed the scheduler stopped for semantic review. The subsequent changed-file-count renderer change is shipped under current v15 and passed widget/HTTP regressions; v15 itself was not claimed as a separate real-Chat mount in that run.

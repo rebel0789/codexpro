@@ -50,6 +50,15 @@ import {
 import { resolveCodingTaskBaseSha } from "./codingTaskWorktree.js";
 import { approveGoal, completeGoal, getGoal, listGoals, pauseGoal, proposeGoal, publishGoalBlackboard, resumeGoal } from "./goalOps.js";
 import type { GoalState } from "./goalState.js";
+import { createGoalContentPolicySnapshot } from "./goalPolicy.js";
+import {
+  getPersistentGoalScheduler,
+  reconcilePersistentGoalCancellation,
+  requestPersistentGoalCancel,
+  resumePersistentGoal,
+  startPersistentGoal,
+  type GoalSchedulerView
+} from "./goalScheduler.js";
 import { applyCompletedGoal, cancelGoal, integrateGoalWork, projectGoal, refreshGoal, revertGoalProjection, reviewGoal, startGoal } from "./goalExecution.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -226,6 +235,67 @@ function goalStructured(goal: GoalState): Record<string, unknown> {
   };
 }
 
+function goalSchedulerStructured(view: GoalSchedulerView | undefined): Record<string, unknown> {
+  if (!view || view.goal.executionPolicy !== "persistent") return {
+    scheduler: null,
+    scheduler_alive: false,
+    scheduler_stranded: false,
+    recovery_needed: false,
+    available_actions: []
+  };
+  const authority = view.goal.scheduler;
+  const runtime = view.runtime;
+  const requestedAt = authority?.requestedAt ? Date.parse(authority.requestedAt) : Number.NaN;
+  const queuedIsStale = authority?.status === "queued" && Number.isFinite(requestedAt) && Date.now() - requestedAt > 5_000;
+  const schedulerStranded = view.goal.lifecycle === "running" && !view.schedulerAlive && (
+    authority?.status === "failed" || authority?.status === "running" || queuedIsStale
+  );
+  const recoveryNeeded = schedulerStranded;
+  const availableActions = view.goal.lifecycle === "approved"
+    ? [{ tool: "start_goal", label: "Start persistent scheduling", execution_required: true }]
+    : view.goal.lifecycle === "running"
+      ? [
+          ...(recoveryNeeded ? [{ tool: "start_goal", label: "Recover scheduler", start_key: authority?.startKey ?? null, execution_required: true }] : [{ tool: "pause_goal", label: "Pause scheduling", execution_required: false }]),
+          { tool: "cancel_goal", label: "Cancel Goal", execution_required: false }
+        ]
+      : view.goal.lifecycle === "paused"
+        ? [
+            { tool: "resume_goal", label: "Resume and wake scheduler", execution_required: true },
+            { tool: "cancel_goal", label: "Cancel Goal", execution_required: false }
+          ]
+        : view.goal.lifecycle === "canceling"
+          ? [{ tool: "refresh_goal", label: "Refresh cancellation", execution_required: false }]
+          : [];
+  return {
+    scheduler: {
+      status: runtime?.status ?? authority?.status ?? "not_started",
+      authority_status: authority?.status ?? null,
+      runner_alive: view.schedulerAlive,
+      heartbeat_at: runtime?.heartbeatAt ?? null,
+      stopped_at: runtime?.stoppedAt ?? authority?.stoppedAt ?? null,
+      stop_reason: runtime?.stopReason ?? authority?.stopReason ?? null,
+      error: runtime?.error ?? authority?.error ?? null,
+      stranded: schedulerStranded,
+      recovery_needed: recoveryNeeded,
+      recovery_action: recoveryNeeded ? "start_goal" : null,
+      start_key: authority?.startKey ?? view.definition?.startKey ?? null,
+      definition_fingerprint: authority?.definitionFingerprint ?? view.definition?.fingerprint ?? null
+    },
+    scheduler_alive: view.schedulerAlive,
+    scheduler_stranded: schedulerStranded,
+    recovery_needed: recoveryNeeded,
+    scheduler_health_authority: "read_only_observation",
+    available_actions: availableActions
+  };
+}
+
+async function passiveGoalSchedulerView(config: CodexProConfig, goal: GoalState): Promise<GoalSchedulerView | undefined> {
+  if (goal.executionPolicy !== "persistent") return undefined;
+  const view = await getPersistentGoalScheduler(goalStoreConfig(config), goal.goalId);
+  assertGoalSourceAllowed(config, view.goal);
+  return view;
+}
+
 function goalText(title: string, goal: GoalState): string {
   const lines = [
     `# ${title}`,
@@ -295,6 +365,16 @@ function codingTaskStructured(task: CodingTaskState): Record<string, unknown> {
 function assertCodingTaskExecutionEnabled(config: CodexProConfig): void {
   if (config.writeMode !== "workspace" || config.bashMode !== "full") {
     throw new CodexProError("CodingTask creation and Codex execution require writeMode=workspace and bashMode=full for this trusted local workspace. These controls are never broadened automatically.");
+  }
+}
+
+function goalExecutionEnabled(config: CodexProConfig): boolean {
+  return config.writeMode === "workspace" && config.bashMode === "full";
+}
+
+function assertGoalExecutionEnabled(config: CodexProConfig): void {
+  if (!goalExecutionEnabled(config)) {
+    throw new CodexProError("Starting or waking Goal execution requires writeMode=workspace and bashMode=full. Passive status, pause, refresh, review, and cancellation remain available.");
   }
 }
 
@@ -909,6 +989,12 @@ function toolNamesForMode(config: CodexProConfig): string[] {
       if (toolIndex !== -1) names.splice(toolIndex, 1);
     }
   }
+  if (!goalExecutionEnabled(config)) {
+    for (const executionTool of ["start_goal", "resume_goal"]) {
+      const toolIndex = names.indexOf(executionTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
+  }
   if (!goalOrchestrationSupported()) {
     for (const unsupportedTool of GOAL_TOOL_NAMES) {
       const toolIndex = names.indexOf(unsupportedTool);
@@ -950,6 +1036,7 @@ function registeredToolNames(server: McpServer): string[] {
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
   if (GOAL_TOOL_NAMES.has(name) && !goalOrchestrationSupported()) return false;
+  if (["start_goal", "resume_goal"].includes(name) && !goalExecutionEnabled(config)) return false;
   if (name === "bash" && config.bashMode === "off") return false;
   if (name === "start_background_job" && config.bashMode === "off") return false;
   if (["write", "edit", "apply_patch", "project_goal", "revert_goal_projection", "apply_goal"].includes(name) && config.writeMode !== "workspace") return false;
@@ -1001,7 +1088,7 @@ function serverInstructions(config: CodexProConfig): string {
     bashInstruction,
     "6. For isolated implementation work, create one persistent CodingTask. Creation and Codex execution require explicit writeMode=workspace plus bashMode=full because App Server can execute beyond safe-bash commands. Use its taskws_* workspace for direct coding, or transition ownership to Codex and run/follow up there. Never mutate a CodingTask worktree unless the persisted executor is direct and no operation owns it.",
     goalOrchestrationSupported()
-      ? "7. For complex multi-part work, Pro may call propose_goal with a complete bounded work graph. A proposal is inert. Show the returned contract and fingerprint to the user; call approve_goal only after explicit approval, and never imply that approval started workers. Start, refresh, review, and integrate through Goal tools; only Pro may publish decisions or change scope. Goal worker worktrees are inspected with review_coding_task and the private integration worktree is inspected only with review_goal; never pass either internal path to open_workspace, read, or bash. An open_workspace denial for a Goal worktree is the expected isolation boundary, not a Goal verification failure. review_goal returns the authoritative combined patch and review fingerprint. For a supervised Live Goal, project only that exact reviewed integration checkpoint with project_goal; reverting is a separate explicit revert_goal_projection action. complete_goal records Pro's final evidence judgment. apply_goal is the separate final source-effect boundary and adopts an already-current Live projection without writing it twice."
+      ? "7. For complex multi-part work, Pro may call propose_goal with a complete bounded work graph. A proposal is inert. Supervised Goals keep worker launch and private integration as explicit Pro actions. Persistent Goals are isolated, command-free, one-turn/no-retry contracts that automatically schedule dependency-ready workers and deterministically integrate only exact terminal, provenance-verified, path-policy-visible patches into the private Goal integration worktree; they never project or apply source changes and never complete themselves. Show the returned contract and fingerprint before approve_goal, and never imply approval started workers. get/list/review are passive. refresh is store-only and never spawns or integrates. start and persistent resume require the explicit execution gate. Only Pro may review, publish decisions, change scope, complete, or apply. Goal worktrees remain private and must not be passed to open_workspace, read, or bash."
       : "7. Goal orchestration is unavailable on Windows because the required crash-safe GoalStore locking contract is not supported. Use Direct coding or standalone CodingTasks; Goal tools are intentionally not advertised.",
     "8. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
@@ -1436,7 +1523,9 @@ const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, des
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const CODEX_TASK_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: true };
 const GOAL_PLAN_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true };
+const GOAL_CONSENT_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true };
 const GOAL_APPROVAL_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: true };
+const GOAL_EXECUTION_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: true };
 const BACKGROUND_JOB_START_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true };
 const BACKGROUND_JOB_CANCEL_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: true };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
@@ -1597,6 +1686,31 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         goalOrchestration: {
           supported: goalOrchestrationSupported(),
           unsupportedReason: goalOrchestrationSupported() ? null : "Windows does not provide the required GoalStore locking safety contract. Direct coding and CodingTasks remain available."
+        },
+        goalScheduling: {
+          supported: goalOrchestrationSupported(),
+          policies: goalOrchestrationSupported() ? ["supervised", "persistent"] : [],
+          persistentSupported: goalOrchestrationSupported(),
+          executionEnabled: goalOrchestrationSupported() && goalExecutionEnabled(config),
+          disabledReason: goalExecutionEnabled(config) ? null : "start_goal and resume_goal require writeMode=workspace and bashMode=full.",
+          requiresWriteMode: "workspace",
+          requiresBashMode: "full",
+          requiresCodexExecutable: true,
+          runtime: "detached-node",
+          usesShell: false,
+          passiveTools: ["get_goal", "list_goals", "review_goal"],
+          refreshRelaunches: false,
+          recoveryTool: "start_goal",
+          persistentContract: {
+            workspacePolicy: "isolated",
+            sourceEffects: false,
+            commands: false,
+            maxTurnsPerWorker: 1,
+            maxRetriesPerWorker: 0,
+            automaticPrivateIntegration: true,
+            automaticSourceProjection: false,
+            automaticCompletion: false
+          }
         },
         goalLiveProjection: {
           supported: goalLiveProjectionSupported(),
@@ -3926,7 +4040,7 @@ ${result.prompt}
     "propose_goal",
     {
       title: "Propose Goal",
-      description: "Persist an inert, fingerprinted Pro orchestration contract. This only records the plan: it does not create a Goal worktree, start Codex, or modify the source workspace. Ask the user to review the returned card before calling approve_goal.",
+      description: "Persist an inert, fingerprinted Pro orchestration contract. supervised keeps launch and integration under explicit Pro actions. persistent authorizes detached dependency scheduling plus deterministic private integration after exact terminal/provenance/path/content checks, but is restricted to isolated, command-free, no-source-effect, one-turn, zero-retry work. Neither policy starts Codex, changes source, or completes during proposal.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Allowed source Git workspace. Omit to use the selected workspace."),
         goal_key: z.string().min(1).max(160).describe("Stable idempotency key for this exact proposal."),
@@ -3935,7 +4049,7 @@ ${result.prompt}
         exclusions: z.array(z.string().min(1).max(2_000)).max(100).optional(),
         completion_criteria: z.array(z.string().min(1).max(2_000)).min(1).max(100),
         verification: z.array(z.string().min(1).max(2_000)).max(100).optional(),
-        execution_policy: z.literal("supervised").optional().describe("Current vertical slice: supervised only."),
+        execution_policy: z.enum(["supervised", "persistent"]).optional().describe("supervised uses explicit Pro launch/integration; persistent automatically schedules dependencies and mechanically integrates verified worker patches only into the private integration worktree."),
         workspace_policy: z.enum(["isolated", "live"]).optional().describe("Use isolated to keep reviewed checkpoints private until final apply, or live to allow separately confirmed projection of reviewed checkpoints into source."),
         worker_model: z.string().min(1).max(160).optional(),
         worker_effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
@@ -3980,6 +4094,16 @@ ${result.prompt}
       const executionPolicy = args.execution_policy ?? "supervised";
       const workspacePolicy = requestedWorkspacePolicy;
       const sourceEffects = args.permissions.source_effects ?? {};
+      if (executionPolicy === "persistent") {
+        if (workspacePolicy !== "isolated") throw new CodexProError("Persistent Goals require workspace_policy=isolated; they never project into the source workspace.");
+        if ((args.permissions.commands ?? []).length) throw new CodexProError("Persistent Goals require permissions.commands to be empty.");
+        if (sourceEffects.apply || sourceEffects.commit || sourceEffects.push || sourceEffects.draft_pr) {
+          throw new CodexProError("Persistent Goals require every source effect to be false.");
+        }
+        if ((args.limits?.max_turns_per_worker ?? 1) !== 1 || (args.limits?.max_retries_per_worker ?? 0) !== 0) {
+          throw new CodexProError("Persistent Goals support exactly one turn per worker and zero automatic retries.");
+        }
+      }
       const proposed = await proposeGoal(
         goalStoreConfig(config),
         workspace,
@@ -4018,6 +4142,7 @@ ${result.prompt}
               draftPr: false
             }
           },
+          contentPolicy: executionPolicy === "persistent" ? createGoalContentPolicySnapshot(config.blockedGlobs) : undefined,
           baseSha: await resolveCodingTaskBaseSha(workspace, args.base_sha, {
             assertSourceWorkspace: (sourceRoot) => {
               if (!config.allowedRoots.some((root) => {
@@ -4042,7 +4167,8 @@ ${result.prompt}
         ...goalStructured(proposed.goal),
         reused: proposed.reused,
         execution_started: false,
-        approval_required: true
+        approval_required: true,
+        available_actions: [{ tool: "approve_goal", label: "Approve exact contract", execution_required: false }]
       });
     }
   );
@@ -4060,7 +4186,11 @@ ${result.prompt}
     },
     async (args) => {
       const goal = await allowedGoal(config, args.goal_id);
-      return textResult(goalText("Goal", goal), goalStructured(goal));
+      const schedulerView = await passiveGoalSchedulerView(config, goal);
+      return textResult(goalText("Goal", schedulerView?.goal ?? goal), {
+        ...goalStructured(schedulerView?.goal ?? goal),
+        ...goalSchedulerStructured(schedulerView)
+      });
     }
   );
 
@@ -4084,8 +4214,10 @@ ${result.prompt}
           return false;
         }
       });
+      const schedulerViews = await Promise.all(goals.map((goal) => passiveGoalSchedulerView(config, goal)));
+      const listedGoals = goals.map((goal, index) => ({ ...goal, ...goalSchedulerStructured(schedulerViews[index]) }));
       return textResult(`# Goals\n\n${goals.length ? goals.map((goal) => `- ${goal.goalId}: ${goal.title} [${goal.lifecycle}]`).join("\n") : "No Goals found."}`, {
-        goals,
+        goals: listedGoals,
         goal_count: goals.length
       });
     }
@@ -4105,7 +4237,7 @@ ${result.prompt}
         approval_key: z.string().min(1).max(160),
         confirm: z.literal(true).describe("Must be true only after explicit user approval of this exact contract.")
       },
-      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      annotations: GOAL_CONSENT_ANNOTATIONS,
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Recording Goal approval...", "openai/toolInvocation/invoked": "Goal contract approved" }
     },
     async (args) => {
@@ -4118,7 +4250,8 @@ ${result.prompt}
       assertGoalSourceAllowed(config, goal);
       return textResult(`${goalText("Goal Approved", goal)}\n\nApproval is persisted. No worker has started; use the explicit Goal execution action when ready.`, {
         ...goalStructured(goal),
-        execution_started: false
+        execution_started: false,
+        available_actions: [{ tool: "start_goal", label: goal.executionPolicy === "persistent" ? "Start persistent scheduling" : "Start supervised work", execution_required: true }]
       });
     }
   );
@@ -4171,22 +4304,43 @@ ${result.prompt}
     "start_goal",
     {
       title: "Start Goal",
-      description: "Explicitly start or idempotently continue an approved Goal. Creates Goal-owned isolated CodingTasks for dependency-ready work and launches up to the approved concurrency limit. Never applies changes to the source workspace.",
+      description: "Start an approved Goal or recover it with the same start_key. supervised launches the currently dependency-ready workers for explicit Pro review/integration. persistent starts or recovers a detached shell-free scheduler that automatically launches dependencies and deterministically integrates only verified terminal patches into the private integration worktree. Never projects, applies, completes, commits, pushes, or opens a PR.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),
         start_key: z.string().min(1).max(160).describe("Stable idempotency key reused for every start/continue retry of this Goal.")
       },
-      annotations: GOAL_APPROVAL_ANNOTATIONS,
-      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Starting approved Goal workers...", "openai/toolInvocation/invoked": "Goal workers launched" }
+      annotations: GOAL_EXECUTION_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Starting approved Goal execution...", "openai/toolInvocation/invoked": "Goal execution started" }
     },
     async (args) => {
-      assertCodingTaskExecutionEnabled(config);
-      await allowedGoal(config, args.goal_id);
+      assertGoalExecutionEnabled(config);
+      const current = await allowedGoal(config, args.goal_id);
+      const codexBinary = await resolveCodexExecutable(config);
+      if (current.executionPolicy === "persistent") {
+        const started = await startPersistentGoal(
+          { dataRoot: config.codingTaskDir, codexBinary, codexDir: config.codexDir, maxOutputBytes: config.maxOutputBytes },
+          args.goal_id,
+          {
+            expectedRevision: args.expected_revision,
+            startKey: args.start_key,
+            runtimeContentPolicy: createGoalContentPolicySnapshot(config.blockedGlobs)
+          }
+        );
+        assertGoalSourceAllowed(config, started.goal);
+        const schedulerView = await getPersistentGoalScheduler(goalStoreConfig(config), started.goal.goalId);
+        return textResult(`${goalText(started.reused ? "Persistent Goal Scheduler Recovered" : "Persistent Goal Scheduler Started", schedulerView.goal)}\n\nThe detached scheduler may automatically launch dependency-ready workers and mechanically integrate verified terminal patches into the private Goal integration worktree. Pro review, source projection/application, and completion remain separate.`, {
+          ...goalStructured(schedulerView.goal),
+          ...goalSchedulerStructured(schedulerView),
+          scheduler_definition_fingerprint: started.definition.fingerprint,
+          reused: started.reused,
+          launched_run_count: 0
+        });
+      }
       const started = await startGoal(
         {
           dataRoot: config.codingTaskDir,
-          codexBinary: await resolveCodexExecutable(config),
+          codexBinary,
           codexDir: config.codexDir,
           maxOutputBytes: config.maxOutputBytes
         },
@@ -4214,10 +4368,16 @@ ${result.prompt}
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Refreshing Goal worker state...", "openai/toolInvocation/invoked": "Goal worker state refreshed" }
     },
     async (args) => {
-      await allowedGoal(config, args.goal_id);
-      const goal = await refreshGoal(goalStoreConfig(config), args.goal_id);
+      const current = await allowedGoal(config, args.goal_id);
+      const goal = current.executionPolicy === "persistent" && current.lifecycle === "canceling"
+        ? await reconcilePersistentGoalCancellation(goalStoreConfig(config), args.goal_id)
+        : await refreshGoal(goalStoreConfig(config), args.goal_id);
       assertGoalSourceAllowed(config, goal);
-      return textResult(goalText("Goal Refreshed", goal), goalStructured(goal));
+      const schedulerView = await passiveGoalSchedulerView(config, goal);
+      return textResult(goalText("Goal Refreshed", schedulerView?.goal ?? goal), {
+        ...goalStructured(schedulerView?.goal ?? goal),
+        ...goalSchedulerStructured(schedulerView)
+      });
     }
   );
 
@@ -4239,7 +4399,10 @@ ${result.prompt}
     },
     async (args) => {
       assertCodingTaskExecutionEnabled(config);
-      await allowedGoal(config, args.goal_id);
+      const current = await allowedGoal(config, args.goal_id);
+      if (current.executionPolicy === "persistent") {
+        throw new CodexProError("Persistent Goal work is mechanically integrated by its scheduler after exact terminal, provenance, path, and content checks. integrate_goal_work remains an explicit Pro action only for supervised Goals.");
+      }
       const goal = await integrateGoalWork(
         { dataRoot: config.codingTaskDir, maxOutputBytes: config.maxOutputBytes },
         args.goal_id,
@@ -4277,6 +4440,7 @@ ${result.prompt}
         (relativePath) => !guard.isBlockedRelativePath(relativePath)
       );
       assertGoalSourceAllowed(config, result.goal);
+      const schedulerView = await passiveGoalSchedulerView(config, result.goal);
       const review = result.review;
       const text = [
         goalText("Goal Review", result.goal),
@@ -4294,7 +4458,9 @@ ${result.prompt}
       ].filter(Boolean).join("\n");
       return textResult(text, {
         ...goalStructured(result.goal),
+        ...goalSchedulerStructured(schedulerView),
         review,
+        changed_files_count: review.changedFileCount,
         verification: result.verification,
         integration_head_sha: result.integrationHeadSha,
         review_fingerprint: result.reviewFingerprint,
@@ -4416,7 +4582,7 @@ ${result.prompt}
     "pause_goal",
     {
       title: "Pause Goal Scheduling",
-      description: "Pause new Goal scheduling while allowing already-running workers to finish under their existing approved leases. This is not a worker interrupt; use cancel_goal to stop active workers.",
+      description: "Pause new Goal scheduling while allowing already-running workers to finish under their existing approved leases. Persistent Goals can pause only while running; once automatic private integration reaches waiting_review, the stopped scheduler remains available for Pro review and cannot be paused/resumed back into execution. This is not a worker interrupt; use cancel_goal to stop active workers.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),
@@ -4426,10 +4592,20 @@ ${result.prompt}
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Pausing Goal scheduling...", "openai/toolInvocation/invoked": "Goal scheduling paused" }
     },
     async (args) => {
-      await allowedGoal(config, args.goal_id);
+      const current = await allowedGoal(config, args.goal_id);
+      if (current.executionPolicy === "persistent" && current.lifecycle !== "running") {
+        throw new CodexProError("Persistent Goal scheduling can pause only while lifecycle=running. A review-waiting persistent Goal has already stopped its scheduler and must remain available for Pro review.");
+      }
       const goal = await pauseGoal(goalStoreConfig(config), args.goal_id, { expectedRevision: args.expected_revision, requestKey: args.pause_key });
       assertGoalSourceAllowed(config, goal);
-      return textResult(`${goalText("Goal Paused", goal)}\n\nAlready-running workers continue; no new work will launch until resume_goal and an explicit start_goal continuation.`, goalStructured(goal));
+      const schedulerView = await passiveGoalSchedulerView(config, goal);
+      const note = goal.executionPolicy === "persistent"
+        ? "The durable pause fence prevents new scheduling. Already-running workers keep their approved leases; resume_goal explicitly wakes persistent scheduling."
+        : "Already-running workers continue; no new work will launch until resume_goal and an explicit start_goal continuation.";
+      return textResult(`${goalText("Goal Paused", schedulerView?.goal ?? goal)}\n\n${note}`, {
+        ...goalStructured(schedulerView?.goal ?? goal),
+        ...goalSchedulerStructured(schedulerView)
+      });
     }
   );
 
@@ -4439,17 +4615,42 @@ ${result.prompt}
     "resume_goal",
     {
       title: "Resume Goal Scheduling",
-      description: "Resume a paused Goal inside the unchanged approved contract. Does not itself spawn workers; call start_goal with the original start_key for dependency-ready work.",
+      description: "Resume a paused Goal inside the unchanged approved contract. supervised only reopens scheduling state and still needs start_goal for worker launch. persistent explicitly wakes or recovers its detached scheduler, so this tool requires the same execution gate as start_goal.",
       inputSchema: {
         goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
         expected_revision: z.number().int().min(1),
         resume_key: z.string().min(1).max(160)
       },
-      annotations: GOAL_PLAN_ANNOTATIONS,
+      annotations: GOAL_EXECUTION_ANNOTATIONS,
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Resuming Goal scheduling...", "openai/toolInvocation/invoked": "Goal scheduling resumed" }
     },
     async (args) => {
-      await allowedGoal(config, args.goal_id);
+      assertGoalExecutionEnabled(config);
+      const current = await allowedGoal(config, args.goal_id);
+      if (current.executionPolicy === "persistent") {
+        const resumed = await resumePersistentGoal(
+          {
+            dataRoot: config.codingTaskDir,
+            codexBinary: await resolveCodexExecutable(config),
+            codexDir: config.codexDir,
+            maxOutputBytes: config.maxOutputBytes
+          },
+          args.goal_id,
+          {
+            expectedRevision: args.expected_revision,
+            resumeKey: args.resume_key,
+            runtimeContentPolicy: createGoalContentPolicySnapshot(config.blockedGlobs)
+          }
+        );
+        assertGoalSourceAllowed(config, resumed.goal);
+        const schedulerView = await getPersistentGoalScheduler(goalStoreConfig(config), resumed.goal.goalId);
+        return textResult(`${goalText("Persistent Goal Resumed", schedulerView.goal)}\n\nThe detached scheduler wake is persisted; it may schedule dependencies and mechanically integrate verified patches only in the private integration worktree.`, {
+          ...goalStructured(schedulerView.goal),
+          ...goalSchedulerStructured(schedulerView),
+          scheduler_definition_fingerprint: resumed.definition.fingerprint,
+          reused: resumed.reused
+        });
+      }
       const goal = await resumeGoal(goalStoreConfig(config), args.goal_id, { expectedRevision: args.expected_revision, requestKey: args.resume_key });
       assertGoalSourceAllowed(config, goal);
       return textResult(goalText("Goal Resumed", goal), goalStructured(goal));
@@ -4473,14 +4674,29 @@ ${result.prompt}
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Canceling Goal workers...", "openai/toolInvocation/invoked": "Goal canceled" }
     },
     async (args) => {
-      await allowedGoal(config, args.goal_id);
-      const goal = await cancelGoal(goalStoreConfig(config), args.goal_id, {
-        expectedRevision: args.expected_revision,
-        cancelKey: args.cancel_key,
-        reason: args.reason
-      });
+      const current = await allowedGoal(config, args.goal_id);
+      const goal = current.executionPolicy === "persistent"
+        ? await requestPersistentGoalCancel(goalStoreConfig(config), args.goal_id, {
+            expectedRevision: args.expected_revision,
+            cancelKey: args.cancel_key,
+            reason: args.reason
+          })
+        : await cancelGoal(goalStoreConfig(config), args.goal_id, {
+            expectedRevision: args.expected_revision,
+            cancelKey: args.cancel_key,
+            reason: args.reason
+          });
       assertGoalSourceAllowed(config, goal);
-      return textResult(goalText("Goal Canceled", goal), goalStructured(goal));
+      const schedulerView = await passiveGoalSchedulerView(config, goal);
+      const title = goal.lifecycle === "canceling" ? "Goal Cancellation Requested" : "Goal Canceled";
+      const cancellationNote = current.executionPolicy === "persistent"
+        ? "Persistent cancellation records authority before store-only child reconciliation and never resolves or launches Codex."
+        : "Supervised Goal workers were canceled without relaunching work.";
+      return textResult(`${goalText(title, schedulerView?.goal ?? goal)}\n\n${cancellationNote}`, {
+        ...goalStructured(schedulerView?.goal ?? goal),
+        ...goalSchedulerStructured(schedulerView),
+        cancellation_pending: goal.lifecycle === "canceling"
+      });
     }
   );
 

@@ -10,6 +10,7 @@ import fsp from "node:fs/promises";
 import fs from "node:fs";
 import path from "node:path";
 import { secureCodingTaskDirectory } from "./codingTaskStore.js";
+import { buildGoalWorkerPrompt } from "./goalPrompt.js";
 
 export { projectGoal, revertGoalProjection } from "./goalProjection.js";
 export type { ProjectGoalInput, RevertGoalProjectionInput, GoalProjectionResult, GoalReviewAttestation } from "./goalProjection.js";
@@ -67,32 +68,6 @@ function runnerConfig(config: GoalExecutionConfig, goal: GoalState) {
 
 function operationId(goal: GoalState, work: GoalWorkItem): string {
   return `goal:${goal.goalId.slice(5)}:${work.workId}:run:1`;
-}
-
-function workerPrompt(goal: GoalState, work: GoalWorkItem): string {
-  const allowed = work.fileGlobs.length ? work.fileGlobs : goal.permissions.fileGlobs;
-  return [
-    `You are a Codex worker assigned by ChatGPT Pro to Goal ${goal.goalId}.`,
-    `Work item: ${work.workId} — ${work.title}`,
-    "",
-    "Implement only this approved scope:",
-    work.goal,
-    "",
-    "Acceptance criteria:",
-    ...work.acceptanceCriteria.map((criterion) => `- ${criterion}`),
-    "",
-    "Allowed file globs:",
-    ...allowed.map((glob) => `- ${glob}`),
-    "",
-    "Verification:",
-    ...(work.verification.length ? work.verification : goal.verification).map((check) => `- ${check}`),
-    "",
-    "Authority constraints:",
-    "- Do not broaden scope, create new work, reassign dependencies, commit, merge, push, or create a PR.",
-    "- Network access and interactive approvals are disabled.",
-    "- If the scope or file boundary is insufficient, stop and report a blocker for Pro; do not work around it.",
-    "- Finish with a concise summary of files changed, checks run, results, and any Blackboard-worthy discovery."
-  ].join("\n");
 }
 
 async function beginGoalExecution(config: GoalStoreConfig, goalId: string, input: StartGoalInput): Promise<GoalState> {
@@ -198,7 +173,7 @@ async function launchReadyGoalWork(config: GoalExecutionConfig, goalId: string):
       {
         taskKey: `goal:${goal.goalId}:${work.workId}`,
         title: `${goal.title} · ${work.title}`,
-        goal: workerPrompt(goal, work),
+        goal: buildGoalWorkerPrompt(goal, work),
         executor: "codex",
         baseSha,
         goalId: goal.goalId,
@@ -213,7 +188,7 @@ async function launchReadyGoalWork(config: GoalExecutionConfig, goalId: string):
     try {
       const run = await launchCodingTaskRun(runnerConfig(config, goal), task.taskId, {
         operationId: opId,
-        prompt: workerPrompt(goal, work),
+        prompt: buildGoalWorkerPrompt(goal, work),
         expectedRevision: task.revision,
         executorEpoch: task.executorLease.epoch,
         leaseId: task.executorLease.leaseId,
@@ -234,6 +209,8 @@ async function launchReadyGoalWork(config: GoalExecutionConfig, goalId: string):
 
 export async function startGoal(config: GoalExecutionConfig, goalIdInput: string, input: StartGoalInput): Promise<{ goal: GoalState; runs: CodingTaskRunView[] }> {
   const goalId = validateGoalId(goalIdInput);
+  const persisted = await new GoalStore(config).get(goalId);
+  if (persisted.executionPolicy === "persistent") throw new Error("Persistent Goals must start through startPersistentGoal; inline supervised launch is forbidden.");
   let goal = await beginGoalExecution(config, goalId, input);
   await ensureGoalIntegrationWorktree(goal);
   const runs = await launchReadyGoalWork(config, goalId);
@@ -245,6 +222,7 @@ export async function refreshGoal(config: GoalStoreConfig, goalIdInput: string):
   const goalId = validateGoalId(goalIdInput);
   const store = new GoalStore(config);
   const goal = await store.get(goalId);
+  if (goal.executionPolicy === "persistent") return goal;
   await Promise.all(goal.work.filter((work) => work.codingTaskId && work.operationId && ["running", "ready"].includes(work.status)).map(async (work) => {
     try {
       const run = await getCodingTaskRun(config, work.codingTaskId!, work.operationId!);
@@ -287,6 +265,7 @@ export async function integrateGoalWork(
   const integrationKey = boundedKey(input.integrationKey, "Goal integration key");
   const store = new GoalStore(config);
   let goal = await store.get(goalId);
+  if (goal.executionPolicy === "persistent") throw new Error("Persistent Goal integration is scheduler-only mechanical authority.");
   let work = goal.work.find((item) => item.workId === workId);
   if (!work) throw new Error(`Unknown Goal work item: ${workId}`);
   if (work.status === "integrated") {
@@ -395,6 +374,7 @@ export async function cancelGoal(config: GoalStoreConfig, goalIdInput: string, i
   const cancelKey = boundedKey(input.cancelKey, "Goal cancel key");
   const store = new GoalStore(config);
   const goal = await store.get(goalId);
+  if (goal.executionPolicy === "persistent") throw new Error("Persistent Goals must cancel through requestPersistentGoalCancel.");
   if (goal.cancelKey === cancelKey && goal.lifecycle === "canceled") return goal;
   if (goal.revision !== input.expectedRevision) throw new Error(`Goal revision conflict: expected ${input.expectedRevision}, found ${goal.revision}.`);
   const active = goal.work.filter((work) => work.codingTaskId && work.operationId && ["ready", "running"].includes(work.status));

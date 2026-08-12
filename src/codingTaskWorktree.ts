@@ -395,6 +395,10 @@ export async function reviewCodingTaskWorktree(
   const visibleDiffSha256 = createHash("sha256").update(diff).digest("hex");
   const omittedPaths = [...new Set([...trackedPaths.omittedPaths, ...untracked.omittedPaths])].sort();
   const changedPaths = [...new Set([...trackedPaths.visiblePathspecs, ...untracked.visiblePaths])].sort();
+  // Porcelain status compares the worktree to HEAD and is empty for a clean
+  // committed base..HEAD review. The public count describes visible review
+  // paths, so bind it to the same policy-filtered authoritative path set.
+  metrics.changedFileCount = changedPaths.length;
   const repositoryObservationSha256 = createHash("sha256")
     .update(JSON.stringify({ baseSha: identity.baseSha, headSha, status, diffStat, omittedPaths }))
     .digest("hex");

@@ -4,7 +4,7 @@
 Deliver the first real vertical slice in which ChatGPT Pro plans and supervises a durable local Goal, Codex workers execute isolated CodingTasks, and the user can observe, interrupt, resume, review, and apply an integrated result from ordinary Chat.
 
 ## Current Phase
-Phase 7 complete
+Phase 9 next
 
 ## Phases
 
@@ -32,8 +32,8 @@ Phase 7 complete
 - [x] Integrate worker results in a Goal worktree with Pro-controlled sequencing
 - [x] Implement the accepted supervised Isolated vertical slice without weakening source-workspace safety
 - [x] Implement incremental supervised Live projection
-- [ ] Implement the persistent autonomous scheduler
-- **Status:** complete for the accepted supervised Isolated and Live slices; autonomous scheduling remains roadmap work
+- [x] Implement the persistent autonomous scheduler
+- **Status:** complete for the accepted supervised Isolated, Live, and persistent Isolated slices
 
 ### Phase 5: Goal card and Chat control flow
 - [x] Render a persistent Goal snapshot with monotonic state version
@@ -55,6 +55,35 @@ Phase 7 complete
 - [x] Expose focused MCP actions and honest Goal-card state for project, inspect, recover, and revert
 - [x] Verify core, execution, HTTP/MCP, widget, and full release flows, then exercise a representative ordinary-Chat Live Goal with a real Codex worker
 - **Status:** complete
+
+### Phase 8: Persistent autonomous scheduler
+- [x] Freeze the durable scheduler authority, lease, recovery, pause, resume, and cancel contract
+- [x] Launch dependency-ready isolated workers from a detached scheduler that survives Chat/MCP disconnects
+- [x] Mechanically verify and integrate only pre-approved worker results, then stop at Pro review when semantic judgment is required
+- [x] Prove passive reads never launch work and explicit resume/recovery is idempotent
+- [x] Verify the intended MCP entry point with a real Codex worker and authoritative restart readback
+- **Status:** complete
+
+### Phase 9: Multi-turn workers
+- [ ] Preserve one Codex thread per Goal work item across bounded continuation turns
+- [ ] Keep every continuation inside the approved work goal, file scope, commands, network policy, and turn budget
+- [ ] Persist turn identity, prompt intent, results, and stop reason for Pro inspection
+- [ ] Verify a real worker needs and completes a second turn through the intended Goal flow
+- **Status:** pending
+
+### Phase 10: Bounded automatic retries
+- [ ] Define retryable infrastructure failures separately from semantic, policy, validation, and conflict failures
+- [ ] Persist attempt identity, backoff, exhaustion, and response-loss-safe idempotency within the approved retry budget
+- [ ] Ensure retry never expands scope, overwrites source, or hides the original failure
+- [ ] Verify transient recovery and deterministic fail-closed exhaustion through the intended Goal flow
+- **Status:** pending
+
+### Phase 11: Final real-world verification and delivery
+- [ ] Run compile, focused, full, security, and package verification on the final architecture
+- [ ] Exercise persistent scheduling, multi-turn continuation, and bounded retry from ordinary ChatGPT Pro with a real Codex worker
+- [ ] Confirm source/worktree/state authority, disconnect recovery, cards, and no unintended Git or external effects
+- [ ] Update user documentation and delivery evidence, then commit each coherent completed stage
+- **Status:** pending
 
 ## Key Questions
 1. What is the smallest Goal contract that preserves the accepted final architecture instead of creating a throwaway orchestration layer?
@@ -85,6 +114,9 @@ Phase 7 complete
 | Core review-metric regression expected 5 changed files although the fixture changes 6 | 1 | Corrected the test expectation; implementation output was authoritative |
 | Ordinary Chat tried to open the private Goal integration worktree after `review_goal` and treated the expected allowed-root denial as verification failure | 1 | Kept the isolation boundary, made `review_goal` run authoritative integrated `git diff --check`, and explicitly instructed Pro not to use generic workspace tools for private Goal worktrees |
 | Cards intermittently failed when the documentation-site legacy domain was forced as the iframe origin | 1 | Preserved explicit custom domains, omitted only the implicit legacy default, bumped the resource to v13, refreshed the plugin, and verified a completed Goal card through ChatGPT's default sandbox |
+| The Phase 8 card HTML changed while its prior template URI remained cached | 1 | Treated the Apps SDK resource URI as the cache key, published the final v15 URI, retained v14-v8 read compatibility, refreshed the plugin, and re-verified the card in ordinary Chat |
+| Goal review counted a clean private integration worktree as zero changed files | 1 | Bound `changedFileCount` to the same policy-filtered base-to-HEAD `changedPaths`, added core/HTTP/widget regressions, and confirmed all three public count forms equal 3 in the ordinary-Chat card |
+| A failed scheduler smoke left two deliberately SIGSTOPed fixture processes alive after deleting their temp roots | 1 | Made cleanup track exact fixture-owned processes, always continue and terminate them before removing state, and assert no scheduler process remains |
 
 ## Notes
 - Existing user and prior-worker changes are preserved. No reset, checkout, broad cleanup, commit, push, or PR is authorized.

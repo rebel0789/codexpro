@@ -19,6 +19,9 @@ export interface GoalPaths {
   integrationWorktreeRoot: string;
   projectionRoot: string;
   integrationJournalRoot: string;
+  schedulerRoot: string;
+  schedulerRuntime: string;
+  schedulerLock: string;
 }
 
 function processAlive(pid: number): boolean {
@@ -54,7 +57,10 @@ export class GoalStore {
       lock: path.join(this.dataRoot, "goals", goalId, "state.lock"),
       integrationWorktreeRoot: path.join(this.dataRoot, "goal-worktrees", goalId),
       projectionRoot: path.join(this.dataRoot, "goals", goalId, "projections"),
-      integrationJournalRoot: path.join(this.dataRoot, "goals", goalId, "integrations")
+      integrationJournalRoot: path.join(this.dataRoot, "goals", goalId, "integrations"),
+      schedulerRoot: path.join(this.dataRoot, "goals", goalId, "scheduler"),
+      schedulerRuntime: path.join(this.dataRoot, "goals", goalId, "scheduler", "runtime.json"),
+      schedulerLock: path.join(this.dataRoot, "goals", goalId, "scheduler", "scheduler.lock")
     };
   }
 
@@ -274,6 +280,32 @@ export class GoalStore {
     await writeCodingTaskJsonAtomic(this.paths(state.goalId).state, state);
   }
 
+  schedulerDefinitionPath(goalIdInput: string, fingerprint: string): string {
+    const goalId = validateGoalId(goalIdInput);
+    if (!/^[0-9a-f]{64}$/.test(fingerprint)) throw new Error("Invalid Goal scheduler definition fingerprint.");
+    return path.join(this.paths(goalId).schedulerRoot, `definition-${fingerprint}.json`);
+  }
+
+  async withSchedulerLock<T>(goalIdInput: string, operation: () => Promise<T>): Promise<T> {
+    if (process.platform === "win32") throw new Error("Persistent Goal scheduling requires POSIX advisory locking.");
+    const goalId = validateGoalId(goalIdInput);
+    await this.initialize();
+    const paths = this.paths(goalId);
+    await fsp.mkdir(paths.schedulerRoot, { recursive: true, mode: 0o700 });
+    await secureCodingTaskDirectory(paths.schedulerRoot, "Goal scheduler directory");
+    return this.withPosixAdvisoryLock(paths.schedulerLock, operation);
+  }
+
+  async tryWithSchedulerLock<T>(goalIdInput: string, operation: () => Promise<T>): Promise<{ acquired: false } | { acquired: true; value: T }> {
+    if (process.platform === "win32") throw new Error("Persistent Goal scheduling requires POSIX advisory locking.");
+    const goalId = validateGoalId(goalIdInput);
+    await this.initialize();
+    const paths = this.paths(goalId);
+    await fsp.mkdir(paths.schedulerRoot, { recursive: true, mode: 0o700 });
+    await secureCodingTaskDirectory(paths.schedulerRoot, "Goal scheduler directory");
+    return this.tryPosixAdvisoryLock(paths.schedulerLock, operation);
+  }
+
   private async withPosixAdvisoryLock<T>(lockPath: string, operation: () => Promise<T>): Promise<T> {
     const executable = process.platform === "darwin" ? "/usr/bin/lockf" : "/usr/bin/flock";
     const helper = "process.stdout.write('LOCKED\\n');process.stdin.resume();process.stdin.on('end',()=>process.exit(0));";
@@ -318,6 +350,32 @@ export class GoalStore {
         const timer = setTimeout(() => { child.kill(); resolve(); }, 2_000);
         child.once("exit", () => { clearTimeout(timer); resolve(); });
       });
+    }
+  }
+
+  private async tryPosixAdvisoryLock<T>(lockPath: string, operation: () => Promise<T>): Promise<{ acquired: false } | { acquired: true; value: T }> {
+    const executable = process.platform === "darwin" ? "/usr/bin/lockf" : "/usr/bin/flock";
+    const helper = "process.stdout.write('LOCKED\\n');process.stdin.resume();process.stdin.on('end',()=>process.exit(0));";
+    const args = process.platform === "darwin" ? ["-t", "0", lockPath, process.execPath, "-e", helper] : ["-E", "75", "-n", lockPath, process.execPath, "-e", helper];
+    const child = spawn(executable, args, { env: { ...(process.env.PATH ? { PATH: process.env.PATH } : {}), ...(process.env.HOME ? { HOME: process.env.HOME } : {}), LANG: "C", LC_ALL: "C", NO_COLOR: "1" }, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    const acquired = await new Promise<boolean>((resolve, reject) => {
+      let output = ""; let stderr = ""; let settled = false;
+      const timer = setTimeout(() => { if (!settled) { settled = true; child.kill(); reject(new Error(`Timed out probing Goal scheduler lock: ${lockPath}`)); } }, Math.min(this.lockTimeoutMs, 2_000));
+      child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString("utf8"); if (!settled && output.includes("LOCKED\n")) { settled = true; clearTimeout(timer); resolve(true); } });
+      child.stderr.on("data", (chunk: Buffer) => { if (stderr.length < 8_192) stderr += chunk.toString("utf8"); });
+      child.once("error", (error) => { if (!settled) { settled = true; clearTimeout(timer); reject(error); } });
+      child.once("exit", (code, signal) => {
+        if (settled) return;
+        settled = true; clearTimeout(timer);
+        if (code === 75) resolve(false);
+        else reject(new Error(`Goal scheduler lock probe failed (${code ?? signal}): ${stderr.trim().slice(0, 8_192)}`));
+      });
+    });
+    if (!acquired) return { acquired: false };
+    try { return { acquired: true, value: await operation() }; }
+    finally {
+      child.stdin.end();
+      await new Promise<void>((resolve) => { if (child.exitCode !== null) return resolve(); const timer = setTimeout(() => { child.kill(); resolve(); }, 2_000); child.once("exit", () => { clearTimeout(timer); resolve(); }); });
     }
   }
 

@@ -28,7 +28,17 @@ Platform availability is part of the capability boundary. Goal orchestration req
 | Codex worker | Implements and tests only its assigned scope, then reports results and blockers |
 | Local CodexPro engine | Authoritative storage and enforcement for Goal state, approvals, leases, worktrees, worker runs, and recovery |
 
-ChatGPT Pro is the semantic authority; the local engine is the execution authority. Closing Chat does not erase a Goal, but the local engine may only execute an already approved contract. If new design judgment or broader permission is required, execution pauses until Pro and the user return.
+ChatGPT Pro is the semantic authority; the local engine is the execution
+authority. Under Persistent, the local engine may schedule dependency-ready
+workers and mechanically integrate exact terminal patches only when provenance,
+scope, path policy, and the approved graph authorize it. It cannot invent work,
+reinterpret completion criteria, publish a decision, complete the Goal, or
+perform a source effect. Closing Chat does not erase a Goal, but the computer
+and detached scheduler must remain running while work progresses; the CodexPro
+server is required to start, control, or reconnect. This is local persistence—not
+ChatGPT's built-in Scheduled Tasks and not offline Pro judgment. If new design
+judgment or broader permission is required, execution stops until Pro and the
+user return.
 
 ## Worker collaboration
 
@@ -44,18 +54,37 @@ Workers may publish and consume structured records for:
 - test and verification results;
 - decisions approved by Pro.
 
-Only Pro can create work, change scope, reassign responsibility, alter dependencies, or approve an integration decision.
+Only Pro can create work, change scope, reassign responsibility, alter
+dependencies, or approve a semantic integration decision. Persistent may only
+perform the deterministic patch integration already authorized by that exact
+fingerprinted contract.
 
 ## Execution policies
 
 The same Goal engine supports two policies:
 
 - **Supervised:** the user approves the plan, observes the work, and approves each source effect. Its default workspace policy is **Live**, so an exact Pro-reviewed integration checkpoint can be projected promptly into the user's current workspace through a separate confirmed action.
-- **Persistent autonomous:** the user approves the goal, permissions, and resource envelope once. The engine continues planned Codex work without intermediate approval and pauses when fresh semantic judgment is required. Its default workspace policy is **Isolated**.
+- **Persistent (Phase 8):** the user separately proposes, approves, and starts a strict **Isolated** contract. The engine launches dependency-ready Codex workers and mechanically integrates verified terminal patches in its private worktree, then stops at `waiting_review` / `semantic_review`. The Goal `commands` list is empty, network and every source-effect permission are false, each worker gets one turn, and there are zero fresh automatic retries.
 
 Workers and Pro's integration worktree always remain isolated. `review_goal` attests an exact integration checkpoint; only the separate `project_goal` authority can move that reviewed checkpoint toward source. Live application must stop if source HEAD, changed-path content/index state, or repository topology makes the approved baseline unsafe.
 
-Persistent autonomy is bounded, not unlimited. The contract always retains file, command, network, concurrency, retry, time, and resource boundaries, plus explicit interruption and recovery.
+Persistent autonomy is bounded, not unlimited. The current contract retains
+file, network, concurrency, time, and resource boundaries and does not authorize
+source actions. Recovering the same reserved attempt after a crash or reconnect
+does not count as a fresh retry. Multi-turn workers and fresh retries remain
+later contracts rather than implicit extensions of Phase 8 approval.
+Abnormal worker termination, stale terminal provenance, out-of-scope or blocked
+content, and scheduler safety/reconciliation errors stop or fail execution
+closed; they never trigger an autonomous replan or replacement attempt.
+
+Pause, resume, and cancel are durable authorities. Once pause takes effect, no
+new worker launch, integration, or dependency advancement begins; already
+running worker processes may finish without being integrated. Resume is an
+explicit idempotent execution action against the same fingerprint and resource
+envelope, and completed work is not rerun. Cancel fences active workers and is
+terminal, but never reverts source or deletes retained worktrees. Passive
+`get_goal`, `list_goals`, and `review_goal` calls—and store-only
+`refresh_goal`—never launch or resume execution.
 
 ## Goal experience in Chat
 
@@ -71,7 +100,13 @@ The approved plan is a structured execution contract containing:
 - file, command, and network permissions;
 - integration and source-application policy.
 
-A persistent Goal card shows overall state, current phase, approvals, worker status, blockers, verification, integration state, and bounded drill-down into each CodingTask. Server state, not hidden widget state or chat history, is authoritative.
+A persistent Goal card shows overall state, current phase, approvals, scheduler
+lease/stop reason, worker status, blockers, verification, integration state,
+authoritative changed-file count, and bounded drill-down into each CodingTask.
+Server state, not hidden widget state or chat history, is authoritative. The
+current card resource is v15; v14 through v8 remain compatibility resources.
+Renderer changes always receive a new URI so a stale Chat cache cannot preserve
+old semantics.
 
 ## Git and source effects
 
@@ -125,18 +160,22 @@ The primary metric is **Goal completion rate**: the share of representative Goal
 
 ## Current implementation status
 
-| Capability | Status on 2026-08-12 |
+| Capability | Status on 2026-08-13 |
 | --- | --- |
 | Direct ChatGPT coding | Implemented |
 | Independent persistent CodingTask and Direct↔Codex transfer | Implemented in the current working tree; unreleased |
-| Chat and Work task cards | CodingTask and Isolated Goal cards verified; the Live v13 default sandbox-fallback card rendered in ordinary Chat without a new template error, while explicit endpoint-domain card fetches remain intermittently unreliable |
+| Chat and Work task cards | Current resource is v15 with v14–v8 compatibility. Ordinary Chat mounted the v14 Persistent reconnect card; the later authoritative changed-file-count UI required v15 and passed widget/HTTP regressions. A stale v13 cache established the versioned-URI rule. |
 | Durable Goal state and fingerprint-bound approval contract | Implemented in the current working tree; unreleased |
 | Goal platform availability | Supported on POSIX hosts; all Goal tools are hidden on Windows and `server_config.goalOrchestration.supported=false`; Direct/CodingTask remain available |
-| Parallel Goal workers and Pro-supervised Blackboard | Implemented for supervised execution; deterministic HTTP/MCP and real ordinary-Chat flows verified |
+| Parallel Goal workers and Pro-supervised Blackboard | Implemented for supervised and Persistent execution; deterministic HTTP/MCP and real ordinary-Chat flows verified |
 | Pro integration worktree and final Isolated application | Implemented with drift/overlap checks and authoritative source readback |
 | Supervised Live reviewed-checkpoint projection and explicit LIFO revert | Implemented and verified through a representative ordinary-Chat happy path on a supported POSIX host with the installed plugin and real `gpt-5.6-sol`/`high` App Server; focused core/HTTP tests separately cover CAS, recovery, LIFO revert, and retry |
-| Persistent autonomous scheduler and automatic retries/multi-turn work | Planned; unsupported values fail closed rather than behaving like supervised execution |
+| Persistent Isolated scheduler | Implemented in the current working tree and verified through ordinary Chat plus installed-real-Codex HTTP/MCP: explicit start, disconnect, dependency-safe parallel workers, mechanical private integration, passive reconnect, and `waiting_review` / `semantic_review` stop |
+| Persistent interruption and recovery | Pause/resume/cancel fencing, same-attempt reservation/lease recovery, restart idempotency, and process cleanup pass focused core/HTTP regressions; native Windows was not run and Goal orchestration remains hidden there by contract |
+| Multi-turn Persistent workers | Planned; unsupported values fail closed |
+| Fresh automatic worker retries | Planned; Phase 8 permits zero fresh retries, while same-attempt crash recovery preserves identity |
 | Representative real Isolated Goal completion in Chat | Verified in ordinary Chat through the installed private plugin and real Codex App Server: two `gpt-5.6-sol`/`high` workers overlapped, Pro integrated/reviewed/completed, and source application remained unset |
 | Representative real Live Goal completion in Chat | Verified exact review → separate projection approval → completion → zero-write final adoption; projection `proj_32ac83deacc868d2f4799002` was adopted, source HEAD stayed unchanged, and only the approved 2-line/70-byte file was projected |
+| Representative real Persistent Goal stop in Chat | Verified Goal `goal_cd1d3bf868c2bdade5b1c7af` through explicit propose/approve/start, navigation away, real parallel `gpt-5.6-sol`/`high` A/B workers followed by a summary dependency, and reconnect at revision 20. Exactly `a.md`, `b.md`, and `summary.md` reached private integration HEAD prefix `e05a497…`; source HEAD/index/refs and the source target path were unchanged at the semantic-review stop. |
 
 This status table is part of the contract: documentation and tests must not present planned Goal behavior as a shipped capability.

@@ -11,6 +11,7 @@ import {
   publishGoalBlackboard
 } from '../dist/goalOps.js';
 import { GoalStore } from '../dist/goalStore.js';
+import { createGoalContentPolicySnapshot, isGoalPathContentAllowed } from '../dist/goalPolicy.js';
 
 function git(cwd, args) {
   return execFileSync('git', args, {
@@ -161,7 +162,24 @@ try {
     ...input,
     goalKey: 'persistent-v1',
     executionPolicy: 'persistent'
-  }), /requires supervised execution/);
+  }), /content-policy snapshot/);
+  const persistentPolicy = createGoalContentPolicySnapshot(['**/.env', '**/*.pem']);
+  assert.equal(isGoalPathContentAllowed(persistentPolicy, 'src/.ENV'), false);
+  assert.equal(isGoalPathContentAllowed(persistentPolicy, 'keys/SECRET.PEM'), false);
+  const persistent = await proposeGoal(config, { root: sourceRoot }, guard, {
+    ...input,
+    goalKey: 'persistent-valid-v1',
+    executionPolicy: 'persistent',
+    contentPolicy: persistentPolicy,
+    permissions: { ...input.permissions, commands: [], sourceEffects: { apply: false, commit: false, push: false, draftPr: false } }
+  });
+  assert.equal(persistent.goal.executionPolicy, 'persistent');
+  assert.equal(persistent.goal.contentPolicy.fingerprint, persistentPolicy.fingerprint);
+  await expectReject(proposeGoal(config, { root: sourceRoot }, guard, {
+    ...input,
+    goalKey: 'persistent-live-v1', executionPolicy: 'persistent', workspacePolicy: 'live', contentPolicy: persistentPolicy,
+    permissions: { ...input.permissions, commands: [], sourceEffects: { apply: false, commit: false, push: false, draftPr: false } }
+  }), /requires an isolated/);
   await expectReject(proposeGoal(config, { root: sourceRoot }, guard, {
     ...input,
     goalKey: 'live-without-apply-v1',

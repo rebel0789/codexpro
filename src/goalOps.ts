@@ -3,6 +3,8 @@ import path from "node:path";
 import { inspectCodingTaskSource, type CodingTaskSourceWorkspace, type CodingTaskWorkspaceGuard } from "./codingTaskWorktree.js";
 import { GoalStore, type GoalStoreConfig } from "./goalStore.js";
 import { verifyGoalLiveProjection } from "./goalProjection.js";
+import { assertGoalContentPolicySnapshot } from "./goalPolicy.js";
+import { buildGoalWorkerPrompt } from "./goalPrompt.js";
 import {
   GOAL_STATE_VERSION,
   assertGoalDag,
@@ -11,6 +13,7 @@ import {
   validateGoalWorkId,
   type GoalBlackboardKind,
   type GoalBlackboardRecord,
+  type GoalContentPolicySnapshot,
   type GoalExecutionPolicy,
   type GoalEvidenceResult,
   type GoalPermissions,
@@ -44,6 +47,7 @@ export interface ProposeGoalInput {
   workerEffort: "low" | "medium" | "high" | "xhigh";
   limits: GoalResourceLimits;
   permissions: GoalPermissions;
+  contentPolicy?: GoalContentPolicySnapshot;
   baseSha: string;
   work: ProposeGoalWorkInput[];
 }
@@ -148,8 +152,35 @@ function normalizePermissions(permissions: GoalPermissions): GoalPermissions {
   };
 }
 
-function contractPayload(state: Omit<GoalState, "contractFingerprint" | "createFingerprint" | "approval" | "lifecycle" | "revision" | "blackboard" | "events" | "createdAt" | "updatedAt">): string {
-  return JSON.stringify(state);
+function contractShape(state: Pick<GoalState, "version" | "goalId" | "goalKey" | "title" | "goal" | "exclusions" | "completionCriteria" | "verification" | "executionPolicy" | "workspacePolicy" | "workerModel" | "workerEffort" | "limits" | "permissions" | "sourceRoot" | "sourceGitCommonDir" | "baseSha" | "sourceDirtyAtCreation" | "sourceStatusEntryCountAtCreation" | "sourceUncommittedChangesIncluded" | "integrationWorktreeRoot" | "work"> & Partial<Pick<GoalState, "contentPolicy" | "live">>) {
+  return {
+    version: state.version, goalId: state.goalId, goalKey: state.goalKey, title: state.title, goal: state.goal,
+    exclusions: state.exclusions, completionCriteria: state.completionCriteria, verification: state.verification,
+    executionPolicy: state.executionPolicy, workspacePolicy: state.workspacePolicy, workerModel: state.workerModel,
+    workerEffort: state.workerEffort, limits: state.limits, permissions: state.permissions,
+    ...(state.contentPolicy ? { contentPolicy: state.contentPolicy } : {}),
+    sourceRoot: state.sourceRoot, sourceGitCommonDir: state.sourceGitCommonDir, baseSha: state.baseSha,
+    sourceDirtyAtCreation: state.sourceDirtyAtCreation, sourceStatusEntryCountAtCreation: state.sourceStatusEntryCountAtCreation,
+    sourceUncommittedChangesIncluded: state.sourceUncommittedChangesIncluded,
+    integrationWorktreeRoot: state.integrationWorktreeRoot,
+    work: state.work.map((item) => ({
+      workId: item.workId, title: item.title, goal: item.goal, acceptanceCriteria: item.acceptanceCriteria,
+      verification: item.verification, dependsOn: item.dependsOn,
+      ...(item.parallelGroup ? { parallelGroup: item.parallelGroup } : {}), fileGlobs: item.fileGlobs, status: "planned" as const
+    })),
+    ...(state.workspacePolicy === "live" ? { live: { projectedIntegrationSha: state.baseSha, projections: [] } } : {})
+  };
+}
+
+export function computeGoalContractFingerprint(state: Parameters<typeof contractShape>[0]): string {
+  const prefix = state.executionPolicy === "persistent" ? "codexpro-goal-persistent-contract-v1" : "codexpro-goal-contract-v1";
+  return sha256(`${prefix}\0${JSON.stringify(contractShape(state))}`);
+}
+
+export function assertGoalContractIntegrity(state: GoalState): void {
+  const computed = computeGoalContractFingerprint(state);
+  if (computed !== state.contractFingerprint || state.approval.contractFingerprint !== computed) throw new Error("Goal persisted contract fingerprint no longer matches its immutable approved fields.");
+  if (state.approval.status !== "approved") throw new Error("Goal scheduler requires an approved persisted contract.");
 }
 
 export async function proposeGoal(
@@ -159,9 +190,9 @@ export async function proposeGoal(
   input: ProposeGoalInput
 ): Promise<{ goal: GoalState; reused: boolean }> {
   if (process.platform === "win32") throw new Error("Goal orchestration requires POSIX advisory locking and is not supported on Windows by this release.");
-  if (input.executionPolicy !== "supervised" || !["isolated", "live"].includes(input.workspacePolicy)) {
-    throw new Error("Goal execution requires supervised execution in an isolated or Live integration worktree.");
-  }
+  if (input.executionPolicy === "persistent") {
+    if (input.workspacePolicy !== "isolated") throw new Error("Persistent Goal execution requires an isolated integration worktree.");
+  } else if (!["isolated", "live"].includes(input.workspacePolicy)) throw new Error("Goal execution requires an isolated or Live integration worktree.");
   const store = new GoalStore(config);
   await store.initialize();
   const goalKey = text(input.goalKey, "Goal key", 160);
@@ -171,6 +202,13 @@ export async function proposeGoal(
   const goalId = `goal_${sha256(`${identity.commonDir}\0${goalKey}`).slice(0, 24)}`;
   const work = normalizeWork(input.work);
   const permissions = normalizePermissions(input.permissions);
+  const contentPolicy = input.contentPolicy ? assertGoalContentPolicySnapshot(input.contentPolicy) : undefined;
+  if (input.executionPolicy === "persistent") {
+    if (!contentPolicy) throw new Error("Persistent Goal approval requires a fingerprinted blocked-glob content-policy snapshot.");
+    if (permissions.commands.length || Object.values(permissions.sourceEffects).some(Boolean)) {
+      throw new Error("Persistent Goal execution requires empty commands and all sourceEffects=false.");
+    }
+  }
   if (input.workspacePolicy === "live" && !permissions.sourceEffects.apply) {
     throw new Error("A supervised Live Goal requires the existing sourceEffects.apply permission.");
   }
@@ -189,6 +227,7 @@ export async function proposeGoal(
     workerEffort: input.workerEffort,
     limits: normalizeLimits(input.limits),
     permissions,
+    ...(contentPolicy ? { contentPolicy } : {}),
     sourceRoot: identity.sourceRoot,
     sourceGitCommonDir: identity.commonDir,
     baseSha: identity.baseSha,
@@ -199,8 +238,9 @@ export async function proposeGoal(
     work,
     ...(input.workspacePolicy === "live" ? { live: { projectedIntegrationSha: identity.baseSha, projections: [] } } : {})
   };
+  for (const item of immutable.work) buildGoalWorkerPrompt(immutable as GoalState, item);
   if (!path.isAbsolute(immutable.integrationWorktreeRoot)) throw new Error("Goal integration worktree path must be absolute.");
-  const contractFingerprint = sha256(`codexpro-goal-contract-v1\0${contractPayload(immutable)}`);
+  const contractFingerprint = computeGoalContractFingerprint(immutable);
   const createFingerprint = sha256(`codexpro-goal-create-v1\0${goalKey}\0${contractFingerprint}`);
   return store.withGoalLock(goalId, async () => {
     const existing = await store.getIfExists(goalId);
@@ -337,6 +377,7 @@ export async function pauseGoal(config: GoalStoreConfig, goalIdInput: string, in
   return store.withGoalLock(goalId, async () => {
     const state = await store.get(goalId);
     if (state.pauseKey === requestKey && state.lifecycle === "paused") return state;
+    if (state.executionPolicy === "persistent" && state.lifecycle === "waiting_review") throw new Error("Persistent Goal scheduling has already stopped for Pro semantic review and cannot be paused.");
     if (state.revision !== input.expectedRevision) throw new Error(`Goal revision conflict: expected ${input.expectedRevision}, found ${state.revision}.`);
     if (!["running", "waiting_review"].includes(state.lifecycle)) throw new Error("Only a running or review-waiting Goal can pause scheduling.");
     const now = new Date().toISOString();
@@ -359,6 +400,7 @@ export async function resumeGoal(config: GoalStoreConfig, goalIdInput: string, i
   const requestKey = text(input.requestKey, "Goal resume key", 160);
   return store.withGoalLock(goalId, async () => {
     const state = await store.get(goalId);
+    if (state.executionPolicy === "persistent") throw new Error("Persistent Goals resume only through resumePersistentGoal, which explicitly wakes the detached scheduler.");
     if (state.resumeKey === requestKey && state.lifecycle !== "paused") return state;
     if (state.revision !== input.expectedRevision) throw new Error(`Goal revision conflict: expected ${input.expectedRevision}, found ${state.revision}.`);
     if (state.lifecycle !== "paused") throw new Error("Only a paused Goal can resume scheduling.");
@@ -383,6 +425,7 @@ export async function markGoalCanceled(config: GoalStoreConfig, goalIdInput: str
   const requestKey = text(input.requestKey, "Goal cancel key", 160);
   return store.withGoalLock(goalId, async () => {
     const state = await store.get(goalId);
+    if (state.executionPolicy === "persistent") throw new Error("Persistent Goals require durable canceling and authoritative child drain before terminal cancellation.");
     if (state.cancelKey === requestKey && state.lifecycle === "canceled") return state;
     if (state.revision !== input.expectedRevision) throw new Error(`Goal revision conflict: expected ${input.expectedRevision}, found ${state.revision}.`);
     if (["completed", "failed", "canceled"].includes(state.lifecycle)) throw new Error("Goal is already terminal.");

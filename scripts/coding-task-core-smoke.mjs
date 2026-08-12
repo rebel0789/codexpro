@@ -132,6 +132,23 @@ try {
     /not allowed/
   );
 
+  // A committed task checkpoint has a clean HEAD-relative status, while the
+  // review remains a base..HEAD change. Its file count must follow the same
+  // policy-filtered changed path set returned to the caller.
+  const committedReviewTask = await createCodingTask(config, { root: sourceRoot }, guard, {
+    ...createInput,
+    taskKey: 'committed-review-count',
+    title: 'Committed review count regression'
+  });
+  await fs.writeFile(path.join(committedReviewTask.task.worktreeRoot, 'app.txt'), 'committed task edit\n', 'utf8');
+  git(committedReviewTask.task.worktreeRoot, ['add', '--', 'app.txt']);
+  git(committedReviewTask.task.worktreeRoot, ['commit', '-m', 'task checkpoint']);
+  const committedReview = await reviewCodingTask(config, committedReviewTask.task.taskId);
+  assert.equal(committedReview.status, '');
+  assert.deepEqual(committedReview.changedPaths, ['app.txt']);
+  assert.equal(committedReview.changedFileCount, 1);
+  assert.match(committedReview.diff, /committed task edit/);
+
   const direct = await assertDirectOwner(config, created.task.taskId, {
     expectedRevision: created.task.revision,
     executorEpoch: created.task.executorLease.epoch,
@@ -385,7 +402,8 @@ try {
   assert.deepEqual(review.changedPaths.sort(), [':(glob)**', 'app.txt', 'new-file.txt']);
   assert.equal(review.omittedPathCount, 3);
   assert.equal(review.contentComplete, false);
-  assert.equal(review.changedFileCount, 6);
+  assert.equal(review.changedFileCount, review.changedPaths.length);
+  assert.equal(review.changedFileCount, 3);
   assert.ok(review.additions >= 3);
   assert.ok(review.deletions >= 1);
   assert.equal(review.diffSha256, review.visibleDiffSha256);
