@@ -172,6 +172,40 @@ Use handoff mode if you want ChatGPT to write a plan only and let Codex execute 
 
 Use `CODEXPRO_WRITE_MODE=off` when you want direct `write` and `edit` tools removed from the advertised MCP tool list while still allowing bounded handoff/context files.
 
+## How do I switch between direct coding and Codex collaboration?
+
+Start CodexPro for a trusted repository with both execution capabilities explicitly enabled:
+
+```bash
+codexpro start --root /path/to/repo --write workspace --bash full
+```
+
+The defaults remain safer. CodingTask creation, `run_coding_task`, `followup_coding_task`, and Direct → Codex transfer require both `writeMode=workspace` and `bashMode=full`, because Codex App Server can execute project commands beyond the safe-shell allowlist. Status, list, review, cancel, and Codex → Direct transfer stay available without full bash.
+
+Create one CodingTask in direct mode and use its returned workspace id with the normal coding tools. When the direct operation is idle, call `transition_coding_task` to transfer exclusive ownership to Codex, then `run_coding_task`. Use `followup_coding_task` for another turn in the same persisted task/thread. After Codex is idle, transition ownership back to direct mode and use `review_coding_task` or `show_changes`.
+
+The worktree and context stay the same across both directions and connector restarts. CodexPro rejects concurrent mutations instead of trying to merge two writers. It also rejects general background jobs in task worktrees initially because they could outlive the ownership boundary.
+
+This flow does not auto-commit, merge, push, open a PR, or delete the task. Codex runs with workspace write access but no network and approval policy `never`; requests that would need approval or interactive input fail closed. Task metadata, bounded logs, and the worktree live outside the project under `~/.codexpro/tasks` by default and are retained for recovery and review. Change the defaults with `--task-dir`, `--codex-model`, and `--codex-reasoning-effort`. A custom `--codex-dir` is passed to detached Codex as `CODEX_HOME`.
+
+The older `.ai-bridge` handoff commands remain available for compatibility and planning-only workflows. They are not the persistent CodingTask collaboration path.
+
+## How does Pro orchestrate multiple Codex workers?
+
+Ask for a larger outcome in ordinary Chat. Pro can persist an inert `propose_goal` contract, show its fingerprinted Goal card, and call `approve_goal` only after you accept that exact scope. Approval does not execute anything. `start_goal` launches dependency-ready isolated CodingTasks concurrently; Pro then refreshes their persisted state, reviews worker evidence, integrates accepted patches in dependency order, and records completion against every approved criterion.
+
+The integrated result remains outside the source workspace until a separate confirmed `apply_goal`. Source apply requires contract permission, the original Git HEAD, and no overlap with pre-existing dirty paths; it preserves unrelated dirt and does not stage, commit, push, or open a PR.
+
+The current unreleased slice is supervised and isolated: one turn per worker, no automatic retries, no worker network, and no background scheduler that makes fresh design decisions while Chat is closed. Detached workers survive reconnects, but Pro remains responsible for refresh, integration, and newly unblocked work. The Goal `commands` list is a verification protocol shown to Codex, not a narrower command sandbox; trusted Goal execution therefore requires both workspace writes and full bash.
+
+## Can CodexPro run a benchmark longer than 180 seconds?
+
+Yes. Keep foreground `bash` for bounded commands and call `start_background_job` for a long benchmark or test suite. It returns a durable job id quickly; `wait_for_background_job`, `get_background_job`, and `list_background_jobs` recover status after a ChatGPT/MCP disconnect or CodexPro restart. Use `cancel_background_job` only when you explicitly want to stop it.
+
+Every start requires a stable `job_key`. Repeating the same key and command returns the existing job instead of launching twice. CodexPro does not retry failures or advance benchmark phases automatically. The command still follows safe/full bash policy and any required bash session label.
+
+For identity-sensitive work, also pass the full `expected_git_head` and `require_clean_worktree: true`. They are checked twice and become part of the idempotent execution contract. If a service environment resolves a different Codex installation than your terminal, restart it with `--codex-bin /absolute/path/to/codex` and verify `codexBin` through `server_config`.
+
 ## Can CodexPro bind bash to a specific session id?
 
 CodexPro cannot attach to, read, or execute inside a specific Codex app conversation or terminal session.

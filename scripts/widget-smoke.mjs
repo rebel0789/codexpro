@@ -107,6 +107,219 @@ delayed.listeners.get("openai:set_globals")({
 assert.match(delayed.root.innerHTML, /Connected workspace/);
 assert.equal(delayed.document.documentElement.dataset.theme, "dark");
 
+const directTask = mount({
+  theme: "light",
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "review_coding_task",
+      task: {
+        task_id: "task_direct_01",
+        title: "Tighten session validation",
+        executor: "direct",
+        lifecycle: "needs_review",
+        current_activity: "Reviewing the direct edits before handoff.",
+        summary: "Validation now rejects expired sessions at the boundary.",
+        review: {
+          changed_files: ["src/session.ts", "test/session.test.ts"],
+          additions: 18,
+          deletions: 4,
+          tests: { status: "passed", passed: 7, command: "npm test -- session" }
+        }
+      }
+    }
+  }
+});
+assert.match(directTask.root.innerHTML, /Tighten session validation/);
+assert.match(directTask.root.innerHTML, /Direct coding/);
+assert.match(directTask.root.innerHTML, /Needs review/);
+assert.match(directTask.root.innerHTML, /7 passed/);
+assert.match(directTask.root.innerHTML, /Copy summary/);
+const summaryButton = new FakeElement();
+await directTask.root.listeners.get("click")({ target: summaryButton });
+assert.match(directTask.copied(), /Mode: Direct coding/);
+
+const codexTask = mount({
+  theme: "dark",
+  toolOutput: {
+    result: {
+      structuredContent: {
+        codexpro_tool: "run_coding_task",
+        coding_task: {
+          task_id: "task_codex_01",
+          title: "Trace the flaky retry",
+          executor: "codex",
+          status: "running",
+          active_turn: {
+            activity: "Codex is tracing retry ownership.",
+            log: "Opened retry.ts\nFollowing the scheduler edge"
+          }
+        }
+      }
+    }
+  }
+});
+assert.match(codexTask.root.innerHTML, /Codex collaboration/);
+assert.match(codexTask.root.innerHTML, /Codex is tracing retry ownership/);
+assert.match(codexTask.root.innerHTML, /Activity log/);
+assert.equal(codexTask.document.documentElement.dataset.theme, "dark");
+
+const persistedTaskWithoutReviewMetrics = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "get_coding_task",
+      task: {
+        taskId: "task_0123456789abcdef01234567",
+        title: "Persisted Codex result",
+        executor: "codex",
+        lifecycle: "waiting_review"
+      },
+      git_observation: { dirty: true, status: " M src/session.ts" }
+    }
+  }
+});
+assert.match(persistedTaskWithoutReviewMetrics.root.innerHTML, /Waiting review/);
+assert.match(persistedTaskWithoutReviewMetrics.root.innerHTML, /—<\/div><div class="metric-label">changed files/);
+assert.doesNotMatch(persistedTaskWithoutReviewMetrics.root.innerHTML, />0<\/div><div class="metric-label">changed files/);
+
+const persistedTaskWithReviewSummary = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "get_coding_task",
+      task: {
+        taskId: "task_0123456789abcdef01234567",
+        title: "Persisted Codex result",
+        executor: "codex",
+        lifecycle: "waiting_review"
+      },
+      review_summary: {
+        changed_files_count: 1,
+        additions: 6,
+        deletions: 2,
+        content_complete: true
+      }
+    }
+  }
+});
+assert.match(persistedTaskWithReviewSummary.root.innerHTML, />1<\/div><div class="metric-label">changed files/);
+assert.match(persistedTaskWithReviewSummary.root.innerHTML, />\+6<\/div><div class="metric-label">additions/);
+assert.match(persistedTaskWithReviewSummary.root.innerHTML, />−2<\/div><div class="metric-label">deletions/);
+
+const proposedGoal = mount({
+  theme: "light",
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "propose_goal",
+      goal: {
+        goalId: "goal_0123456789abcdef01234567",
+        title: "Harden authentication boundaries",
+        lifecycle: "proposed",
+        revision: 1,
+        executionPolicy: "supervised",
+        workspacePolicy: "isolated",
+        baseSha: "a".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "pending" },
+        completionCriteria: ["All worker acceptance criteria pass"],
+        blackboard: [],
+        work: [
+          { workId: "work_contract", title: "Define contract", status: "planned", dependsOn: [] },
+          { workId: "work_tests", title: "Add tests", status: "planned", dependsOn: [] },
+          { workId: "work_integrate", title: "Integrate", status: "planned", dependsOn: ["work_contract", "work_tests"] }
+        ]
+      },
+      completed_work_count: 0,
+      running_work_count: 0,
+      blocked_work_count: 0,
+      blackboard_count: 0
+    }
+  }
+});
+assert.match(proposedGoal.root.innerHTML, /Harden authentication boundaries/);
+assert.match(proposedGoal.root.innerHTML, /Pro orchestration/);
+assert.match(proposedGoal.root.innerHTML, /Pending/);
+assert.match(proposedGoal.root.innerHTML, /Define contract/);
+assert.match(proposedGoal.root.innerHTML, /after work_contract, work_tests/);
+assert.match(proposedGoal.root.innerHTML, /approve only after the user explicitly agrees/i);
+
+const approvedGoal = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "approve_goal",
+      goal: {
+        goalId: "goal_0123456789abcdef01234567",
+        title: "Harden authentication boundaries",
+        lifecycle: "approved",
+        revision: 2,
+        executionPolicy: "supervised",
+        workspacePolicy: "isolated",
+        baseSha: "a".repeat(40),
+        contractFingerprint: "b".repeat(64),
+        approval: { status: "approved" },
+        completionCriteria: ["All worker acceptance criteria pass"],
+        blackboard: [{ kind: "decision", summary: "Keep validation at the boundary." }],
+        work: [{ workId: "work_contract", title: "Define contract", status: "planned", dependsOn: [] }]
+      },
+      blackboard_count: 1
+    }
+  }
+});
+assert.match(approvedGoal.root.innerHTML, /Approved/);
+assert.match(approvedGoal.root.innerHTML, /remains inert until an explicit execution action/i);
+assert.match(approvedGoal.root.innerHTML, /Blackboard/);
+
+const transitionTask = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "transition_coding_task",
+      task: {
+        task_id: "task_handoff_01",
+        title: "Move checkout work to Codex",
+        executor: "codex",
+        lifecycle: "ready_for_handoff",
+        transition: {
+          from: "direct",
+          to: "codex",
+          authoritative_readback: { confirmed: true, status: "ready" }
+        },
+        review: {
+          changed_files: ["src/checkout.ts"],
+          additions: 9,
+          deletions: 2,
+          diff: "diff --git a/src/checkout.ts b/src/checkout.ts\n+safe handoff"
+        }
+      }
+    }
+  }
+});
+assert.match(transitionTask.root.innerHTML, /Ready for handoff/);
+assert.match(transitionTask.root.innerHTML, /Direct coding → Codex collaboration/);
+assert.match(transitionTask.root.innerHTML, /Confirmed/);
+assert.match(transitionTask.root.innerHTML, /Review diff/);
+assert.doesNotMatch(transitionTask.root.innerHTML, /Copy summary/);
+const diffButton = new FakeElement();
+await transitionTask.root.listeners.get("click")({ target: diffButton });
+assert.match(transitionTask.copied(), /diff --git a\/src\/checkout.ts/);
+
+const pendingTransition = mount({
+  toolOutput: {
+    structuredContent: {
+      codexpro_tool: "transition_coding_task",
+      task: {
+        title: "Hand off only after readback",
+        executor: "direct",
+        transition: {
+          from: "direct",
+          to: "codex",
+          authoritative_readback: "authoritative readback pending"
+        }
+      }
+    }
+  }
+});
+assert.match(pendingTransition.root.innerHTML, /Transitioning/);
+assert.match(pendingTransition.root.innerHTML, /Wait for authoritative readback/);
+assert.doesNotMatch(pendingTransition.root.innerHTML, /Ready for handoff/);
+
 const unavailable = mount();
 assert.equal(unavailable.timers.length, 1);
 unavailable.timers[0].callback();

@@ -52,6 +52,7 @@ const MODES = ["agent", "handoff", "pro"] as const;
 const BASH_MODES = ["safe", "off", "full"] as const;
 const BASH_TRANSCRIPTS = ["compact", "full"] as const;
 const CODEX_SESSIONS = ["off", "metadata", "read"] as const;
+const CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh"] as const;
 const WRITE_MODES = ["workspace", "handoff", "off"] as const;
 const TOOL_MODES = ["standard", "minimal", "full"] as const;
 
@@ -67,6 +68,12 @@ const AdminProfilePatch = z.object({
   bashTranscript: z.enum(BASH_TRANSCRIPTS).optional(),
   codexSessions: z.enum(CODEX_SESSIONS).optional(),
   codexDir: textField(4096),
+  taskDir: textField(4096),
+  codexModel: textField(160).refine(
+    (value) => !value || /^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(value),
+    "codexModel must use letters, numbers, dot, underscore, colon, slash, or dash."
+  ),
+  codexReasoningEffort: z.enum(CODEX_REASONING_EFFORTS).optional(),
   bashSession: textField(64).refine(
     (value) => !value || /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(value),
     "bashSession must be 1-64 characters using letters, numbers, dot, underscore, or dash, and must start with a letter or number."
@@ -98,6 +105,9 @@ interface ProfileFormValues {
   bashTranscript: "compact" | "full";
   codexSessions: "off" | "metadata" | "read";
   codexDir: string;
+  taskDir: string;
+  codexModel: string;
+  codexReasoningEffort: "low" | "medium" | "high" | "xhigh";
   bashSession: string;
   requireBashSession: boolean;
   write: "off" | "handoff" | "workspace";
@@ -175,6 +185,13 @@ function profileValues(config: CodexProConfig, profile = readWorkspaceProfile(co
     bashTranscript: oneOf(profile.bashTranscript ?? config.bashTranscript, BASH_TRANSCRIPTS, config.bashTranscript),
     codexSessions: oneOf(profile.codexSessions ?? config.codexSessions, CODEX_SESSIONS, config.codexSessions),
     codexDir: String(profile.codexDir ?? config.codexDir),
+    taskDir: String(profile.taskDir ?? config.codingTaskDir),
+    codexModel: String(profile.codexModel ?? config.codexModel),
+    codexReasoningEffort: oneOf(
+      profile.codexReasoningEffort ?? config.codexReasoningEffort,
+      CODEX_REASONING_EFFORTS,
+      config.codexReasoningEffort
+    ),
     bashSession: String(profile.bashSession ?? config.bashSessionId ?? ""),
     requireBashSession: Boolean(profile.requireBashSession ?? config.requireBashSession),
     write,
@@ -306,6 +323,9 @@ function profileForm(config: CodexProConfig): string {
             <label><span>Tool mode</span><select name="toolMode">${selectOptions(TOOL_MODES, values.toolMode)}</select></label>
             <label><span>Codex sessions</span><select name="codexSessions">${selectOptions(CODEX_SESSIONS, values.codexSessions)}</select></label>
             <label><span>Codex directory</span><input name="codexDir" value="${escapeHtml(values.codexDir)}"></label>
+            <label><span>CodingTask state directory</span><input name="taskDir" value="${escapeHtml(values.taskDir)}"></label>
+            <label><span>Codex model</span><input name="codexModel" value="${escapeHtml(values.codexModel)}"></label>
+            <label><span>Codex reasoning</span><select name="codexReasoningEffort">${selectOptions(CODEX_REASONING_EFFORTS, values.codexReasoningEffort)}</select></label>
             <label><span>Bash session</span><input name="bashSession" value="${escapeHtml(values.bashSession)}"></label>
           </div>
           <label class="check-row"><input name="toolCards" type="checkbox" value="true"${values.toolCards ? " checked" : ""}><span>Enable ChatGPT tool cards</span></label>
@@ -368,6 +388,10 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
     ...(next.bashTranscript !== "compact" ? { bashTranscript: next.bashTranscript } : {}),
     ...(next.codexSessions !== "off" ? { codexSessions: next.codexSessions } : {}),
     ...(next.codexDir ? { codexDir: next.codexDir } : {}),
+    ...(existing.codexBin ? { codexBin: existing.codexBin } : {}),
+    ...(next.taskDir ? { taskDir: normalizeProfilePath(config.defaultRoot, next.taskDir) } : {}),
+    codexModel: next.codexModel,
+    codexReasoningEffort: next.codexReasoningEffort,
     ...(next.bashSession ? { bashSession: next.bashSession } : {}),
     ...(next.requireBashSession ? { requireBashSession: true } : {}),
     write,
@@ -395,6 +419,12 @@ function profileResponse(config: CodexProConfig): Record<string, unknown> {
       bashMode: config.bashMode,
       bashTranscript: config.bashTranscript,
       codexSessions: config.codexSessions,
+      codexBin: config.codexBin ?? null,
+      codingTaskDir: config.codingTaskDir,
+      codexModel: config.codexModel,
+      codexReasoningEffort: config.codexReasoningEffort,
+      codingTaskDefaultTimeoutMs: config.codingTaskDefaultTimeoutMs,
+      codingTaskMaxLogBytes: config.codingTaskMaxLogBytes,
       writeMode: config.writeMode,
       toolMode: config.toolMode,
       toolCards: config.toolCards,
@@ -1409,6 +1439,9 @@ function onboardingPage(config: CodexProConfig): string {
           toolCards: Boolean(form.elements.toolCards?.checked),
           codexSessions: data.codexSessions,
           codexDir: data.codexDir,
+          taskDir: data.taskDir,
+          codexModel: data.codexModel,
+          codexReasoningEffort: data.codexReasoningEffort,
           bashSession: data.bashSession,
           requireBashSession: Boolean(form.elements.requireBashSession?.checked),
           noInstallCloudflared: Boolean(form.elements.noInstallCloudflared?.checked)
@@ -1499,9 +1532,23 @@ async function main(): Promise<void> {
       return;
     }
     const started = Date.now();
-    console.error(`[CodexPro] ${req.method} ${req.path} received`);
+    console.error(`[CodexPro] ${req.method} ${req.path} received at=${new Date().toISOString()}`);
     res.on("finish", () => {
-      console.error(`[CodexPro] ${req.method} ${req.path} -> ${res.statusCode} ${Date.now() - started}ms`);
+      const mcp = res.locals.codexproMcp as
+        | { method?: string; tool?: string; session?: string; recovery?: string; aliases?: number }
+        | undefined;
+      const details = mcp
+        ? [
+            mcp.method ? `method=${mcp.method}` : "",
+            mcp.tool ? `tool=${mcp.tool}` : "",
+            mcp.session ? `session=${mcp.session}` : "",
+            mcp.recovery ? `recovery=${mcp.recovery}` : "",
+            mcp.aliases ? `aliases=${mcp.aliases}` : ""
+          ].filter(Boolean).join(" ")
+        : "";
+      console.error(
+        `[CodexPro] ${req.method} ${req.path} -> ${res.statusCode} ${Date.now() - started}ms at=${new Date().toISOString()}${details ? ` ${details}` : ""}`
+      );
     });
     next();
   });
@@ -1569,6 +1616,76 @@ async function main(): Promise<void> {
     return Array.isArray(value) ? value[0] : value;
   }
 
+  function describeMcpRequest(body: unknown): { method?: string; tool?: string } {
+    const safeLogLabel = (value: string) => value.replace(/[^A-Za-z0-9_.:/-]/g, "?").slice(0, 96);
+    const messages = Array.isArray(body) ? body : [body];
+    const requests = messages.filter(
+      (message): message is { method: string; params?: { name?: unknown } } =>
+        Boolean(message && typeof message === "object" && "method" in message && typeof message.method === "string")
+    );
+    if (requests.length !== 1) return { method: requests.length > 1 ? "batch" : undefined };
+    const request = requests[0];
+    return {
+      method: safeLogLabel(request.method),
+      tool: request.method === "tools/call" && typeof request.params?.name === "string"
+        ? safeLogLabel(request.params.name)
+        : undefined
+    };
+  }
+
+  function normalizeMcpToolAliases(body: unknown): { body: unknown; aliases: number } {
+    const normalizeMessage = (message: unknown): { message: unknown; aliases: number } => {
+      if (!message || typeof message !== "object" || Array.isArray(message)) {
+        return { message, aliases: 0 };
+      }
+      const request = message as Record<string, unknown>;
+      if (request.method !== "tools/call" || !request.params || typeof request.params !== "object" || Array.isArray(request.params)) {
+        return { message, aliases: 0 };
+      }
+      const params = request.params as Record<string, unknown>;
+      if (typeof params.name !== "string" || !params.name.startsWith("codexpro.") || params.name.length === "codexpro.".length) {
+        return { message, aliases: 0 };
+      }
+      return {
+        message: {
+          ...request,
+          params: {
+            ...params,
+            name: params.name.slice("codexpro.".length)
+          }
+        },
+        aliases: 1
+      };
+    };
+
+    if (!Array.isArray(body)) {
+      const normalized = normalizeMessage(body);
+      return { body: normalized.message, aliases: normalized.aliases };
+    }
+    let aliases = 0;
+    const messages = body.map((message) => {
+      const normalized = normalizeMessage(message);
+      aliases += normalized.aliases;
+      return normalized.message;
+    });
+    return { body: aliases ? messages : body, aliases };
+  }
+
+  function setMcpLogContext(
+    res: Response,
+    body: unknown,
+    session: "new" | "known" | "missing" | "stale" | "malformed",
+    recovery: "stateful" | "stateless" | "rejected",
+    aliases = 0
+  ): void {
+    res.locals.codexproMcp = {
+      ...describeMcpRequest(body),
+      session,
+      recovery,
+      aliases
+    };
+  }
+
   function sendSessionError(res: Response, sessionId: string | undefined): void {
     const missing = !sessionId;
     const malformed = Boolean(sessionId && !sessionIdPattern.test(sessionId));
@@ -1624,6 +1741,7 @@ async function main(): Promise<void> {
   });
 
   app.get("/healthz", (_req, res) => {
+    pruneTransports();
     res.json({
       ok: true,
       name: "CodexPro",
@@ -1634,12 +1752,24 @@ async function main(): Promise<void> {
       bashSessionId: config.bashSessionId ?? null,
       requireBashSession: config.requireBashSession,
       codexSessions: config.codexSessions,
+      codexBin: config.codexBin ?? null,
+      codingTasks: "persistent-worktree-v1",
+      codingTaskDir: config.codingTaskDir,
+      codexModel: config.codexModel,
+      codexReasoningEffort: config.codexReasoningEffort,
+      codingTaskDefaultTimeoutMs: config.codingTaskDefaultTimeoutMs,
+      codingTaskMaxLogBytes: config.codingTaskMaxLogBytes,
       writeMode: config.writeMode,
       toolMode: config.toolMode,
       widgetDomain: config.widgetDomain,
       contextDir: config.contextDir,
       authEnabled: Boolean(config.authToken),
-      authRequired: Boolean(config.authToken)
+      authRequired: Boolean(config.authToken),
+      mcpSessionRecovery: "stateless-post-fallback",
+      mcpToolAliasRecovery: "codexpro-prefix",
+      backgroundJobs: "durable-runner-v1",
+      backgroundJobDefaultTimeoutMs: config.backgroundJobDefaultTimeoutMs,
+      activeMcpSessions: transports.size
     });
   });
 
@@ -1675,12 +1805,21 @@ async function main(): Promise<void> {
   app.post("/mcp", express.json({ limit: "20mb" }), async (req, res) => {
     try {
       const sessionId = requestSessionId(req);
-      let transport: StreamableHTTPServerTransport;
+      const normalized = normalizeMcpToolAliases(req.body);
+      const mcpBody = normalized.body;
+      if (sessionId && !sessionIdPattern.test(sessionId)) {
+        setMcpLogContext(res, mcpBody, "malformed", "rejected", normalized.aliases);
+        sendSessionError(res, sessionId);
+        return;
+      }
 
       const existingTransport = getTransport(sessionId);
       if (existingTransport) {
-        transport = existingTransport;
-      } else if (!sessionId && isInitializeRequest(req.body)) {
+        setMcpLogContext(res, mcpBody, "known", "stateful", normalized.aliases);
+        await existingTransport.handleRequest(req, res, mcpBody);
+      } else if (!sessionId && isInitializeRequest(mcpBody)) {
+        setMcpLogContext(res, mcpBody, "new", "stateful", normalized.aliases);
+        let transport: StreamableHTTPServerTransport;
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
@@ -1701,12 +1840,31 @@ async function main(): Promise<void> {
 
         const server = createCodexProServer(config);
         await server.connect(transport);
+        await transport.handleRequest(req, res, mcpBody);
       } else {
-        sendSessionError(res, sessionId);
-        return;
+        // A process restart necessarily drops the SDK's in-memory session map. ChatGPT can
+        // continue to send the old session id, so recover authenticated POST requests with
+        // an isolated stateless server. Existing stateful sessions keep their per-session
+        // workspace selection; recovered calls should pass workspace_id when targeting a
+        // non-default root. GET remains stateful and returns 404 below so clients can
+        // reinitialize their event stream normally.
+        setMcpLogContext(res, mcpBody, sessionId ? "stale" : "missing", "stateless", normalized.aliases);
+        const recoveryTransport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: undefined,
+          enableJsonResponse: true
+        } as any);
+        const recoveryServer = createCodexProServer(config);
+        try {
+          await recoveryServer.connect(recoveryTransport);
+          await recoveryTransport.handleRequest(req, res, mcpBody);
+        } finally {
+          await recoveryServer.close().catch((closeError: unknown) => {
+            console.error(
+              `[CodexPro] ${new Date().toISOString()} stateless MCP recovery close failed: ${closeError instanceof Error ? closeError.message : String(closeError)}`
+            );
+          });
+        }
       }
-
-      await transport.handleRequest(req, res, req.body);
     } catch (error) {
       console.error(error instanceof Error ? error.stack ?? error.message : String(error));
       if (!res.headersSent) {

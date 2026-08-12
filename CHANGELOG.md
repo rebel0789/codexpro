@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Added the first supervised Goal orchestration vertical slice: inert fingerprinted proposals, explicit approval/start separation, parallel Goal-owned CodingTasks, a structured Pro-supervised Blackboard, dependency-ordered isolated integration, Goal cards, persisted completion evidence, pause/resume/cancel, and separately confirmed source application with drift and dirty-path overlap protection.
+- Verified the vertical slice through ordinary Chat and the installed private plugin with two concurrent real `gpt-5.6-sol`/`high` Codex workers, Pro-controlled integration/review/completion, persistent v11 cards, and no source application.
+- Made `review_goal` the authoritative private-integration-worktree inspection surface, including an integrated `git diff --check`, and clarified that generic workspace denial for internal Goal worktrees is an expected isolation boundary rather than a verification failure.
+- Added Goal HTTP/MCP and execution regressions covering parallel detached workers, reconnect recovery, passive reads, isolated integration, cancellation, idempotent source application, and preservation of unrelated source dirt. Unsupported persistent, Live, multi-turn, and automatic-retry contracts fail closed.
+- Upgraded the opt-in Apps widget to v11 with Goal lifecycle, approval, work graph, Blackboard, review, and next-action rendering while retaining legacy card resources.
+- Added persistent CodingTask worktrees and exclusive bidirectional ownership transfer between direct ChatGPT coding and supervised Codex collaboration, including same-thread follow-ups, restart-safe status/review, and explicit transition guards.
+- Added CodingTask launcher/profile/HTTP configuration for a private task directory, Codex model, and reasoning effort; defaults are `gpt-5.6-sol` and `high` with network disabled and approval requests rejected.
+- Added durable MCP background jobs for long tests and benchmarks, with detached runners, atomic reconnect-safe state, bounded logs outside the workspace, idempotent job keys, explicit status/wait/list/cancel tools, process-group timeout/cancellation, and no automatic retry or phase advancement.
+- Added exact Codex CLI pinning for service environments and optional full-SHA/clean-worktree launch guards that are rechecked by durable runners before execution.
+- Refreshed patched transitive releases for brace expansion, URI parsing, HTTP middleware, and IP classification after the August 2026 advisories; `npm audit` is clean again.
+- Fixed the ripgrep availability probe to honor the same `PATH` as the subsequent search process, so a login-shell profile cannot select an unavailable binary instead of the Node fallback.
 - Added saved additional projects with `codexpro settings set --project <path>`, session-local workspace selection through the existing `open_workspace` tool, and `--clear-projects` for removing the saved allowlist.
 - Isolated workspace selection between HTTP MCP sessions while preserving explicit workspace-id access for configured roots, with stdio, HTTP, profile, and regression coverage.
 - Added native workspace image inspection for PNG, JPEG, GIF, and WebP files through `view_image`.

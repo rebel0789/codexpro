@@ -120,6 +120,38 @@ Normal coding 模式下，ChatGPT 可以在配置的工作区内写入和精确�
 
 如果你只想让 ChatGPT 规划，不想让它直接改源码，用 handoff 模式。
 
+## 如何在直接编码和 Codex 协作之间切换？
+
+受信任的仓库必须同时显式启用 workspace write 和 full bash：
+
+```bash
+codexpro start --root /path/to/repo --write workspace --bash full
+```
+
+安全默认值不会改变。创建 CodingTask、运行、follow-up 和 Direct → Codex 切换同时要求 `writeMode=workspace` 与 `bashMode=full`，因为 Codex App Server 可以执行超出 safe shell allowlist 的项目命令。状态、列表、审查、取消以及 Codex → Direct 切换无需 full bash，仍可用于检查和恢复。
+
+以 direct owner 创建一个 CodingTask，并用返回的 `workspace_id` 调用普通编码工具。直接操作空闲后，使用 `transition_coding_task` 把独占写入权交给 Codex，再调用 `run_coding_task`；后续请求用 `followup_coding_task`，会复用同一任务、thread 和 worktree。Codex 空闲后可切回 direct，并通过 `review_coding_task` 或 `show_changes` 审查。
+
+任务在断线和服务重启后仍可恢复。CodexPro 会拒绝并发写入，也暂时拒绝 CodingTask worktree 中的普通后台任务。它不会自动 commit、merge、push、创建 PR 或删除 worktree。Codex 默认使用 `gpt-5.6-sol` / `high`，禁用网络且 approval policy 为 `never`；可通过 `--task-dir`、`--codex-model` 和 `--codex-reasoning-effort` 配置。自定义 `--codex-dir` 会作为 `CODEX_HOME` 传给独立 Codex 进程。
+
+旧 `.ai-bridge` handoff 仍保留作兼容和规划用途，但不是持久 CodingTask 协作流程。
+
+## Pro 如何编排多个 Codex worker？
+
+在普通 Chat 中提出较大的结果目标。Pro 可以先保存不执行的 `propose_goal` 契约并展示带指纹的 Goal 卡片；只有你接受该精确范围后才调用 `approve_goal`，而批准本身仍不会启动工作。`start_goal` 会并行启动依赖已满足的隔离 CodingTask，随后 Pro 刷新持久状态、审查证据、按依赖顺序集成结果，并根据每一条批准的标准判断是否完成。
+
+集成结果在单独确认 `apply_goal` 前不会进入源工作区。应用需要契约权限、原始 Git HEAD 与无脏路径重叠；它会保留无关的本地改动，也不会 stage、commit、push 或创建 PR。
+
+当前尚未发布的切片仅支持 supervised + isolated、每个 worker 一次 turn、无自动重试和无 worker 网络。独立 worker 可以跨断线继续，但没有在 Chat 关闭后做新设计判断的后台调度器。`commands` 列表是交给 Codex 的验证协议，不是更窄的命令沙箱；可信 Goal 执行因此同时要求 workspace write 和 full bash。
+
+## CodexPro 能运行超过 180 秒的 benchmark 吗？
+
+可以。前台 `bash` 继续用于短命令；长 benchmark 或测试套件用 `start_background_job`。它会快速返回持久 job id，ChatGPT/MCP 断线或 CodexPro 重启后仍可用 `wait_for_background_job`、`get_background_job`、`list_background_jobs` 恢复状态。只有明确要停止时才调用 `cancel_background_job`。
+
+每次启动都必须提供稳定 `job_key`。相同 key 和相同命令只会返回现有任务，不会重复运行。CodexPro 不会自动重试失败或推进 benchmark 阶段，命令仍受 safe/full bash 和 bash session guard 约束。
+
+对 identity 敏感的工作还应传入完整 `expected_git_head` 并设置 `require_clean_worktree: true`；两项会被检查两次，并成为幂等执行契约的一部分。如果服务环境解析到的 Codex 与终端不同，请用 `--codex-bin /absolute/path/to/codex` 重启，并通过 `server_config` 检查 `codexBin`。
+
 ## CodexPro 能把 bash 绑定到某个会话 id 吗？
 
 CodexPro 不能附加到、读取或复用某一个 Codex App 聊天会话或终端会话。

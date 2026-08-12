@@ -236,10 +236,10 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context', 'propose_goal', 'get_goal', 'list_goals', 'approve_goal', 'publish_goal_blackboard', 'start_goal', 'refresh_goal', 'integrate_goal_work', 'review_goal', 'pause_goal', 'resume_goal', 'cancel_goal', 'complete_goal', 'apply_goal']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
-const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
+const toolCardUri = 'ui://widget/codexpro-tool-card-v11.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
@@ -274,6 +274,7 @@ await cardClient.request('initialize', {
 cardClient.notify('notifications/initialized');
 const cardTools = await cardClient.request('tools/list', {});
 const cardRenderToolNames = new Set([
+  'codexpro',
   'open_current_workspace',
   'open_workspace',
   'workspace_snapshot',
@@ -282,7 +283,29 @@ const cardRenderToolNames = new Set([
   'git_status',
   'handoff_to_agent',
   'handoff_to_codex',
-  'bash'
+  'bash',
+  'create_coding_task',
+  'get_coding_task',
+  'list_coding_tasks',
+  'transition_coding_task',
+  'run_coding_task',
+  'followup_coding_task',
+  'cancel_coding_task',
+  'review_coding_task',
+  'propose_goal',
+  'get_goal',
+  'list_goals',
+  'approve_goal',
+  'publish_goal_blackboard',
+  'start_goal',
+  'refresh_goal',
+  'integrate_goal_work',
+  'review_goal',
+  'pause_goal',
+  'resume_goal',
+  'cancel_goal',
+  'complete_goal',
+  'apply_goal'
 ]);
 for (const tool of cardTools.tools) {
   const meta = tool._meta ?? {};
@@ -294,6 +317,13 @@ for (const tool of cardTools.tools) {
   }
 }
 const cardOpened = await cardClient.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+const wrappedCardOpened = await cardClient.request('tools/call', {
+  name: 'codexpro',
+  arguments: { action: 'open_current_workspace', args: { include_tree: false } }
+});
+if (wrappedCardOpened.structuredContent.codexpro_tool !== 'open_current_workspace' || wrappedCardOpened.structuredContent.codexpro_super_action !== 'open_current_workspace') {
+  throw new Error(`supertool card result lost wrapped action identity: ${JSON.stringify(wrappedCardOpened.structuredContent)}`);
+}
 const cardSearch = await cardClient.request('tools/call', {
   name: 'search',
   arguments: { workspace_id: cardOpened.structuredContent.workspace_id, query: 'read', path: 'demo.txt', max_results: 5 }
@@ -364,7 +394,7 @@ const resources = await client.request('resources/list', {});
 const toolCard = resources.resources.find((resource) => resource.uri === toolCardUri);
 if (!toolCard) throw new Error(`missing tool-card resource: ${toolCardUri}`);
 if (toolCard.mimeType !== 'text/html;profile=mcp-app') throw new Error(`unexpected tool-card mime type: ${toolCard.mimeType}`);
-const legacyToolCardUris = ['ui://widget/codexpro-tool-card-v9.html', 'ui://widget/codexpro-tool-card-v8.html'];
+const legacyToolCardUris = ['ui://widget/codexpro-tool-card-v10.html', 'ui://widget/codexpro-tool-card-v9.html', 'ui://widget/codexpro-tool-card-v8.html'];
 for (const legacyToolCardUri of legacyToolCardUris) {
   const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
   if (!legacyToolCard) throw new Error(`missing legacy tool-card resource: ${legacyToolCardUri}`);
@@ -393,7 +423,7 @@ for (const legacyToolCardUri of legacyToolCardUris) {
     throw new Error('legacy tool-card widget resource did not preserve requested URI');
   }
   if (!(legacyWidget.contents?.[0]?.text ?? '').includes('Result unavailable')) {
-    throw new Error('legacy tool-card widget resource did not serve v10 HTML');
+    throw new Error('legacy tool-card widget resource did not serve current HTML');
   }
 }
 const current = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
@@ -1317,9 +1347,15 @@ if (metadataSessions.structuredContent.total_found !== 0 || JSON.stringify(metad
 }
 standardCodexSessionsClient.close();
 
-const fullTranscriptClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
+const fullTranscriptClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'full'], {
   cwd: path.resolve('.'),
-  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_BASH_TRANSCRIPT: 'full' }
+  env: {
+    ...process.env,
+    CODEXPRO_ROOT: tmp,
+    CODEXPRO_ALLOWED_ROOTS: tmp,
+    CODEXPRO_BASH_TRANSCRIPT: 'full',
+    CODEXPRO_CODEX_BIN: process.execPath
+  }
 });
 await fullTranscriptClient.request('initialize', {
   protocolVersion: '2024-11-05',
@@ -1332,6 +1368,17 @@ const fullTranscriptText = fullTranscriptBash.content?.[0]?.text ?? '';
 const fullTranscriptStdout = (fullTranscriptBash.structuredContent.stdout ?? '').trim();
 if (!fullTranscriptText.includes('## stdout') || !fullTranscriptStdout || !fullTranscriptText.includes(fullTranscriptStdout)) {
   throw new Error(`full bash transcript mode did not preserve raw stdout in chat text: ${fullTranscriptText}`);
+}
+const pinnedCodexConfig = await fullTranscriptClient.request('tools/call', { name: 'server_config', arguments: {} });
+if (pinnedCodexConfig.structuredContent.codexBin !== await fs.realpath(process.execPath)) {
+  throw new Error(`server_config did not report the pinned Codex executable: ${JSON.stringify(pinnedCodexConfig.structuredContent)}`);
+}
+const pinnedCodexBash = await fullTranscriptClient.request('tools/call', {
+  name: 'bash',
+  arguments: { command: '"$CODEXPRO_CODEX_BIN" --version' }
+});
+if (pinnedCodexBash.isError || !String(pinnedCodexBash.structuredContent.stdout).includes(process.version)) {
+  throw new Error(`bash did not preserve the pinned Codex executable: ${JSON.stringify(pinnedCodexBash)}`);
 }
 fullTranscriptClient.close();
 
@@ -1365,6 +1412,16 @@ const invalidContextDir = spawnSync('node', ['dist/stdio.js', '--root', tmp, '--
 });
 if (invalidContextDir.status === 0 || !String(invalidContextDir.stderr || invalidContextDir.stdout).includes('CODEXPRO_CONTEXT_DIR')) {
   throw new Error(`invalid CODEXPRO_CONTEXT_DIR=src was not rejected: status=${invalidContextDir.status} stdout=${invalidContextDir.stdout} stderr=${invalidContextDir.stderr}`);
+}
+
+const invalidCodexBin = spawnSync('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_CODEX_BIN: path.join(tmp, 'missing-codex') },
+  encoding: 'utf8',
+  timeout: 5000
+});
+if (invalidCodexBin.status === 0 || !String(invalidCodexBin.stderr || invalidCodexBin.stdout).includes('CODEXPRO_CODEX_BIN does not exist')) {
+  throw new Error(`missing CODEXPRO_CODEX_BIN was not rejected: status=${invalidCodexBin.status} stdout=${invalidCodexBin.stdout} stderr=${invalidCodexBin.stderr}`);
 }
 
 const codexSessionsClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--tool-mode', 'full'], {

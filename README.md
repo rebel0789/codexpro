@@ -9,6 +9,11 @@
 </p>
 
 <p align="center">
+  <strong>Direction:</strong> ChatGPT Pro orchestrates; Codex workers implement locally; Pro integrates and reviews.
+  See <a href="PRODUCT_DIRECTION.md">the accepted product contract</a> for implemented versus planned capabilities.
+</p>
+
+<p align="center">
   <a href="https://www.npmjs.com/package/codexpro"><img alt="npm" src="https://img.shields.io/npm/v/codexpro?style=flat-square"></a>
   <a href="https://github.com/rebel0789/codexpro/actions"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/rebel0789/codexpro/ci.yml?branch=main&style=flat-square"></a>
   <a href="https://github.com/rebel0789/codexpro/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/github/license/rebel0789/codexpro?style=flat-square"></a>
@@ -65,6 +70,9 @@ CodexPro starts a local MCP server for the current workspace. ChatGPT can then:
 - search code
 - make scoped edits with `write`, `edit`, or guarded `apply_patch`
 - run safe verification commands through `bash`
+- run durable commands through `start_background_job` when work may exceed 180 seconds or must survive reconnects
+- keep one CodingTask worktree/context while switching between direct ChatGPT coding and supervised Codex collaboration
+- propose and supervise a durable Goal whose independent Codex workers run concurrently, report through a Blackboard, and are integrated in an isolated Goal worktree
 - review changed files with `show_changes`
 - write handoff plans under `.ai-bridge`
 - export a selected context bundle for model surfaces that cannot call tools
@@ -150,8 +158,8 @@ Tool cards are opt in:
 CODEXPRO_TOOL_CARDS=1 codexpro start
 ```
 
-The v10 cards cover selected workspace, analysis, change, Git, handoff, and
-terminal results. Reads and searches stay in normal chat output. After updating
+The v11 cards cover selected workspace, analysis, change, Git, handoff,
+CodingTask, Goal, and terminal results. Reads and searches stay in normal chat output. After updating
 the connector, refresh its ChatGPT plugin connection once so it loads the new
 widget resource.
 
@@ -204,6 +212,8 @@ no-store/no-referrer headers. Never share or commit the connector URL.
 - HTTP tokens shorter than 24 bytes are rejected and failed guesses are rate-limited per client address.
 - Generic writes are hidden unless `CODEXPRO_WRITE_MODE=workspace`.
 - Safe bash blocks broad shell patterns and secret/build/cache paths.
+- Durable background jobs use the same bash policy, require an idempotent key, retain bounded logs outside the repo, and never retry automatically.
+- `--codex-bin` / `CODEXPRO_CODEX_BIN` pins the Codex CLI used by foreground and durable jobs, avoiding service-shell `PATH` drift.
 - `apply_patch` is workspace-scoped and rejects blocked paths, symlink patches, and secret-looking patch content.
 - `show_changes` keeps a review checkpoint so repeated unchanged reviews collapse.
 - Tool-card metadata is off unless `CODEXPRO_TOOL_CARDS=1`.
@@ -261,7 +271,80 @@ codexpro execute-handoff --agent codex --yes
 codexpro watch-handoff --agent codex --yes
 ```
 
-`handoff_to_agent` is planning-only over MCP. CodexPro does not expose arbitrary local agent execution as a remote ChatGPT tool.
+`handoff_to_agent` remains a compatibility, planning-only flow over MCP. CodingTask is the implementation flow when you want ChatGPT and Codex to work on the same durable task.
+
+## Direct Coding and Codex Collaboration
+
+A CodingTask owns one persistent Git worktree and context. For a trusted repository, explicitly enable both required capabilities when starting the web connector:
+
+```bash
+codexpro start --root /path/to/repo --write workspace --bash full
+```
+
+The safer defaults do not change. Both `writeMode=workspace` and `bashMode=full` are required to create a CodingTask, run or follow up with Codex, and transfer Direct → Codex. Codex App Server may execute project commands beyond the safe-shell allowlist, so `safe` bash cannot honestly authorize this path. Task status, list, review, cancel, and Codex → Direct transfer remain available without full bash so recovery and inspection are never trapped behind the execution gate.
+
+Start the task in direct mode, let ChatGPT use the normal read/search/write/edit/bash tools against the returned task workspace, then transfer ownership to Codex without copying a patch or opening another repository:
+
+```text
+create_coding_task (owner: direct)
+  -> direct coding in the returned workspace_id
+transition_coding_task (owner: codex)
+  -> run_coding_task
+  -> followup_coding_task as needed
+transition_coding_task (owner: direct)
+  -> review_coding_task / show_changes
+```
+
+Transitions are exclusive: Codex cannot start while a direct operation owns the task, and direct mutation is rejected while Codex owns or runs it. Read-only status and review remain available. A Codex follow-up resumes the same persisted task/thread and worktree; connector restarts recover task state from `~/.codexpro/tasks` by default.
+
+The Codex collaboration default is `gpt-5.6-sol` with `high` reasoning. Configure it with `--codex-model`, `--codex-reasoning-effort`, and `--task-dir`, or save those options with `codexpro settings set`. If you set `--codex-dir`, that directory is forwarded to the detached Codex process as `CODEX_HOME`, so it uses the intended authentication, configuration, and session store. Codex runs with workspace write access, network disabled, and approval policy `never`; an approval or user-input request fails closed instead of being silently accepted.
+
+CodingTask never commits, merges, pushes, opens a PR, or deletes its worktree automatically. Review the resulting diff and choose those repository actions explicitly. Task state, bounded logs, and worktrees are private local state outside allowed projects and are retained for recovery and review; this release has no automatic cleanup. General durable background jobs are initially rejected inside CodingTask worktrees so an untracked process cannot cross an ownership transition.
+
+## Pro-Orchestrated Goals (Unreleased)
+
+Use a Goal when Pro should decompose a larger request and supervise multiple isolated CodingTasks. The ordinary Chat flow is:
+
+```text
+propose_goal (inert plan + contract fingerprint)
+  -> user reviews the Goal card
+approve_goal (records approval; still starts nothing)
+  -> start_goal (launches dependency-ready workers concurrently)
+  -> get_goal / refresh_goal / publish_goal_blackboard
+  -> integrate_goal_work for each Pro-reviewed worker result
+  -> review_goal
+  -> complete_goal (records Pro's evidence judgment; source still unchanged)
+  -> apply_goal (separate explicit source effect)
+```
+
+Goal workers use the configured Codex model and reasoning effort, defaulting to `gpt-5.6-sol` and `high`. They always write isolated CodingTask worktrees. Pro controls work assignment and integration; worker Blackboard records can report discoveries, contracts, blockers, paths, and verification but cannot change the approved work graph or publish decisions.
+
+The current vertical slice deliberately accepts only `execution_policy=supervised`, `workspace_policy=isolated`, one turn per worker, and zero automatic retries. Parallel detached workers and their CodingTasks survive Chat or connector disconnects, but Pro must explicitly refresh, review, integrate, and start newly unblocked dependency work. Persistent autonomous scheduling, automatic multi-turn/retry behavior, and incremental Live projection are roadmap capabilities, not aliases for the current flow.
+
+`complete_goal` does not modify the source repository. `apply_goal` additionally requires source-apply permission in the approved contract and explicit confirmation. It checks the original committed HEAD, rejects overlap with pre-existing dirty paths, preserves unrelated dirty files, never stages or commits, and records authoritative before/after state. Commit, push, draft PR, worker network access, and automatic cleanup are not implemented. The `commands` field records the approved verification protocol; because Goal execution intentionally requires trusted `bashMode=full`, it is not an OS command allowlist.
+
+## Durable Background Jobs
+
+The foreground `bash` tool is intentionally bounded to 180 seconds. For a long test suite, benchmark, build, or other command that must continue when ChatGPT reconnects, use this MCP flow:
+
+```text
+start_background_job
+  job_key: release-candidate-151cc47:benchmark-run
+  command: python3 benchmarks/benchmark.py run ...
+  timeout_ms: 21600000
+  expected_git_head: 151cc47...full-40-character-sha...
+  require_clean_worktree: true
+
+wait_for_background_job
+  job_key: release-candidate-151cc47:benchmark-run
+  wait_ms: 60000
+```
+
+`start_background_job` returns quickly. A detached local runner writes atomic state and bounded stdout/stderr logs under `~/.codexpro/jobs` by default, so the command survives an MCP disconnect or CodexPro HTTP server restart. `get_background_job` and `list_background_jobs` recover state in a new session; `cancel_background_job` is the only cancellation path.
+
+The `job_key` is required and idempotent. Calling start again with the same key and contract returns the existing job instead of launching a duplicate. Reusing the key with a changed command, cwd, timeout, log limit, or Git guard fails. For release or benchmark work, pass the full `expected_git_head` and set `require_clean_worktree: true`; CodexPro checks both before accepting the launch and again in the detached runner. A mismatch fails without starting the command. CodexPro never retries a failed job or advances a multi-phase workflow automatically.
+
+The command still follows `CODEXPRO_BASH_MODE` and the optional bash session guard. Safe mode accepts only its existing allowlist; trusted long-running project commands that are outside that allowlist require full mode. Shell jobs use a deterministic non-login shell. Pin the intended CLI with `codexpro start --codex-bin /absolute/path/to/codex` (or `CODEXPRO_CODEX_BIN`) when CodexPro runs under launchd/systemd or another service environment. `server_config` and `/healthz` expose the resolved path without exposing credentials. Set `CODEXPRO_JOB_DIR`, `CODEXPRO_BACKGROUND_JOB_TIMEOUT_MS`, or `CODEXPRO_BACKGROUND_JOB_MAX_LOG_BYTES` only when the defaults do not fit your local setup.
 
 ## Troubleshooting
 
@@ -278,6 +361,7 @@ Common fixes:
 - ChatGPT cannot call tools in one model/chat: switch to a ChatGPT surface that supports Developer Mode app actions.
 - Local port is busy: start another repo with `--port 8788`.
 - Tool list looks stale: create a new ChatGPT app entry or change the connector URL token.
+- A job sees the wrong Codex version: pin it with `--codex-bin "$(command -v codex)"`, restart CodexPro, and confirm `codexBin` in `server_config` before starting work.
 
 ## Development
 

@@ -192,6 +192,20 @@ async function expectSessionNotFound(response, label) {
   }
 }
 
+async function expectRecoveredToolsList(response, label) {
+  const body = await response.json();
+  const tools = body.result?.tools;
+  if (
+    response.status !== 200 ||
+    !response.headers.get('content-type')?.includes('application/json') ||
+    !Array.isArray(tools) ||
+    !tools.some((tool) => tool.name === 'server_config')
+  ) {
+    throw new Error(`expected ${label} to recover with tools/list JSON, got ${response.status} ${JSON.stringify(body)}`);
+  }
+  return body;
+}
+
 function postToolsListWithSession(baseUrl, token, sessionId) {
   return fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
     method: 'POST',
@@ -201,6 +215,23 @@ function postToolsListWithSession(baseUrl, token, sessionId) {
       'mcp-session-id': sessionId
     },
     body: JSON.stringify({ jsonrpc: '2.0', id: 404, method: 'tools/list', params: {} })
+  });
+}
+
+function postToolCallWithSession(baseUrl, token, sessionId, name, args = {}) {
+  return fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: {
+      accept: 'application/json, text/event-stream',
+      'content-type': 'application/json',
+      ...(sessionId ? { 'mcp-session-id': sessionId } : {})
+    },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      id: 405,
+      method: 'tools/call',
+      params: { name, arguments: args }
+    })
   });
 }
 
@@ -257,6 +288,7 @@ const child = spawn('node', ['dist/http.js'], {
     CODEXPRO_PORT: String(port),
     CODEXPRO_HTTP_TOKEN: token,
     CODEXPRO_BASH_MODE: 'safe',
+    CODEXPRO_CODEX_BIN: process.execPath,
     CODEXPRO_WRITE_MODE: 'handoff',
     CODEXPRO_TOOL_MODE: 'full',
     CODEXPRO_TOOL_CARDS: '0',
@@ -282,7 +314,15 @@ try {
     throw new Error(`expected authenticated healthz to return 200, got ${authorized.status}`);
   }
   const authorizedJson = await authorized.json();
-  if (authorizedJson.authRequired !== true) {
+  if (
+    authorizedJson.authRequired !== true ||
+    authorizedJson.mcpSessionRecovery !== 'stateless-post-fallback' ||
+    authorizedJson.mcpToolAliasRecovery !== 'codexpro-prefix' ||
+    authorizedJson.backgroundJobs !== 'durable-runner-v1' ||
+    authorizedJson.codexBin !== await fs.realpath(process.execPath) ||
+    !Number.isInteger(authorizedJson.backgroundJobDefaultTimeoutMs) ||
+    !Number.isInteger(authorizedJson.activeMcpSessions)
+  ) {
     throw new Error(`expected authenticated healthz to report authRequired=true, got ${JSON.stringify(authorizedJson)}`);
   }
 
@@ -511,7 +551,7 @@ try {
       throw new Error(`HTTP handoff mode should not advertise ${hidden}; got ${queryToolNames.join(', ')}`);
     }
   }
-  const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
+  const toolCardUri = 'ui://widget/codexpro-tool-card-v11.html';
   for (const visualTool of queryToolNames) {
     if (hasWidgetMeta(queryTools, visualTool, toolCardUri) || hasToolCardStatusMeta(queryTools, visualTool)) {
       throw new Error(`${visualTool} exposed widget metadata while CODEXPRO_TOOL_CARDS is off`);
@@ -545,8 +585,38 @@ try {
       throw new Error(`show_changes checkpoint leaked across HTTP sessions: ${JSON.stringify(changes.structuredContent)}`);
     }
   });
+  await withClient(mcpUrl, async (client) => {
+    const namespacedConfig = await callTool(client, 'codexpro.server_config');
+    if (namespacedConfig.structuredContent.defaultRoot !== authorizedJson.defaultRoot) {
+      throw new Error(`namespaced server_config alias returned the wrong root: ${JSON.stringify(namespacedConfig.structuredContent)}`);
+    }
+    const namespacedWrapper = await callTool(client, 'codexpro.codexpro', { action: 'list_actions', args: {} });
+    const actions = namespacedWrapper.structuredContent.actions ?? [];
+    for (const action of ['bash', 'handoff_to_agent', 'server_config']) {
+      if (!actions.includes(action)) {
+        throw new Error(`namespaced codexpro wrapper missing ${action}: ${JSON.stringify(namespacedWrapper.structuredContent)}`);
+      }
+    }
+  });
   const unknownSession = '00000000-0000-4000-8000-000000000000';
-  await expectSessionNotFound(await postToolsListWithSession(baseUrl, token, unknownSession), 'unknown POST session');
+  await expectRecoveredToolsList(await postToolsListWithSession(baseUrl, token, unknownSession), 'unknown POST session');
+  const missingSessionCall = await postToolCallWithSession(baseUrl, token, undefined, 'server_config');
+  const missingSessionBody = await missingSessionCall.json();
+  if (
+    missingSessionCall.status !== 200 ||
+    missingSessionBody.result?.structuredContent?.defaultRoot !== authorizedJson.defaultRoot
+  ) {
+    throw new Error(`missing POST session did not recover server_config: ${missingSessionCall.status} ${JSON.stringify(missingSessionBody)}`);
+  }
+  const namespacedMissingSessionCall = await postToolCallWithSession(baseUrl, token, undefined, 'codexpro.server_config');
+  const namespacedMissingSessionBody = await namespacedMissingSessionCall.json();
+  if (
+    namespacedMissingSessionCall.status !== 200 ||
+    namespacedMissingSessionBody.result?.structuredContent?.defaultRoot !== authorizedJson.defaultRoot ||
+    namespacedMissingSessionBody.result?.isError
+  ) {
+    throw new Error(`namespaced missing POST session did not recover server_config: ${namespacedMissingSessionCall.status} ${JSON.stringify(namespacedMissingSessionBody)}`);
+  }
   await expectSessionNotFound(await fetch(`${baseUrl}/mcp?codexpro_token=${encodeURIComponent(token)}`, {
     headers: {
       accept: 'text/event-stream',
@@ -558,7 +628,16 @@ try {
     const staleSession = transport.sessionId;
     if (!staleSession) throw new Error('HTTP MCP client did not receive a session id');
     await transport.terminateSession();
-    await expectSessionNotFound(await postToolsListWithSession(baseUrl, token, staleSession), 'stale POST session');
+    await expectRecoveredToolsList(await postToolsListWithSession(baseUrl, token, staleSession), 'stale POST session');
+    const recoveredCall = await postToolCallWithSession(baseUrl, token, staleSession, 'server_config');
+    const recoveredBody = await recoveredCall.json();
+    if (
+      recoveredCall.status !== 200 ||
+      recoveredBody.result?.structuredContent?.defaultRoot !== authorizedJson.defaultRoot ||
+      recoveredBody.result?.isError
+    ) {
+      throw new Error(`stale POST session did not recover server_config: ${recoveredCall.status} ${JSON.stringify(recoveredBody)}`);
+    }
   });
 
   await withClient(mcpUrl, async (client) => {
@@ -568,7 +647,7 @@ try {
     if (toolCard.mimeType !== 'text/html;profile=mcp-app') {
       throw new Error(`unexpected HTTP tool-card mime type: ${toolCard.mimeType}`);
     }
-    const legacyToolCardUris = ['ui://widget/codexpro-tool-card-v9.html', 'ui://widget/codexpro-tool-card-v8.html'];
+    const legacyToolCardUris = ['ui://widget/codexpro-tool-card-v10.html', 'ui://widget/codexpro-tool-card-v9.html', 'ui://widget/codexpro-tool-card-v8.html'];
     for (const legacyToolCardUri of legacyToolCardUris) {
       const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
       if (!legacyToolCard) throw new Error(`HTTP MCP resources/list missing legacy ${legacyToolCardUri}`);

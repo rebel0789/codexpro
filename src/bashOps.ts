@@ -128,7 +128,7 @@ function isAllowedPackageScript(command: string): boolean {
   return packageScriptPattern.test(command);
 }
 
-function assertSafeCommand(config: CodexProConfig, command: string): void {
+export function assertBashCommandAllowed(config: CodexProConfig, command: string): void {
   if (config.bashMode === "off") {
     throw new CodexProError("bash tool is disabled. Start with CODEXPRO_BASH_MODE=safe or CODEXPRO_BASH_MODE=full to enable it.");
   }
@@ -153,7 +153,7 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
   }
 }
 
-function assertBashSession(config: CodexProConfig, sessionId?: string): string | undefined {
+export function assertBashSession(config: CodexProConfig, sessionId?: string): string | undefined {
   const requested = sessionId?.trim();
   if (!config.bashSessionId) {
     if (config.requireBashSession) {
@@ -173,23 +173,29 @@ function assertBashSession(config: CodexProConfig, sessionId?: string): string |
   return config.bashSessionId;
 }
 
-function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
-  if (config.inheritEnv) {
-    return { ...process.env, NO_COLOR: "1", CI: process.env.CI ?? "1" };
-  }
-  return {
-    PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
-    HOME: process.env.HOME ?? "",
-    USER: process.env.USER ?? "",
-    SHELL: process.env.SHELL ?? "/bin/bash",
-    TMPDIR: process.env.TMPDIR ?? "/tmp",
-    TERM: "dumb",
-    NO_COLOR: "1",
-    CI: "1"
-  };
+export function makeBashEnv(config: Pick<CodexProConfig, "inheritEnv" | "codexBin">): NodeJS.ProcessEnv {
+  const base: NodeJS.ProcessEnv = config.inheritEnv
+    ? { ...process.env, NO_COLOR: "1", CI: process.env.CI ?? "1" }
+    : {
+        PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
+        HOME: process.env.HOME ?? "",
+        USER: process.env.USER ?? "",
+        SHELL: process.env.SHELL ?? "/bin/bash",
+        TMPDIR: process.env.TMPDIR ?? "/tmp",
+        TERM: "dumb",
+        NO_COLOR: "1",
+        CI: "1"
+      };
+  if (!config.codexBin) return base;
+  const codexDir = path.dirname(config.codexBin);
+  const currentPath = base.PATH ?? "";
+  const pathEntries = currentPath.split(path.delimiter).filter(Boolean);
+  base.PATH = [codexDir, ...pathEntries.filter((entry) => entry !== codexDir)].join(path.delimiter);
+  base.CODEXPRO_CODEX_BIN = config.codexBin;
+  return base;
 }
 
-function bashExecutable(): string {
+export function bashExecutable(): string {
   return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
 }
 
@@ -227,16 +233,16 @@ export async function runBash(
 ): Promise<BashResult> {
   if (!command?.trim()) throw new CodexProError("command is required.");
   const bashSessionId = assertBashSession(config, options.sessionId);
-  assertSafeCommand(config, command);
+  assertBashCommandAllowed(config, command);
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 30_000, 180_000));
   const start = Date.now();
 
   return new Promise((resolve, reject) => {
-    const child = spawn(bashExecutable(), ["-lc", command], {
+    const child = spawn(bashExecutable(), ["-c", command], {
       cwd,
-      env: makeEnv(config),
+      env: makeBashEnv(config),
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true

@@ -11,6 +11,23 @@ export interface Workspace {
   id: string;
   root: string;
   openedAt: string;
+  codingTaskId?: string;
+}
+
+export interface PersistentTaskWorkspaceResolution {
+  taskId: string;
+  worktreeRoot: string;
+  sourceRoot: string;
+  openedAt?: string;
+  provenanceVerified: boolean;
+}
+
+export type PersistentTaskWorkspaceResolver = (
+  workspaceId: string
+) => PersistentTaskWorkspaceResolution | undefined | Promise<PersistentTaskWorkspaceResolution | undefined>;
+
+export interface WorkspaceManagerOptions {
+  resolvePersistentTaskWorkspace?: PersistentTaskWorkspaceResolver;
 }
 
 export class CodexProError extends Error {
@@ -58,11 +75,18 @@ function closestExistingParent(absPath: string): string {
   return current;
 }
 
+function isPromiseLike<T>(value: unknown): value is PromiseLike<T> {
+  return Boolean(value) && (typeof value === "object" || typeof value === "function") && typeof (value as PromiseLike<T>).then === "function";
+}
+
 export class WorkspaceManager {
   private readonly workspaces = new Map<string, Workspace>();
   private selectedWorkspaceId?: string;
 
-  constructor(private readonly config: CodexProConfig) {}
+  constructor(
+    private readonly config: CodexProConfig,
+    private readonly options: WorkspaceManagerOptions = {}
+  ) {}
 
   defaultWorkspace(): Workspace {
     const existing = [...this.workspaces.values()].find((workspace) => workspace.root === this.config.defaultRoot);
@@ -114,15 +138,20 @@ export class WorkspaceManager {
       }
       return this.selectDefaultWorkspace();
     }
-    const workspace = this.workspaces.get(id);
-    if (!workspace) {
-      const configuredRoot = this.config.allowedRoots.find((allowedRoot) => workspaceIdForRoot(allowedRoot) === id);
-      if (configuredRoot) return this.openWorkspace(configuredRoot, { select: false });
-    }
+    let workspace = this.knownWorkspace(id);
+    if (!workspace && /^taskws_[a-f0-9]{24}$/.test(id)) workspace = this.resolvePersistentTaskWorkspaceSync(id);
     if (!workspace) {
       throw new CodexProError(`Unknown workspace_id: ${id}. Call open_workspace first.`);
     }
     return workspace;
+  }
+
+  async getWorkspaceAsync(id?: string): Promise<Workspace> {
+    if (!id) return this.getWorkspace();
+    const workspace = this.knownWorkspace(id);
+    if (workspace) return workspace;
+    if (/^taskws_[a-f0-9]{24}$/.test(id)) return this.resolvePersistentTaskWorkspaceAsync(id);
+    throw new CodexProError(`Unknown workspace_id: ${id}. Call open_workspace first.`);
   }
 
   listWorkspaces(): Workspace[] {
@@ -131,6 +160,78 @@ export class WorkspaceManager {
 
   currentWorkspaceId(): string {
     return this.getWorkspace().id;
+  }
+
+  private knownWorkspace(workspaceId: string): Workspace | undefined {
+    const workspace = this.workspaces.get(workspaceId);
+    if (workspace) return workspace;
+    const configuredRoot = this.config.allowedRoots.find((allowedRoot) => workspaceIdForRoot(allowedRoot) === workspaceId);
+    return configuredRoot ? this.openWorkspace(configuredRoot, { select: false }) : undefined;
+  }
+
+  private persistentTaskWorkspaceResolver(workspaceId: string): PersistentTaskWorkspaceResolver {
+    const resolver = this.options.resolvePersistentTaskWorkspace;
+    if (!resolver) {
+      throw new CodexProError(`Coding task workspace cannot be restored by this server: ${workspaceId}.`);
+    }
+    return resolver;
+  }
+
+  private resolvePersistentTaskWorkspaceSync(workspaceId: string): Workspace {
+    const resolution = this.persistentTaskWorkspaceResolver(workspaceId)(workspaceId);
+    if (isPromiseLike<PersistentTaskWorkspaceResolution | undefined>(resolution)) {
+      void Promise.resolve(resolution).catch(() => undefined);
+      throw new CodexProError(
+        `Coding task workspace requires asynchronous restoration: ${workspaceId}. Use getWorkspaceAsync for this lookup.`
+      );
+    }
+    return this.materializePersistentTaskWorkspace(workspaceId, resolution);
+  }
+
+  private async resolvePersistentTaskWorkspaceAsync(workspaceId: string): Promise<Workspace> {
+    const resolution = await this.persistentTaskWorkspaceResolver(workspaceId)(workspaceId);
+    return this.materializePersistentTaskWorkspace(workspaceId, resolution);
+  }
+
+  private materializePersistentTaskWorkspace(
+    workspaceId: string,
+    resolution: PersistentTaskWorkspaceResolution | undefined
+  ): Workspace {
+    if (!resolution || resolution.provenanceVerified !== true) {
+      throw new CodexProError(`Coding task workspace provenance could not be verified: ${workspaceId}.`);
+    }
+    if (!/^task_[a-f0-9]{24}$/.test(resolution.taskId)) {
+      throw new CodexProError(`Coding task workspace resolver returned an invalid task identity: ${workspaceId}.`);
+    }
+    if (`taskws_${resolution.taskId.slice("task_".length)}` !== workspaceId) {
+      throw new CodexProError(`Coding task workspace identity does not match its task: ${workspaceId}.`);
+    }
+
+    const requestedSourceRoot = path.resolve(resolution.sourceRoot);
+    const sourceRoot = maybeRealpath(requestedSourceRoot);
+    if (!sourceRoot || sourceRoot !== requestedSourceRoot || !this.config.allowedRoots.some((root) => isSubpath(sourceRoot, root))) {
+      throw new CodexProError(`Coding task source workspace is no longer an allowed canonical root: ${workspaceId}.`);
+    }
+
+    const requestedWorktreeRoot = path.resolve(resolution.worktreeRoot);
+    const worktreeRoot = maybeRealpath(requestedWorktreeRoot);
+    const taskStateRoot = maybeRealpath(this.config.codingTaskDir);
+    if (!worktreeRoot || worktreeRoot !== requestedWorktreeRoot || !taskStateRoot || !isSubpath(worktreeRoot, taskStateRoot)) {
+      throw new CodexProError(`Coding task worktree is missing or outside the configured task directory: ${workspaceId}.`);
+    }
+    const stat = fs.lstatSync(worktreeRoot);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new CodexProError(`Coding task worktree is not a real directory: ${workspaceId}.`);
+    }
+
+    const workspace: Workspace = {
+      id: workspaceId,
+      root: worktreeRoot,
+      openedAt: resolution.openedAt ?? new Date().toISOString(),
+      codingTaskId: resolution.taskId
+    };
+    this.workspaces.set(workspace.id, workspace);
+    return workspace;
   }
 }
 

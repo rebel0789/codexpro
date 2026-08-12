@@ -28,6 +28,9 @@ CodexPro can expose:
 - git status and diffs
 - `.ai-bridge` planning files
 - optional shell command execution through the `bash` tool, hidden when bash mode is off
+- optional durable shell execution through `start_background_job`, governed by the same bash mode and stored under a private local CodexPro state directory
+- optional CodingTask worktrees with exclusive direct/Codex mutation ownership and private state outside allowed projects
+- optional supervised Goal orchestration with fingerprint-bound approval, parallel isolated CodingTasks, a private integration worktree, and separately confirmed source application
 - optional write/edit/apply_patch capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
 - optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
 - optional local execute/review looping through `codexpro loop-handoff`, run from the user's terminal only with a user-provided reviewer command and iteration limit
@@ -48,8 +51,19 @@ Review changes against these failure modes before release:
 | Repeated public token guesses consume unlimited attempts | HTTP authentication rejects tokens shorter than 24 bytes and rate-limits failed attempts per client address. |
 | URL-token credentials persist in browser history or referrers | Browser onboarding removes token parameters from the visible URL after capture and sends no-store/no-referrer response headers. Prefer an Authorization header when the MCP client supports one. |
 | Timed-out bash commands leave descendant processes running | POSIX commands run in a dedicated process group and Windows termination uses `taskkill /t`; timeout and output-limit termination target the process tree. |
+| A dropped MCP request loses or duplicates a long command | Durable jobs run in a detached local runner, persist atomic state and bounded logs, and require an idempotent `job_key`; reconnecting with the same contract returns the existing job. |
+| A background job silently retries or advances a multi-phase workflow | CodexPro launches exactly once per `job_key`, never retries, and exposes separate read/wait/cancel operations. Phase gates remain the caller's responsibility. |
+| CodingTask execution is exposed under the safe shell allowlist | Creation, run, follow-up, and Direct → Codex require both `writeMode=workspace` and `bashMode=full`. Status, list, review, cancel, and Codex → Direct remain reachable for recovery. |
+| Direct coding and Codex write the same task concurrently | CodingTask transfers one exclusive mutation owner under revision/lease checks; conflicting or stale transitions fail closed. |
+| Codex requests broader authority during collaboration | CodingTask starts Codex with network disabled and approval policy `never`; approval and interactive-input requests fail closed. |
+| A task lifecycle mutates repository history or destroys review evidence | CodingTask does not commit, merge, push, open a PR, or delete its retained worktree automatically. Those actions require a separate explicit user decision. |
+| A Goal proposal or approval unexpectedly executes work | Proposal is inert and fingerprinted; approval only records authority. Worker launch is a separate execution-gated action with an idempotent key. |
+| A worker expands the Goal or overwrites another worker | Goal-owned CodingTasks have immutable membership and file scopes; only Pro can publish decisions or integrate a reviewed worker patch. Out-of-scope or blocked-path content is rejected. |
+| A Goal applies over the user's dirty work | Source apply is separate from completion, checks the approved base HEAD, rejects changed-path overlap, preserves unrelated dirty paths, and persists before/after readback without staging or committing. |
+| Unsupported autonomous or Live settings silently degrade to supervised execution | The current slice rejects persistent, Live, multi-turn, and automatic-retry contracts. Those modes remain roadmap work. |
+| A Goal `commands` list is mistaken for an OS command sandbox | Goal execution requires trusted full-bash authority. The list is the approved verification protocol; network and writable paths are separately constrained, but arbitrary local command execution is possible inside the isolated worker workspace. |
 | Automatic `cloudflared` install trusts a mutable download | The installer uses a pinned release URL and verifies the platform asset SHA-256 before writing or extracting it. |
-| Remote MCP tool runs Codex/OpenCode/Pi directly | Agent execution remains a user-started CLI/watch process on the local machine. |
+| A handoff plan silently becomes agent execution | `handoff_to_agent` remains planning-only. Explicit full-bash/background commands are separate trusted command surfaces and must receive normal MCP write-action approval. |
 | Autonomous loop drives ChatGPT Web or bypasses approvals | `loop-handoff` only runs local terminal commands over `.ai-bridge` files; it does not resume browser sessions, approve prompts, or expose a remote MCP executor. |
 | Reviewer masks a failed external command | `loop-handoff` requires explicit reviewer verdict assignments and rejects reviewer `PASS` after failed executor, test, or reviewer commands unless the user opts into the supported executor/test override behavior. |
 
@@ -58,6 +72,8 @@ The main risks are:
 - connecting an untrusted MCP client
 - exposing the server through a public tunnel without auth
 - running with `CODEXPRO_BASH_MODE=full`
+- approving an untrusted `start_background_job` command or using a misleading/reused job key
+- giving an untrusted Codex task prompt write access to a task worktree
 - running with `CODEXPRO_WRITE_MODE=workspace` on an important repo
 - executing an untrusted `.ai-bridge/current-plan.md` or custom `execute-handoff --command`
 - running `loop-handoff` with an untrusted reviewer command or without a small `--max-iters`
@@ -85,6 +101,18 @@ codexpro start \
   --bash safe \
   --tunnel cloudflare
 ```
+
+Trusted CodingTask collaboration mode (explicitly broader authority):
+
+```bash
+codexpro start \
+  --root /path/to/repo \
+  --write workspace \
+  --bash full \
+  --tunnel cloudflare
+```
+
+Do not use this mode for an untrusted repository or prompt. Codex App Server may run project commands outside the safe-shell allowlist.
 
 For stable public hostnames, keep the CodexPro auth token stable but private:
 
@@ -118,6 +146,18 @@ codexpro start \
 - Keep `loop-handoff` local. Do not use it to automate ChatGPT Web, Codex approvals, account access, third-party Pro sites, quota limits, or product safety prompts.
 - Use default agent mode only with trusted ChatGPT sessions and repo-specific roots.
 - Use `--no-bash` when ChatGPT should never trigger shell commands in the workspace.
+- Treat `start_background_job` like `bash`: inspect the exact command, workspace, cwd, timeout, and stable `job_key` before approval. It survives connector restarts by design.
+- For benchmark/release jobs, require the full expected Git HEAD and a clean worktree. These guards prevent launch on the wrong candidate but do not freeze the repository after the process starts.
+- Pin service-managed installations with `--codex-bin` or `CODEXPRO_CODEX_BIN`; do not assume launchd/systemd inherits the same `PATH` as an interactive terminal.
+- Use `get_background_job` or `wait_for_background_job` after reconnecting. Do not invent a new key as an automatic retry, and cancel only with `cancel_background_job`.
+- Keep `CODEXPRO_TASK_DIR` outside every allowed project. Treat its retained worktrees, task state, prompts, and bounded logs as private source data.
+- Treat Goal state, worker worktrees, the Goal integration worktree, prompts, Blackboard records, and patches under `CODEXPRO_TASK_DIR` as private source data. The current Goal slice is supervised/isolated only; do not describe it as unattended autonomous execution.
+- Review the exact Goal fingerprint before approval. Approval does not start workers, completion does not apply source changes, and source application requires its own explicit confirmation.
+- Enable CodingTask execution only by explicitly setting both `CODEXPRO_WRITE_MODE=workspace` and `CODEXPRO_BASH_MODE=full`. Setting only one must not weaken the gate.
+- Keep status, list, review, cancel, and Codex → Direct available under safer modes so an operator can inspect, stop, and recover existing tasks.
+- Review a CodingTask diff after every ownership return. Once explicitly enabled, Codex collaboration has workspace write and full command authority, but no network and no automatic approvals.
+- Treat a custom `--codex-dir` as a Codex credential/configuration boundary: detached Codex receives it as `CODEX_HOME`.
+- Do not start a general background job inside a CodingTask worktree; CodexPro rejects this initially because an untracked process could cross the exclusive-owner transition.
 - Use `--bash-session <id> --require-bash-session` when bash should be enabled only for calls that explicitly target this local CodexPro terminal label.
 - Keep Codex session history access off unless needed. `--codex-sessions metadata` only lists local Codex JSONL metadata; `--codex-sessions read` allows bounded transcript reads.
 - Keep `CODEXPRO_CONTEXT_DIR` as a workspace-relative hidden directory such as `.ai-bridge`; CodexPro rejects source, build, dependency, credential, and absolute context directories.

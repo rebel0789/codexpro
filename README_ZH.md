@@ -124,6 +124,8 @@ ChatGPT Web 可以操作：
   write   在工作区内写文件
   edit    精确替换文本
   bash    运行安全验证命令
+  start_background_job  启动可跨断线和服务重启继续运行的持久命令
+  create_coding_task     创建可在直接编码与 Codex 协作间切换的持久工作区
   show_changes 查看当前改动摘要
 
 本地执行器仍然有价值：
@@ -136,7 +138,7 @@ ChatGPT Web 可以操作：
 
 默认工具数量较少是故意的：ChatGPT 面对少量高信号工具时更稳定。workspace open 默认不做 skill discovery；需要 repo-local skills 时传 `include_skills=true`，需要 user/plugin skills 时再加 `include_global_skills=true`。然后用 `load_skill` 按名称、source 和显示出的 path 加载需要的 `SKILL.md`；如果仍有重名匹配，CodexPro 会报歧义错误，不会随便选一个，也不会把几十个 skill 变成单独 action。
 
-CodexPro 默认给 ChatGPT 暴露纯 MCP 工具描述，不附带 widget/card metadata。需要紧凑 v10 卡片时用 `CODEXPRO_TOOL_CARDS=1` 启动；workspace、分析、改动、Git、handoff 和 bash 验证会使用结构化卡片，read/search 保持为普通聊天输出。终端输出和 raw diff 会折叠或截断，避免在聊天里刷出大段原始数据。更新 connector 后，刷新一次 ChatGPT plugin connection 以加载新的 widget resource。`CODEXPRO_WIDGET_DOMAIN` 用于设置 ChatGPT widget iframe 的专用 HTTPS origin，正式提交 app 前应换成你控制的独立域名。
+CodexPro 默认给 ChatGPT 暴露纯 MCP 工具描述，不附带 widget/card metadata。需要紧凑 v11 卡片时用 `CODEXPRO_TOOL_CARDS=1` 启动；workspace、分析、改动、Git、handoff、CodingTask、Goal 和 bash 验证会使用结构化卡片，read/search 保持为普通聊天输出。终端输出和 raw diff 会折叠或截断，避免在聊天里刷出大段原始数据。更新 connector 后，刷新一次 ChatGPT plugin connection 以加载新的 widget resource。`CODEXPRO_WIDGET_DOMAIN` 用于设置 ChatGPT widget iframe 的专用 HTTPS origin，正式提交 app 前应换成你控制的独立域名。
 
 ## 其他启动方式
 
@@ -382,6 +384,53 @@ git status
 
 这样 ChatGPT 会更接近 Codex 的指令模型，同时不会依赖隐藏状态或大范围重复扫描。
 
+## 持久后台任务
+
+前台 `bash` 工具有意限制为最多 180 秒。长测试、benchmark、build 或任何需要在 ChatGPT/MCP 断线后继续执行的命令，应使用以下 MCP 流程：
+
+```text
+start_background_job
+  job_key: release-candidate-151cc47:benchmark-run
+  command: python3 benchmarks/benchmark.py run ...
+  timeout_ms: 21600000
+  expected_git_head: 151cc47...完整的40位SHA...
+  require_clean_worktree: true
+
+wait_for_background_job
+  job_key: release-candidate-151cc47:benchmark-run
+  wait_ms: 60000
+```
+
+`start_background_job` 会快速返回。独立本地 runner 默认把原子状态和有上限的 stdout/stderr 日志写入 `~/.codexpro/jobs`，所以 HTTP/MCP 连接或 CodexPro 服务重启不会终止任务。新会话可用 `get_background_job`、`list_background_jobs` 和 `wait_for_background_job` 恢复观察；只有显式调用 `cancel_background_job` 才会请求终止。
+
+`job_key` 是必填的幂等键。相同键和相同执行契约只会返回现有任务，不会重复启动；相同键配上不同 command、cwd、timeout、日志上限或 Git guard 会失败。release 或 benchmark 工作应传入完整的 `expected_git_head` 并设置 `require_clean_worktree: true`；CodexPro 在接受启动前和独立 runner 真正执行前各检查一次，不匹配时不会启动命令。CodexPro 不会自动重试失败任务，也不会自动从 benchmark run 推进到 judge/report。
+
+后台命令仍受 `CODEXPRO_BASH_MODE` 和可选 bash session guard 约束。safe 模式只接受原有 allowlist；不在 allowlist 内的受信任长命令需要 full 模式。shell job 使用确定性的非 login shell。launchd/systemd 等服务环境应使用 `codexpro start --codex-bin /absolute/path/to/codex` 或 `CODEXPRO_CODEX_BIN` 固定目标 Codex CLI，并在 `server_config` 中确认 `codexBin`。需要时可通过 `CODEXPRO_JOB_DIR`、`CODEXPRO_BACKGROUND_JOB_TIMEOUT_MS`、`CODEXPRO_BACKGROUND_JOB_MAX_LOG_BYTES` 调整本地默认值。
+
+## 直接编码与 Codex 协作
+
+在受信任的仓库中使用网页 Direct + Codex 协作时，必须显式开启两项能力：
+
+```bash
+codexpro start --root /path/to/repo --write workspace --bash full
+```
+
+更安全的默认值保持不变。创建 CodingTask、`run_coding_task`、`followup_coding_task` 以及 Direct → Codex 切换都同时要求 `writeMode=workspace` 和 `bashMode=full`，因为 Codex App Server 可以执行超出 safe shell allowlist 的项目命令。任务状态、列表、审查、取消以及 Codex → Direct 切换不要求 full bash，断线后仍能检查和恢复。
+
+一个 CodingTask 始终使用同一个持久 Git worktree 和上下文。先以 direct owner 创建任务，用返回的 `workspace_id` 让 ChatGPT 直接读写和验证；空闲后调用 `transition_coding_task` 把独占写入权交给 Codex，再用 `run_coding_task` 和 `followup_coding_task` 在同一持久 thread 中继续。Codex 完成后切回 direct，并用 `review_coding_task` 或 `show_changes` 审查差异。
+
+默认 Codex 模型为 `gpt-5.6-sol`，reasoning effort 为 `high`。可用 `--task-dir`、`--codex-model`、`--codex-reasoning-effort` 或相应环境变量配置。自定义 `--codex-dir` 会作为 `CODEX_HOME` 传给独立 Codex 进程，使其使用指定的认证、配置和 session 存储。Codex 使用 workspace write、禁用网络、approval policy 为 `never`；需要审批或交互输入时会失败关闭。
+
+CodingTask 不会自动 commit、merge、push、创建 PR 或删除 worktree。任务状态、有限日志和 worktree 默认保留在项目之外的 `~/.codexpro/tasks`，便于断线恢复和审查。普通后台任务最初不允许在 CodingTask worktree 中运行，以免未跟踪进程跨越所有权切换。旧 `.ai-bridge` handoff 仅保留作兼容和规划用途。
+
+## Pro 编排的 Goal（尚未发布）
+
+复杂任务可以由 Pro 先调用 `propose_goal` 保存一份不执行任何工作的指纹化计划。用户审查 Goal 卡片后，`approve_goal` 只记录对该精确契约的批准；`start_goal` 才会并行启动依赖已满足的隔离 CodingTask。之后由 Pro 显式刷新状态、审查 worker 证据、按依赖顺序集成、检查完整 diff，并针对所有完成标准记录最终判断。
+
+`complete_goal` 不会修改源工作区。只有契约允许 apply 且用户再次明确确认时，`apply_goal` 才会检查原始 Git HEAD、拒绝与既有脏路径重叠、保留无关的本地改动并写入权威的前后状态；它不会 stage、commit、push 或创建 PR。
+
+当前垂直切片只接受 supervised + isolated、每个 worker 一次 turn、零自动重试。并行的独立 worker 可在 Chat 或 connector 断开后继续，但 Pro 仍须负责 refresh、integration 以及启动新解锁的依赖任务。持续自治调度、自动多轮/重试和增量 Live 投影仍是路线图能力。Goal 的 `commands` 字段记录验证协议，不是操作系统命令 allowlist；因此 Goal 执行只适用于显式开启 workspace write 与 full bash 的可信仓库。
+
 ## 安全边界
 
 CodexPro 是本地开发桥，不是操作系统级沙箱。
@@ -393,6 +442,7 @@ CodexPro 是本地开发桥，不是操作系统级沙箱。
 - 常见敏感路径会被拒绝：`.env`、私钥、`.git`、`node_modules`、生成目录、缓存目录。
 - symlink 逃逸会被阻止。
 - safe bash 只允许常见检查、搜索、git、lint、test、typecheck、build 等命令。
+- 持久后台任务复用同一 bash 策略、要求幂等键、把有上限的日志保存在仓库外，并且从不自动重试。
 - `codexpro start --no-bash` 会完全关闭 ChatGPT 可调用的 bash 工具。
 - `execute-handoff` 和 `watch-handoff` 是本地 CLI 命令，不是远程 MCP 工具。
 

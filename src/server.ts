@@ -1,6 +1,6 @@
-import fsp from "node:fs/promises";
+import fsp, { constants as fsConstants } from "node:fs/promises";
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
@@ -10,6 +10,14 @@ import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, wi
 import { viewWorkspaceImage } from "./imageOps.js";
 import { searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
+import {
+  cancelBackgroundJob,
+  getBackgroundJob,
+  listBackgroundJobs,
+  startBackgroundJob,
+  waitForBackgroundJob,
+  type BackgroundJobView
+} from "./backgroundJobOps.js";
 import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
@@ -18,6 +26,31 @@ import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
+import {
+  beginDirectOperation,
+  createCodingTask,
+  finishDirectOperation,
+  getCodingTask,
+  listCodingTasks,
+  requestCodingTaskCancellation,
+  resolveCodingTaskWorkspace,
+  reviewCodingTask,
+  transitionCodingTaskExecutor
+} from "./codingTaskOps.js";
+import type { CodingTaskState } from "./codingTaskState.js";
+import {
+  cancelQueuedCodingTaskRun,
+  getCodingTaskRun,
+  getLatestCodingTaskRun,
+  launchCodingTaskRun,
+  reconcileCodingTaskRun,
+  submitCodingTaskFollowup,
+  type CodingTaskRunView
+} from "./codingTaskRunner.js";
+import { resolveCodingTaskBaseSha } from "./codingTaskWorktree.js";
+import { approveGoal, completeGoal, getGoal, listGoals, pauseGoal, proposeGoal, publishGoalBlackboard, resumeGoal } from "./goalOps.js";
+import type { GoalState } from "./goalState.js";
+import { applyCompletedGoal, cancelGoal, integrateGoalWork, refreshGoal, reviewGoal, startGoal } from "./goalExecution.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -76,6 +109,249 @@ function bashTextResult(config: CodexProConfig, result: Awaited<ReturnType<typeo
   ].join("\n");
 }
 
+function backgroundJobText(title: string, job: BackgroundJobView): string {
+  const lines = [
+    `# ${title}`,
+    "",
+    `Job: \`${job.job_id}\``,
+    `Key: \`${job.job_key}\``,
+    `Status: ${job.status}${job.persisted_status !== job.status ? ` (persisted: ${job.persisted_status})` : ""}`,
+    `CWD: ${job.cwd}`,
+    `Exit: ${job.exit_code ?? "pending"}${job.signal ? ` (${job.signal})` : ""}`,
+    `Duration: ${job.duration_ms ?? "pending"} ms`,
+    `Runner: ${job.runner_alive ? "alive" : "not running"}; child: ${job.child_alive ? "alive" : "not running"}`,
+    `Logs: stdout ${job.stdout_bytes} bytes${job.stdout_truncated ? " (retention cap reached)" : ""}, stderr ${job.stderr_bytes} bytes${job.stderr_truncated ? " (retention cap reached)" : ""}.`
+  ];
+  if (job.reused !== undefined) lines.push(`Idempotent reuse: ${job.reused ? "yes" : "no"}`);
+  if (job.git_guard) {
+    lines.push(
+      `Git guard: expected ${job.git_guard.expected_head ?? "any HEAD"}; clean required: ${job.git_guard.require_clean_worktree ? "yes" : "no"}; verified ${job.git_guard.verified_head ?? "pending"}${job.git_guard.verified_clean === null ? "" : `; clean: ${job.git_guard.verified_clean ? "yes" : "no"}`}.`
+    );
+  }
+  if (job.stdout_tail) lines.push("", "## stdout tail", "", "```text", job.stdout_tail, "```");
+  if (job.stderr_tail) lines.push("", "## stderr tail", "", "```text", job.stderr_tail, "```");
+  if (job.error) lines.push("", `Error: ${job.error}`);
+  if (!job.terminal) {
+    lines.push("", "This job is durable and continues independently of the current MCP request. Use wait_for_background_job or get_background_job; do not start it again with a different key as a retry.");
+  }
+  return lines.join("\n");
+}
+
+function codingTaskStoreConfig(config: CodexProConfig): { dataRoot: string } {
+  return { dataRoot: config.codingTaskDir };
+}
+
+function goalStoreConfig(config: CodexProConfig): { dataRoot: string } {
+  return { dataRoot: config.codingTaskDir };
+}
+
+function assertGoalSourceAllowed(config: CodexProConfig, goal: GoalState): void {
+  if (!config.allowedRoots.some((allowedRoot) => {
+    const relative = path.relative(allowedRoot, goal.sourceRoot);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  })) throw new CodexProError(`Goal source is outside the currently allowed roots: ${goal.goalId}`);
+}
+
+async function allowedGoal(config: CodexProConfig, goalId: string): Promise<GoalState> {
+  const goal = await getGoal(goalStoreConfig(config), goalId);
+  assertGoalSourceAllowed(config, goal);
+  return goal;
+}
+
+function goalStructured(goal: GoalState): Record<string, unknown> {
+  return {
+    goal,
+    goal_id: goal.goalId,
+    title: goal.title,
+    lifecycle: goal.lifecycle,
+    approval: goal.approval,
+    contract_fingerprint: goal.contractFingerprint,
+    revision: goal.revision,
+    execution_policy: goal.executionPolicy,
+    workspace_policy: goal.workspacePolicy,
+    base_sha: goal.baseSha,
+    source_root: goal.sourceRoot,
+    integration_worktree_root: goal.integrationWorktreeRoot,
+    work: goal.work,
+    work_count: goal.work.length,
+    completed_work_count: goal.work.filter((item) => ["integrated", "waiting_review"].includes(item.status)).length,
+    running_work_count: goal.work.filter((item) => item.status === "running").length,
+    blocked_work_count: goal.work.filter((item) => ["blocked", "failed"].includes(item.status)).length,
+    blackboard: goal.blackboard,
+    blackboard_count: goal.blackboard.length
+  };
+}
+
+function goalText(title: string, goal: GoalState): string {
+  const lines = [
+    `# ${title}`,
+    "",
+    `Goal: ${goal.goalId}`,
+    `Title: ${goal.title}`,
+    `Lifecycle: ${goal.lifecycle}`,
+    `Approval: ${goal.approval.status}`,
+    `Revision: ${goal.revision}`,
+    `Policy: ${goal.executionPolicy} / ${goal.workspacePolicy}`,
+    `Contract: ${goal.contractFingerprint}`,
+    `Base: ${goal.baseSha}`,
+    "",
+    "## Work",
+    ...goal.work.map((item) => `- ${item.workId}: ${item.title} [${item.status}]${item.dependsOn.length ? ` · after ${item.dependsOn.join(", ")}` : ""}`)
+  ];
+  if (goal.lifecycle === "proposed") lines.push("", "No worker or integration worktree has started. Explicitly approve this exact contract before execution.");
+  return lines.join("\n");
+}
+
+function assertCodingTaskSourceAllowed(config: CodexProConfig, task: CodingTaskState): void {
+  if (!config.allowedRoots.some((allowedRoot) => {
+    const relative = path.relative(allowedRoot, task.sourceRoot);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  })) {
+    throw new CodexProError(`Coding task source is outside the currently allowed roots: ${task.taskId}`);
+  }
+}
+
+async function allowedCodingTask(config: CodexProConfig, taskId: string): Promise<CodingTaskState> {
+  const task = await getCodingTask(codingTaskStoreConfig(config), taskId);
+  assertCodingTaskSourceAllowed(config, task);
+  return task;
+}
+
+function assertIndependentCodingTaskControl(task: CodingTaskState, action: string): void {
+  if (task.goalId) {
+    throw new CodexProError(`${action} is owned by Goal ${task.goalId}; use the Goal control flow so Pro remains the assignment and integration authority.`);
+  }
+}
+
+function codingTaskStructured(task: CodingTaskState): Record<string, unknown> {
+  return {
+    task,
+    task_id: task.taskId,
+    workspace_id: task.workspaceId,
+    title: task.title,
+    goal: task.goal,
+    goal_id: task.goalId ?? null,
+    goal_work_id: task.goalWorkId ?? null,
+    executor: task.executor,
+    lifecycle: task.lifecycle,
+    revision: task.revision,
+    executor_epoch: task.executorLease.epoch,
+    lease_id: task.executorLease.leaseId,
+    worktree_root: task.worktreeRoot,
+    base_sha: task.baseSha,
+    base_head: task.baseSha,
+    codex_thread_id: task.codexThreadId ?? null,
+    codex_turn_id: task.codexTurnId ?? null,
+    thread_id: task.codexThreadId ?? null,
+    turn_id: task.codexTurnId ?? null,
+    active_operation: task.activeOperation ?? null
+  };
+}
+
+function assertCodingTaskExecutionEnabled(config: CodexProConfig): void {
+  if (config.writeMode !== "workspace" || config.bashMode !== "full") {
+    throw new CodexProError("CodingTask creation and Codex execution require writeMode=workspace and bashMode=full for this trusted local workspace. These controls are never broadened automatically.");
+  }
+}
+
+async function resolveCodexExecutable(config: CodexProConfig): Promise<string> {
+  if (config.codexBin) return config.codexBin;
+  const pathValue = process.env.PATH ?? "";
+  for (const directory of pathValue.split(path.delimiter).filter(Boolean)) {
+    const candidate = path.resolve(directory, process.platform === "win32" ? "codex.exe" : "codex");
+    try {
+      await fsp.access(candidate, fsConstants.X_OK);
+      return await fsp.realpath(candidate);
+    } catch {
+      // Continue through the configured PATH; no shell or repository hooks are involved.
+    }
+  }
+  throw new CodexProError("Codex executable was not configured and could not be resolved from PATH. Set CODEXPRO_CODEX_BIN before transferring ownership to Codex.");
+}
+
+function codingTaskText(title: string, task: CodingTaskState): string {
+  const active = task.activeOperation
+    ? `${task.activeOperation.kind} (${task.activeOperation.operationId})`
+    : "none";
+  return [
+    `# ${title}`,
+    "",
+    `Task: \`${task.taskId}\``,
+    `Workspace: \`${task.workspaceId}\``,
+    `Title: ${task.title}`,
+    `Executor: ${task.executor}`,
+    `Status: ${task.lifecycle}`,
+    `Revision: ${task.revision}`,
+    `Executor epoch: ${task.executorLease.epoch}`,
+    `Active operation: ${active}`,
+    `Worktree: ${task.worktreeRoot}`,
+    task.resultSummary ? `Result: ${task.resultSummary}` : "",
+    task.error ? `Error: ${task.error}` : ""
+  ].filter(Boolean).join("\n");
+}
+
+function codingTaskRunText(title: string, task: CodingTaskState, run: CodingTaskRunView): string {
+  return [
+    codingTaskText(title, task),
+    "",
+    "## Codex run",
+    "",
+    `Operation: \`${run.operationId}\``,
+    `Run status: ${run.status}`,
+    `Runner: ${run.runnerAlive ? "alive" : "not running"}`,
+    `Thread: ${run.threadId ?? task.codexThreadId ?? "pending"}`,
+    run.finalText ? "\n## Codex response\n\n" + run.finalText : "",
+    run.error ? `\nError: ${run.error}` : "",
+    ["queued", "running"].includes(run.status)
+      ? "\nThe detached Codex runner continues independently. Use get_coding_task to observe persisted state, followup_coding_task to steer the active turn, or cancel_coding_task to stop it."
+      : ""
+  ].filter(Boolean).join("\n");
+}
+
+async function withDirectTaskOperation<T>(
+  config: CodexProConfig,
+  workspace: Workspace,
+  label: string,
+  operation: () => Promise<T> | T
+): Promise<{ result: T; task?: CodingTaskState }> {
+  if (!workspace.codingTaskId) return { result: await operation() };
+  const taskConfig = codingTaskStoreConfig(config);
+  const current = await getCodingTask(taskConfig, workspace.codingTaskId);
+  assertCodingTaskSourceAllowed(config, current);
+  const operationId = `direct_${randomUUID()}`;
+  const started = await beginDirectOperation(taskConfig, current.taskId, {
+    expectedRevision: current.revision,
+    executorEpoch: current.executorLease.epoch,
+    leaseId: current.executorLease.leaseId,
+    operationId
+  });
+  let result!: T;
+  let operationError: unknown;
+  try {
+    result = await operation();
+  } catch (error) {
+    operationError = error;
+  }
+  let task: CodingTaskState;
+  try {
+    task = await finishDirectOperation(taskConfig, current.taskId, {
+      executorEpoch: started.executorLease.epoch,
+      leaseId: started.executorLease.leaseId,
+      operationId,
+      lifecycle: "ready",
+      resultSummary: operationError ? undefined : `${label} completed.`,
+      error: operationError ? errorText(operationError) : undefined
+    });
+  } catch (cleanupError) {
+    if (operationError) {
+      throw new CodexProError(`${errorText(operationError)}\nDirect-operation lease cleanup also failed: ${errorText(cleanupError)}`);
+    }
+    throw cleanupError;
+  }
+  if (operationError) throw operationError;
+  return { result, task };
+}
+
 function errorResult(error: unknown): any {
   return {
     isError: true,
@@ -127,6 +403,7 @@ function toolCardMeta(): Record<string, unknown> {
 }
 
 const TOOL_CARD_RENDER_TOOL_NAMES = new Set<string>([
+  "codexpro",
   "open_current_workspace",
   "open_workspace",
   "workspace_snapshot",
@@ -135,7 +412,29 @@ const TOOL_CARD_RENDER_TOOL_NAMES = new Set<string>([
   "git_status",
   "handoff_to_agent",
   "handoff_to_codex",
-  "bash"
+  "bash",
+  "create_coding_task",
+  "get_coding_task",
+  "list_coding_tasks",
+  "transition_coding_task",
+  "run_coding_task",
+  "followup_coding_task",
+  "cancel_coding_task",
+  "review_coding_task",
+  "propose_goal",
+  "get_goal",
+  "list_goals",
+  "approve_goal",
+  "publish_goal_blackboard",
+  "start_goal",
+  "refresh_goal",
+  "integrate_goal_work",
+  "review_goal",
+  "pause_goal",
+  "resume_goal",
+  "cancel_goal",
+  "complete_goal",
+  "apply_goal"
 ]);
 
 const OPTIONAL_TOOL_CARD_META = [
@@ -178,7 +477,7 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
       uri,
       {
         title: "CodexPro Tool Card",
-        description: "Compact visual renderer for CodexPro workspace orientation, source changes, and handoffs.",
+        description: "Compact visual renderer for CodexPro workspace, CodingTask, Goal, source-change, and handoff results.",
         mimeType: TOOL_CARD_MIME_TYPE
       },
       async () => ({
@@ -196,7 +495,7 @@ function registerToolCardResource(server: McpServer, config: CodexProConfig): vo
                   resourceDomains: []
                 }
               },
-              "openai/widgetDescription": "Renders CodexPro workspace orientation, diagnostics, file diffs, change reviews, terminal checks, Pro context exports, and handoff plans as compact developer cards with bounded previews.",
+              "openai/widgetDescription": "Renders CodexPro workspace orientation, CodingTasks, Goals, diagnostics, file diffs, change reviews, terminal checks, Pro context exports, and handoff plans as compact developer cards with bounded previews.",
               "openai/widgetPrefersBorder": true,
               "openai/widgetDomain": config.widgetDomain,
               "openai/widgetCSP": {
@@ -230,7 +529,34 @@ const SUPERTOOL_ACTION_ALIASES: Record<string, string> = {
   handoff_poll: "wait_for_handoff",
   pro_export: "export_pro_context",
   agent_handoff: "handoff_to_agent",
-  codex_handoff: "handoff_to_codex"
+  codex_handoff: "handoff_to_codex",
+  job_start: "start_background_job",
+  job_status: "get_background_job",
+  job_list: "list_background_jobs",
+  job_wait: "wait_for_background_job",
+  job_cancel: "cancel_background_job",
+  task_create: "create_coding_task",
+  task_get: "get_coding_task",
+  task_list: "list_coding_tasks",
+  task_transition: "transition_coding_task",
+  task_run: "run_coding_task",
+  task_followup: "followup_coding_task",
+  task_cancel: "cancel_coding_task",
+  task_review: "review_coding_task",
+  goal_propose: "propose_goal",
+  goal_get: "get_goal",
+  goal_list: "list_goals",
+  goal_approve: "approve_goal",
+  goal_publish: "publish_goal_blackboard",
+  goal_start: "start_goal",
+  goal_refresh: "refresh_goal",
+  goal_integrate: "integrate_goal_work",
+  goal_review: "review_goal",
+  goal_pause: "pause_goal",
+  goal_resume: "resume_goal",
+  goal_cancel: "cancel_goal",
+  goal_complete: "complete_goal",
+  goal_apply: "apply_goal"
 };
 
 const registeredToolHandlersByServer = new WeakMap<object, Map<string, CodexToolHandler>>();
@@ -325,6 +651,33 @@ const MINIMAL_TOOL_NAMES = [
   "edit",
   "apply_patch",
   "bash",
+  "start_background_job",
+  "get_background_job",
+  "list_background_jobs",
+  "wait_for_background_job",
+  "cancel_background_job",
+  "create_coding_task",
+  "get_coding_task",
+  "list_coding_tasks",
+  "transition_coding_task",
+  "run_coding_task",
+  "followup_coding_task",
+  "cancel_coding_task",
+  "review_coding_task",
+  "propose_goal",
+  "get_goal",
+  "list_goals",
+  "approve_goal",
+  "publish_goal_blackboard",
+  "start_goal",
+  "refresh_goal",
+  "integrate_goal_work",
+  "review_goal",
+  "pause_goal",
+  "resume_goal",
+  "cancel_goal",
+  "complete_goal",
+  "apply_goal",
   "show_changes"
 ] as const;
 
@@ -360,6 +713,33 @@ const FULL_TOOL_NAMES = [
   "edit",
   "apply_patch",
   "bash",
+  "start_background_job",
+  "get_background_job",
+  "list_background_jobs",
+  "wait_for_background_job",
+  "cancel_background_job",
+  "create_coding_task",
+  "get_coding_task",
+  "list_coding_tasks",
+  "transition_coding_task",
+  "run_coding_task",
+  "followup_coding_task",
+  "cancel_coding_task",
+  "review_coding_task",
+  "propose_goal",
+  "get_goal",
+  "list_goals",
+  "approve_goal",
+  "publish_goal_blackboard",
+  "start_goal",
+  "refresh_goal",
+  "integrate_goal_work",
+  "review_goal",
+  "pause_goal",
+  "resume_goal",
+  "cancel_goal",
+  "complete_goal",
+  "apply_goal",
   "git_status",
   "git_diff",
   "show_changes",
@@ -378,6 +758,33 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   "edit",
   "apply_patch",
   "bash",
+  "start_background_job",
+  "get_background_job",
+  "list_background_jobs",
+  "wait_for_background_job",
+  "cancel_background_job",
+  "create_coding_task",
+  "get_coding_task",
+  "list_coding_tasks",
+  "transition_coding_task",
+  "run_coding_task",
+  "followup_coding_task",
+  "cancel_coding_task",
+  "review_coding_task",
+  "propose_goal",
+  "get_goal",
+  "list_goals",
+  "approve_goal",
+  "publish_goal_blackboard",
+  "start_goal",
+  "refresh_goal",
+  "integrate_goal_work",
+  "review_goal",
+  "pause_goal",
+  "resume_goal",
+  "cancel_goal",
+  "complete_goal",
+  "apply_goal",
   "export_pro_context",
   "handoff_to_agent",
   "handoff_to_codex"
@@ -398,8 +805,10 @@ function toolNamesForMode(config: CodexProConfig): string[] {
         ? [...MINIMAL_TOOL_NAMES]
         : [...STANDARD_TOOL_NAMES];
   if (config.bashMode === "off") {
-    const bashIndex = names.indexOf("bash");
-    if (bashIndex !== -1) names.splice(bashIndex, 1);
+    for (const disabledTool of ["bash", "start_background_job"]) {
+      const toolIndex = names.indexOf(disabledTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
   }
   if (config.writeMode !== "workspace") {
     for (const writeTool of ["write", "edit", "apply_patch"]) {
@@ -442,6 +851,7 @@ function registeredToolNames(server: McpServer): string[] {
 function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (config.connectionTest && CONNECTION_TEST_HIDDEN_TOOLS.has(name)) return false;
   if (name === "bash" && config.bashMode === "off") return false;
+  if (name === "start_background_job" && config.bashMode === "off") return false;
   if ((name === "write" || name === "edit" || name === "apply_patch") && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
@@ -477,8 +887,8 @@ function serverInstructions(config: CodexProConfig): string {
         : "4. Write/edit/apply_patch tools are disabled. Do not attempt direct file writes; use handoff or context export workflows instead.";
   const bashInstruction =
     config.bashMode === "off"
-      ? "5. Bash is disabled and the bash tool is unavailable. Do not attempt shell commands."
-      : "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
+      ? "5. Starting new shell commands is disabled. Existing durable background jobs may still be inspected, waited on, or explicitly canceled."
+      : "5. Use bash for bounded verification commands. For work that may exceed 180 seconds or must survive MCP reconnects, use start_background_job once with a stable job_key, then wait_for_background_job/get_background_job. Never create a new key as an automatic retry.";
 
   return [
     "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
@@ -489,7 +899,9 @@ function serverInstructions(config: CodexProConfig): string {
     "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
     bashInstruction,
-    "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
+    "6. For isolated implementation work, create one persistent CodingTask. Creation and Codex execution require explicit writeMode=workspace plus bashMode=full because App Server can execute beyond safe-bash commands. Use its taskws_* workspace for direct coding, or transition ownership to Codex and run/follow up there. Never mutate a CodingTask worktree unless the persisted executor is direct and no operation owns it.",
+    "7. For complex multi-part work, Pro may call propose_goal with a complete bounded work graph. A proposal is inert. Show the returned contract and fingerprint to the user; call approve_goal only after explicit approval, and never imply that approval started workers. Start, refresh, review, and integrate through Goal tools; only Pro may publish decisions or change scope. Goal worker worktrees are inspected with review_coding_task and the private integration worktree is inspected only with review_goal; never pass either internal path to open_workspace, read, or bash. An open_workspace denial for a Goal worktree is the expected isolation boundary, not a Goal verification failure. review_goal returns the authoritative combined patch and runs the approved integrated git diff --check. complete_goal records Pro's final evidence judgment and still does not affect source. apply_goal is a separate user-approved source effect.",
+    "8. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
     config.codexSessions !== "off"
       ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
@@ -920,10 +1332,26 @@ const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destru
 const SESSION_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
+const CODEX_TASK_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: true };
+const GOAL_PLAN_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: true };
+const GOAL_APPROVAL_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: true };
+const BACKGROUND_JOB_START_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: true };
+const BACKGROUND_JOB_CANCEL_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: true };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 
 export function createCodexProServer(config: CodexProConfig): McpServer {
-  const workspaces = new WorkspaceManager(config);
+  const workspaces = new WorkspaceManager(config, {
+    resolvePersistentTaskWorkspace: (workspaceId) => resolveCodingTaskWorkspace(
+      codingTaskStoreConfig(config),
+      workspaceId,
+      { assertSourceWorkspace: (sourceRoot) => {
+        if (!config.allowedRoots.some((root) => {
+          const relative = path.relative(root, sourceRoot);
+          return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+        })) throw new CodexProError("CodingTask source workspace is outside allowed roots.");
+      } }
+    )
+  });
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
   const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
@@ -1043,6 +1471,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         requireBashSession: config.requireBashSession,
         codexSessions: config.codexSessions,
         codexDir: config.codexDir,
+        codexBin: config.codexBin ?? null,
+        codexModel: config.codexModel,
+        codexReasoningEffort: config.codexReasoningEffort,
         writeMode: config.writeMode,
         toolMode: config.toolMode,
         toolCards: config.toolCards,
@@ -1055,6 +1486,12 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         maxWriteBytes: config.maxWriteBytes,
         maxOutputBytes: config.maxOutputBytes,
         maxSearchResults: config.maxSearchResults,
+        backgroundJobDir: config.backgroundJobDir,
+        backgroundJobDefaultTimeoutMs: config.backgroundJobDefaultTimeoutMs,
+        backgroundJobMaxLogBytes: config.backgroundJobMaxLogBytes,
+        codingTaskDir: config.codingTaskDir,
+        codingTaskDefaultTimeoutMs: config.codingTaskDefaultTimeoutMs,
+        codingTaskMaxLogBytes: config.codingTaskMaxLogBytes,
         blockedGlobs: config.blockedGlobs,
         registeredTools: registeredToolNames(server),
         registeredToolCount: registeredToolNames(server).length
@@ -1087,10 +1524,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const started = Date.now();
       const checks: Array<{ name: string; status: "pass" | "warn" | "fail"; detail: string }> = [];
       const filesTouched: string[] = [];
+      let lastTaskState: CodingTaskState | undefined;
       const probePath = `${config.contextDir}/codexpro-self-test.md`;
 
       const check = (name: string, status: "pass" | "warn" | "fail", detail: string) => {
@@ -1156,11 +1594,15 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
               "marker: before",
               ""
             ].join("\n");
-            await writeTextFile(config, guard, workspace, probePath, content, { createDirs: true, overwrite: true });
-            await editTextFile(config, guard, workspace, probePath, "marker: before", "marker: after", { expectedReplacements: 1 });
-            const readBack = await readTextFile(config, guard, workspace, probePath, { maxBytes: 20_000 });
-            if (!readBack.text.includes("marker: after")) throw new CodexProError("self-test edit marker was not found after edit.");
-            const scopedStatus = gitStatus(config, workspace, guard, probePath);
+            const leased = await withDirectTaskOperation(config, workspace, "self-test write/edit probe", async () => {
+              await writeTextFile(config, guard, workspace, probePath, content, { createDirs: true, overwrite: true });
+              await editTextFile(config, guard, workspace, probePath, "marker: before", "marker: after", { expectedReplacements: 1 });
+              const readBack = await readTextFile(config, guard, workspace, probePath, { maxBytes: 20_000 });
+              if (!readBack.text.includes("marker: after")) throw new CodexProError("self-test edit marker was not found after edit.");
+              return gitStatus(config, workspace, guard, probePath);
+            });
+            lastTaskState = leased.task ?? lastTaskState;
+            const scopedStatus = leased.result;
             const scopedFiles = changedStatusLines(scopedStatus);
             filesTouched.push(probePath);
             check(
@@ -1210,17 +1652,21 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           if (config.bashMode === "off") {
             check("bash policy", "warn", "bash disabled");
           } else {
-            const bashProbeOptions = { timeoutMs: 10_000, sessionId: config.bashSessionId };
-            const pwd = await runBash(config, guard, workspace, "pwd", bashProbeOptions);
-            if (config.bashMode === "safe") {
-              try {
-                await runBash(config, guard, workspace, "ls $HOME", bashProbeOptions);
-                check("bash policy", "fail", "safe bash allowed environment expansion unexpectedly");
-              } catch {
-                check("bash policy", pwd.exitCode === 0 ? "pass" : "warn", "safe bash allowed pwd and blocked environment expansion");
+            const leased = await withDirectTaskOperation(config, workspace, "self-test bash probe", async () => {
+              const bashProbeOptions = { timeoutMs: 10_000, sessionId: config.bashSessionId };
+              const pwd = await runBash(config, guard, workspace, "pwd", bashProbeOptions);
+              let unsafeExpansionBlocked = false;
+              if (config.bashMode === "safe") {
+                try { await runBash(config, guard, workspace, "ls $HOME", bashProbeOptions); }
+                catch { unsafeExpansionBlocked = true; }
               }
+              return { pwd, unsafeExpansionBlocked };
+            });
+            lastTaskState = leased.task ?? lastTaskState;
+            if (config.bashMode === "safe") {
+              check("bash policy", leased.result.unsafeExpansionBlocked && leased.result.pwd.exitCode === 0 ? "pass" : "fail", leased.result.unsafeExpansionBlocked ? "safe bash allowed pwd and blocked environment expansion" : "safe bash allowed environment expansion unexpectedly");
             } else {
-              check("bash policy", pwd.exitCode === 0 ? "warn" : "fail", "full bash is enabled; use only for trusted local repos");
+              check("bash policy", leased.result.pwd.exitCode === 0 ? "warn" : "fail", "full bash is enabled; use only for trusted local repos");
             }
           }
         } catch (error) {
@@ -1278,6 +1724,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         tool_mode: config.toolMode,
         files_touched: filesTouched,
         checks,
+        ...(lastTaskState ? codingTaskStructured(lastTaskState) : {}),
         terms_boundary: {
           local_workspace_bridge: true,
           provides_models: false,
@@ -1311,7 +1758,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const inventory = await codexproInventory(config, workspace, {
         includeGlobalSkills: parseBool(args.include_global_skills, true),
         includeMcpServers: parseBool(args.include_mcp_servers, true),
@@ -1357,7 +1804,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const requestedPath = typeof args.path === "string" ? args.path : undefined;
       const includeGlobalDefault =
         args.source === undefined ||
@@ -1540,7 +1987,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const summary = await workspaceSummary(config, guard, workspace, {
         includeTree: true,
         maxDepth: limitInt(args.max_depth, 3, 1, 8),
@@ -1592,7 +2039,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       if (args.path) guard.resolve(workspace, args.path);
       const result = await inspectWorkspace(config, guard, workspace);
       const prefix = typeof args.path === "string" && args.path.trim()
@@ -1676,7 +2123,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const result = await repoTree(config, guard, workspace, {
         path: args.path ?? ".",
         maxDepth: limitInt(args.max_depth, 4, 1, 12),
@@ -1714,7 +2161,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const result = await searchWorkspace(config, guard, workspace, {
         query: args.query,
         regex: parseBool(args.regex, false),
@@ -1760,7 +2207,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const result = await readTextFile(config, guard, workspace, args.path, {
         startLine: args.start_line,
         endLine: args.end_line,
@@ -1786,7 +2233,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       annotations: READ_ONLY_ANNOTATIONS
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const result = await viewWorkspaceImage(config, guard, workspace, args.path, args.max_bytes);
       const dimensions = result.width && result.height ? `${result.width}x${result.height}` : "unknown";
       return {
@@ -1834,14 +2281,17 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
-      const result = await writeTextFile(config, guard, workspace, args.path, String(args.content ?? ""), {
-        createDirs: args.create_dirs !== false,
-        overwrite: args.overwrite !== false,
-        expectedSha256: args.expected_sha256
-      });
+      const leased = await withDirectTaskOperation(config, workspace, "write", () =>
+        writeTextFile(config, guard, workspace, args.path, String(args.content ?? ""), {
+          createDirs: args.create_dirs !== false,
+          overwrite: args.overwrite !== false,
+          expectedSha256: args.expected_sha256
+        })
+      );
+      const result = leased.result;
       if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
       const text = `# Write File\n\nPath: ${result.path}\nExisted before: ${result.existed}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
       return textResult(text, {
@@ -1853,7 +2303,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         sha256: result.sha256,
         additions: result.diff.additions,
         deletions: result.diff.deletions,
-        diff: result.diff.diff
+        diff: result.diff.diff,
+        ...(leased.task ? codingTaskStructured(leased.task) : {})
       });
     }
   );
@@ -1882,14 +2333,17 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const resolved = guard.resolve(workspace, args.path, { forWrite: true });
       assertWriteToolAllowed(config, resolved.relPath);
-      const result = await editTextFile(config, guard, workspace, args.path, String(args.old_text ?? ""), String(args.new_text ?? ""), {
-        replaceAll: parseBool(args.replace_all, false),
-        expectedReplacements: args.expected_replacements,
-        expectedSha256: args.expected_sha256
-      });
+      const leased = await withDirectTaskOperation(config, workspace, "edit", () =>
+        editTextFile(config, guard, workspace, args.path, String(args.old_text ?? ""), String(args.new_text ?? ""), {
+          replaceAll: parseBool(args.replace_all, false),
+          expectedReplacements: args.expected_replacements,
+          expectedSha256: args.expected_sha256
+        })
+      );
+      const result = leased.result;
       if (result.diff.changed) invalidateWorkspaceAnalysis(workspace.id);
       const text = `# Edit File\n\nPath: ${result.path}\nReplacements: ${result.replacements}\nBytes: ${result.bytes}\nSHA-256: ${result.sha256}\nDiff stats: +${result.diff.additions} -${result.diff.deletions}${diffBlock(result.diff.diff)}`;
       return textResult(text, {
@@ -1901,7 +2355,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         sha256: result.sha256,
         additions: result.diff.additions,
         deletions: result.diff.deletions,
-        diff: result.diff.diff
+        diff: result.diff.diff,
+        ...(leased.task ? codingTaskStructured(leased.task) : {})
       });
     }
   );
@@ -1926,8 +2381,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
-      const result = await applyWorkspacePatch(config, guard, workspace, String(args.patch ?? ""));
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const leased = await withDirectTaskOperation(config, workspace, "apply_patch", () =>
+        applyWorkspacePatch(config, guard, workspace, String(args.patch ?? ""))
+      );
+      const result = leased.result;
       if (result.changed) invalidateWorkspaceAnalysis(workspace.id);
       const text = [
         "# Apply Patch",
@@ -1946,7 +2404,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         additions: result.additions,
         deletions: result.deletions,
         changed: result.changed,
-        diff: result.diff
+        diff: result.diff,
+        ...(leased.task ? codingTaskStructured(leased.task) : {})
       });
     }
   );
@@ -1974,14 +2433,190 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
-      const result = await runBash(config, guard, workspace, String(args.command ?? ""), {
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const leased = await withDirectTaskOperation(config, workspace, "bash", () =>
+        runBash(config, guard, workspace, String(args.command ?? ""), {
+          cwd: args.cwd,
+          timeoutMs: args.timeout_ms,
+          sessionId: args.session_id
+        })
+      );
+      const result = leased.result;
+      const text = bashTextResult(config, result);
+      return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result, bash_session_id: result.bashSessionId ?? null, ...(leased.task ? codingTaskStructured(leased.task) : {}) });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "start_background_job",
+    {
+      title: "Start Durable Background Job",
+      description:
+        "Start one durable workspace command that may run for hours and must survive ChatGPT/MCP disconnects or CodexPro server restarts. The call returns quickly with a deterministic job id; a separate local runner owns the process and persists status plus bounded logs outside the repository. job_key is an idempotency key: repeating the same request returns the existing job and never starts a duplicate. A reused key with a changed command, cwd, timeout, log, or Git guard contract is rejected. Optional Git HEAD and clean-worktree guards are checked before launch and again by the detached runner. This tool never retries failed jobs and never advances a benchmark to judge/report automatically. Use wait_for_background_job or get_background_job after starting.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        job_key: z.string().min(1).max(160).describe("Stable idempotency key, for example v3.3.0-report-attribution-151cc47:run. Use a different explicit key only for an intentional new command."),
+        command: z.string().min(1).max(50_000).describe("One command to run under bash in the selected workspace. The current bash mode and session guard still apply."),
+        session_id: z.string().optional().describe(config.requireBashSession && config.bashSessionId ? `Required bash session id for this server: ${config.bashSessionId}.` : "Optional bash session id. If configured on the server, a provided value must match it."),
+        cwd: z.string().optional().describe("Working directory relative to the workspace root. Default: ."),
+        timeout_ms: z.number().int().min(1_000).max(24 * 60 * 60_000).optional().describe(`Durable job timeout in milliseconds, up to 24 hours. Default: ${config.backgroundJobDefaultTimeoutMs}.`),
+        expected_git_head: z.string().regex(/^[0-9a-fA-F]{40}$/).optional().describe("Optional full Git commit SHA. The command is not started unless the selected workspace repository is still at this exact HEAD."),
+        require_clean_worktree: z.boolean().optional().describe("When true, reject staged, unstaged, or untracked Git changes. Checked before launch and again in the detached runner. Default: false.")
+      },
+      annotations: BACKGROUND_JOB_START_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      if (workspace.codingTaskId) {
+        throw new CodexProError("Durable background jobs are not supported inside CodingTask worktrees because executor ownership cannot be transferred safely while they run. Use bounded bash or Codex collaboration.");
+      }
+      const job = await startBackgroundJob(config, guard, workspace, String(args.command ?? ""), {
+        jobKey: String(args.job_key ?? ""),
         cwd: args.cwd,
         timeoutMs: args.timeout_ms,
-        sessionId: args.session_id
+        sessionId: args.session_id,
+        expectedGitHead: args.expected_git_head,
+        requireCleanWorktree: args.require_clean_worktree
       });
-      const text = bashTextResult(config, result);
-      return textResult(text, { workspace_id: workspace.id, root: workspace.root, ...result, bash_session_id: result.bashSessionId ?? null });
+      return textResult(backgroundJobText("Durable Background Job", job), {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        job
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "get_background_job",
+    {
+      title: "Get Durable Background Job",
+      description:
+        "Read the authoritative persisted status and bounded stdout/stderr tail for one durable background job. Works after MCP reconnects and CodexPro server restarts. It never starts, retries, or cancels a process.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        job_id: z.string().optional().describe("Job id returned by start_background_job. Provide job_id or job_key."),
+        job_key: z.string().max(160).optional().describe("Stable idempotency key used at start. Provide job_id or job_key."),
+        tail_bytes: z.number().int().min(0).max(30_000).optional().describe("Maximum bytes to read from the end of each log. Default: 4000.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const job = await getBackgroundJob(config, workspace, {
+        jobId: args.job_id,
+        jobKey: args.job_key,
+        tailBytes: args.tail_bytes
+      });
+      return textResult(backgroundJobText("Durable Background Job Status", job), {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        job
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "list_background_jobs",
+    {
+      title: "List Durable Background Jobs",
+      description:
+        "List durable background jobs belonging to the selected workspace, newest first. Use this to recover a job id after reconnecting. It never reads another allowed workspace's jobs and never starts or changes processes.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        limit: z.number().int().min(1).max(100).optional().describe("Maximum jobs to return. Default: 20."),
+        include_terminal: z.boolean().optional().describe("Include completed, failed, timed-out, and canceled jobs. Default: true.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const jobs = await listBackgroundJobs(config, workspace, {
+        limit: args.limit,
+        includeTerminal: args.include_terminal ?? true
+      });
+      const body = jobs.length
+        ? jobs.map((job) => `- \`${job.job_id}\` · \`${job.job_key}\` · ${job.status} · ${job.duration_ms ?? "pending"} ms`).join("\n")
+        : "- none";
+      return textResult(`# Durable Background Jobs\n\n${body}`, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        jobs,
+        count: jobs.length
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "wait_for_background_job",
+    {
+      title: "Wait for Durable Background Job",
+      description:
+        "Read-only bounded wait for a durable background job. It waits at most 60 seconds, returns sooner on terminal status, and can be called repeatedly without affecting the process. The job continues independently when this call returns or the MCP connection drops.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        job_id: z.string().optional().describe("Job id returned by start_background_job. Provide job_id or job_key."),
+        job_key: z.string().max(160).optional().describe("Stable idempotency key used at start. Provide job_id or job_key."),
+        wait_ms: z.number().int().min(0).max(60_000).optional().describe("Maximum time to wait during this call. Default: 10000."),
+        tail_bytes: z.number().int().min(0).max(30_000).optional().describe("Maximum bytes to read from the end of each log. Default: 4000.")
+      },
+      annotations: SESSION_READ_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const job = await waitForBackgroundJob(config, workspace, {
+        jobId: args.job_id,
+        jobKey: args.job_key,
+        waitMs: args.wait_ms,
+        tailBytes: args.tail_bytes
+      });
+      return textResult(backgroundJobText("Durable Background Job Wait", job), {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        job
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "cancel_background_job",
+    {
+      title: "Cancel Durable Background Job",
+      description:
+        "Explicitly request cancellation of one durable background job and wait briefly for authoritative terminal status. The runner sends SIGTERM to the job process group and escalates to SIGKILL after five seconds. Repeating the same cancellation is idempotent. This tool never deletes job state or logs and never cancels jobs from another workspace.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        job_id: z.string().optional().describe("Job id returned by start_background_job. Provide job_id or job_key."),
+        job_key: z.string().max(160).optional().describe("Stable idempotency key used at start. Provide job_id or job_key."),
+        reason: z.string().max(500).optional().describe("Optional human-readable cancellation reason recorded with the request."),
+        wait_ms: z.number().int().min(0).max(10_000).optional().describe("Maximum time to wait for terminal status after requesting cancellation. Default: 5000."),
+        tail_bytes: z.number().int().min(0).max(30_000).optional().describe("Maximum bytes to read from the end of each log. Default: 4000.")
+      },
+      annotations: BACKGROUND_JOB_CANCEL_ANNOTATIONS
+    },
+    async (args) => {
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const job = await cancelBackgroundJob(config, workspace, {
+        jobId: args.job_id,
+        jobKey: args.job_key,
+        reason: args.reason,
+        waitMs: args.wait_ms,
+        tailBytes: args.tail_bytes
+      });
+      return textResult(backgroundJobText("Durable Background Job Cancellation", job), {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        job
+      });
     }
   );
 
@@ -2004,7 +2639,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
       const status = gitStatus(config, workspace, guard, scopedPath);
       const statusError = looksLikeGitError(status) ? status : "";
@@ -2042,7 +2677,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false)));
       const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
       const stats = diffError ? { additions: 0, deletions: 0, changed: false } : diffStats(rawDiff);
@@ -2099,7 +2734,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const scopedPath = typeof args.path === "string" ? args.path : undefined;
       const staged = parseBool(args.staged, false);
       const normalizedScopedPath = scopedPath?.trim() ? guard.resolve(workspace, scopedPath).relPath : undefined;
@@ -2211,7 +2846,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const context = await readAiBridgeContext(config, guard, workspace);
       return textResult(context.text, {
         workspace_id: workspace.id,
@@ -2249,7 +2884,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const maxWaitSeconds = limitInt(args.max_wait_seconds, 20, 1, 60);
       const pollMs = limitInt(args.poll_ms, 1000, 250, 5000);
       const includeDiff = parseBool(args.include_diff, true);
@@ -2416,7 +3051,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
       const context = await readCodexContext(config, guard, workspace, {
         targetPath: args.target_path,
         includeAiBridge: args.include_ai_bridge,
@@ -2467,20 +3102,23 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
-      const result = await exportProContext(config, guard, workspace, {
-        title: args.title,
-        selectedPaths: args.selected_paths,
-        extraGlobs: args.extra_globs,
-        includeImportantFiles: args.include_important_files,
-        includeChangedFiles: args.include_changed_files,
-        includeDiff: args.include_diff,
-        includeAiBridge: args.include_ai_bridge,
-        maxDepth: args.max_depth,
-        maxFiles: args.max_files,
-        maxFileBytes: args.max_file_bytes,
-        maxTotalBytes: args.max_total_bytes
-      });
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const leased = await withDirectTaskOperation(config, workspace, "export_pro_context", () =>
+        exportProContext(config, guard, workspace, {
+          title: args.title,
+          selectedPaths: args.selected_paths,
+          extraGlobs: args.extra_globs,
+          includeImportantFiles: args.include_important_files,
+          includeChangedFiles: args.include_changed_files,
+          includeDiff: args.include_diff,
+          includeAiBridge: args.include_ai_bridge,
+          maxDepth: args.max_depth,
+          maxFiles: args.max_files,
+          maxFileBytes: args.max_file_bytes,
+          maxTotalBytes: args.max_total_bytes
+        })
+      );
+      const result = leased.result;
       const text = `# Export Pro Context\n\nWrote ${result.path}.\nBytes: ${result.bytes}\nFiles included: ${result.filesIncluded.length}\nFiles skipped: ${result.filesSkipped.length}\nTruncated: ${result.truncated}\n\nPaste ${result.path} into a high-context planning model when MCP tools are unavailable, then save the returned plan with codexpro pro-apply.`;
       return textResult(text, {
         workspace_id: workspace.id,
@@ -2489,7 +3127,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         bytes: result.bytes,
         files_included: result.filesIncluded,
         files_skipped: result.filesSkipped,
-        truncated: result.truncated
+        truncated: result.truncated,
+        ...(leased.task ? codingTaskStructured(leased.task) : {})
       });
     }
   );
@@ -2613,16 +3252,19 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
-      const result = await writeAgentHandoff(config, guard, workspace, {
-        agent: args.agent ?? "custom",
-        agentName: args.agent_name,
-        model: args.model,
-        title: cleanOneLine(args.title, "Agent implementation plan"),
-        plan: String(args.plan ?? ""),
-        append: parseBool(args.append, false),
-        eventName: "handoff_to_agent"
-      });
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const leased = await withDirectTaskOperation(config, workspace, "handoff_to_agent", () =>
+        writeAgentHandoff(config, guard, workspace, {
+          agent: args.agent ?? "custom",
+          agentName: args.agent_name,
+          model: args.model,
+          title: cleanOneLine(args.title, "Agent implementation plan"),
+          plan: String(args.plan ?? ""),
+          append: parseBool(args.append, false),
+          eventName: "handoff_to_agent"
+        })
+      );
+      const result = leased.result;
 
       const text = `# Handoff To Agent
 
@@ -2651,7 +3293,8 @@ ${result.prompt}
         execution_log_path: result.executionLogPath,
         additions: result.writeResult.diff.additions,
         deletions: result.writeResult.diff.deletions,
-        diff: result.writeResult.diff.diff
+        diff: result.writeResult.diff.diff,
+        ...(leased.task ? codingTaskStructured(leased.task) : {})
       });
     }
   );
@@ -2677,14 +3320,17 @@ ${result.prompt}
       }
     },
     async (args) => {
-      const workspace = workspaces.getWorkspace(args.workspace_id);
-      const result = await writeAgentHandoff(config, guard, workspace, {
-        agent: "codex",
-        title: cleanOneLine(args.title, "Codex implementation plan"),
-        plan: String(args.plan ?? ""),
-        append: parseBool(args.append, false),
-        eventName: "handoff_to_codex"
-      });
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      const leased = await withDirectTaskOperation(config, workspace, "handoff_to_codex", () =>
+        writeAgentHandoff(config, guard, workspace, {
+          agent: "codex",
+          title: cleanOneLine(args.title, "Codex implementation plan"),
+          plan: String(args.plan ?? ""),
+          append: parseBool(args.append, false),
+          eventName: "handoff_to_codex"
+        })
+      );
+      const result = leased.result;
       const text = `# Handoff To Codex
 
 Wrote ${result.planPath}.
@@ -2709,8 +3355,982 @@ ${result.prompt}
         execution_log_path: result.executionLogPath,
         additions: result.writeResult.diff.additions,
         deletions: result.writeResult.diff.deletions,
-        diff: result.writeResult.diff.diff
+        diff: result.writeResult.diff.diff,
+        ...(leased.task ? codingTaskStructured(leased.task) : {})
       });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "create_coding_task",
+    {
+      title: "Create CodingTask",
+      description: "Create or reopen one persistent isolated CodingTask worktree. The source workspace stays untouched; direct ChatGPT coding and Codex collaboration share this task workspace and transfer exclusive ownership explicitly.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Allowed source Git workspace. Omit to use the selected workspace."),
+        task_key: z.string().min(1).max(160).describe("Stable idempotency key. Reusing it with the same contract returns the existing task."),
+        title: z.string().min(1).max(500).describe("Short user-facing task title."),
+        goal: z.string().min(1).max(20_000).describe("Implementation goal and acceptance context shared by both executors."),
+        executor: z.enum(["direct", "codex"]).optional().describe("Initial owner. Default: direct."),
+        base_sha: z.string().regex(/^[0-9a-fA-F]{40}$/).optional().describe("Optional exact committed base. Default: current source workspace HEAD.")
+      },
+      annotations: CODEX_TASK_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/toolInvocation/invoking": "Creating isolated CodingTask...",
+        "openai/toolInvocation/invoked": "CodingTask ready"
+      }
+    },
+    async (args) => {
+      assertCodingTaskExecutionEnabled(config);
+      if ((args.executor ?? "direct") === "codex") await resolveCodexExecutable(config);
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      if (workspace.codingTaskId) throw new CodexProError("Create a CodingTask from its allowed source workspace, not from another task worktree.");
+      const created = await createCodingTask(
+        codingTaskStoreConfig(config),
+        workspace,
+        { assertSourceWorkspace: (sourceRoot) => {
+          if (!config.allowedRoots.some((root) => {
+            const relative = path.relative(root, sourceRoot);
+            return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+          })) throw new CodexProError("CodingTask source workspace is outside allowed roots.");
+        } },
+        {
+          taskKey: String(args.task_key ?? ""),
+          title: String(args.title ?? ""),
+          goal: String(args.goal ?? ""),
+          executor: args.executor ?? "direct",
+          baseSha: await resolveCodingTaskBaseSha(workspace, args.base_sha, {
+            assertSourceWorkspace: (sourceRoot) => {
+              if (!config.allowedRoots.some((root) => {
+                const relative = path.relative(root, sourceRoot);
+                return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+              })) throw new CodexProError("CodingTask source workspace is outside allowed roots.");
+            }
+          })
+        }
+      );
+      return textResult(codingTaskText(created.reused ? "CodingTask Reopened" : "CodingTask Created", created.task), {
+        ...codingTaskStructured(created.task),
+        reused: created.reused
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "get_coding_task",
+    {
+      title: "Get CodingTask",
+      description: "Read the authoritative persisted CodingTask state, ownership lease, active run, and resumable Codex thread identity.",
+      inputSchema: {
+        task_id: z.string().regex(/^task_[a-f0-9]{24}$/),
+        operation_id: z.string().min(1).max(160).optional().describe("Optional Codex operation id. By default the active or most recent recorded Codex run is included."),
+        include_run: z.boolean().optional().describe("Include persisted Codex progress, plans, diffs, and final response when available. Default: true.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Reading CodingTask...", "openai/toolInvocation/invoked": "CodingTask status ready" }
+    },
+    async (args) => {
+      const task = await allowedCodingTask(config, args.task_id);
+      const liveReview = task.activeOperation
+        ? undefined
+        : await reviewCodingTask(codingTaskStoreConfig(config), task.taskId, {
+            maxGitOutputBytes: config.maxOutputBytes,
+            isPathContentAllowed: (relativePath) => !guard.isBlockedRelativePath(relativePath)
+          });
+      const gitObservation = liveReview
+        ? {
+            capturedAt: liveReview.capturedAt,
+            headSha: liveReview.headSha,
+            status: liveReview.status,
+            diffStat: liveReview.diffStat,
+            diffSha256: liveReview.diffSha256,
+            dirty: liveReview.dirty,
+            stale: false
+          }
+        : task.lastGitObservation
+          ? { ...task.lastGitObservation, stale: true }
+          : null;
+      const reviewSummary = liveReview
+        ? {
+            changed_files_count: liveReview.changedFileCount,
+            additions: liveReview.additions,
+            deletions: liveReview.deletions,
+            content_complete: liveReview.contentComplete,
+            omitted_path_count: liveReview.omittedPathCount
+          }
+        : null;
+      let run: CodingTaskRunView | undefined;
+      let runReadError: string | undefined;
+      if (args.include_run !== false) {
+        // Log names are bounded display metadata and may be hashed. They are never an
+        // authority for restoring a run identity; use the active operation or scan the
+        // immutable run definitions through getLatestCodingTaskRun instead. This
+        // read-only tool never reconciles, relaunches, or persists recovery state.
+        const operationId = args.operation_id
+          ?? (task.activeOperation?.executor === "codex" ? task.activeOperation.operationId : undefined);
+        if (operationId) {
+          try {
+            run = await getCodingTaskRun(codingTaskStoreConfig(config), task.taskId, operationId);
+          } catch (error) {
+            const code = (error as NodeJS.ErrnoException).code;
+            if (code !== "ENOENT") runReadError = errorText(error);
+          }
+        } else {
+          try {
+            run = await getLatestCodingTaskRun(codingTaskStoreConfig(config), task.taskId);
+          } catch (error) {
+            runReadError = errorText(error);
+          }
+        }
+      }
+      const gitText = gitObservation
+        ? `Git snapshot: ${gitObservation.dirty ? "dirty" : "clean"} at ${gitObservation.headSha.slice(0, 12)} · ${gitObservation.capturedAt}${gitObservation.stale ? " (last completed snapshot; Codex is active)" : ""}`
+        : "Git snapshot: unavailable while an operation is active.";
+      const text = `${run ? codingTaskRunText("CodingTask", task, run) : codingTaskText("CodingTask", task)}\n\n${gitText}${runReadError ? `\nRun read error: ${runReadError}` : ""}`;
+      return textResult(text, {
+        ...codingTaskStructured(task),
+        run: run ?? null,
+        runner_alive: run?.runnerAlive ?? null,
+        stranded: run ? ["queued", "running"].includes(run.status) && !run.runnerAlive : false,
+        recovery_needed: run ? ["queued", "running"].includes(run.status) && !run.runnerAlive : false,
+        recovery_action: run && ["queued", "running"].includes(run.status) && !run.runnerAlive
+          ? (config.writeMode === "workspace" && config.bashMode === "full"
+              ? "Retry run_coding_task with the same operation_id, or use followup_coding_task. Use cancel_coding_task to stop without relaunching."
+              : "Enable writeMode=workspace and bashMode=full only if you intend to resume execution. A stranded running operation may be canceled without enabling execution; a queued orphan remains passive until an explicit recovery or supported terminal cancellation.")
+          : null,
+        run_read_error: runReadError ?? null,
+        git_observation: gitObservation,
+        review_summary: reviewSummary
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "list_coding_tasks",
+    {
+      title: "List CodingTasks",
+      description: "List persistent CodingTasks whose source repositories are still within this server's allowed roots.",
+      inputSchema: { limit: z.number().int().min(1).max(100).optional() },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Listing CodingTasks...", "openai/toolInvocation/invoked": "CodingTask list ready" }
+    },
+    async (args) => {
+      const all = await listCodingTasks(codingTaskStoreConfig(config), { limit: args.limit ?? 100 });
+      const tasks = all.filter((task) => {
+        try { assertCodingTaskSourceAllowed(config, task); return true; } catch { return false; }
+      });
+      const text = tasks.length
+        ? ["# CodingTasks", "", ...tasks.map((task) => `- \`${task.taskId}\` · ${task.executor} · ${task.lifecycle} · r${task.revision} · ${task.title}`)].join("\n")
+        : "# CodingTasks\n\nNo CodingTasks are visible for the current allowed roots.";
+      return textResult(text, { tasks, task_count: tasks.length });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "transition_coding_task",
+    {
+      title: "Transition CodingTask",
+      description: "Atomically transfer exclusive CodingTask ownership between direct ChatGPT coding and Codex collaboration. Refuses active operations and records a Git snapshot before confirming the handoff.",
+      inputSchema: {
+        task_id: z.string().regex(/^task_[a-f0-9]{24}$/),
+        to: z.enum(["direct", "codex"]),
+        expected_revision: z.number().int().min(1).describe("Revision from the latest task read; stale transitions fail closed."),
+        transition_key: z.string().min(1).max(160).describe("Stable idempotency key for this handoff.")
+      },
+      annotations: CODEX_TASK_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Transferring CodingTask ownership...", "openai/toolInvocation/invoked": "CodingTask ownership transferred" }
+    },
+    async (args) => {
+      const current = await allowedCodingTask(config, args.task_id);
+      assertIndependentCodingTaskControl(current, "CodingTask ownership transfer");
+      const priorTransition = current.lastTransition;
+      if (priorTransition && priorTransition.key === args.transition_key && priorTransition.to === args.to) {
+        return textResult(codingTaskText("CodingTask Transition", current), {
+          ...codingTaskStructured(current),
+          transition: priorTransition,
+          reused: true
+        });
+      }
+      if (args.to === "codex") {
+        assertCodingTaskExecutionEnabled(config);
+        await resolveCodexExecutable(config);
+      }
+      const task = await transitionCodingTaskExecutor(codingTaskStoreConfig(config), current.taskId, {
+        expectedRevision: args.expected_revision,
+        expectedExecutorEpoch: current.executorLease.epoch,
+        expectedLeaseId: current.executorLease.leaseId,
+        transitionKey: args.transition_key,
+        to: args.to,
+        maxGitOutputBytes: config.maxOutputBytes
+      });
+      assertCodingTaskSourceAllowed(config, task);
+      return textResult(codingTaskText("CodingTask Transition", task), {
+        ...codingTaskStructured(task),
+        transition: task.lastTransition ?? null
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "run_coding_task",
+    {
+      title: "Run CodingTask with Codex",
+      description: "Start one durable Codex App Server turn in the task worktree and return promptly. The persistent Codex thread, progress, plans, diffs, and final response remain attached to the same CodingTask across reconnects.",
+      inputSchema: {
+        task_id: z.string().regex(/^task_[a-f0-9]{24}$/),
+        operation_id: z.string().min(1).max(160).describe("Stable idempotency key for this Codex turn."),
+        prompt: z.string().min(1).max(262_144).describe("Implementation request for Codex. Include acceptance criteria and verification expectations."),
+        expected_revision: z.number().int().min(1).describe("Revision from the latest task read; stale starts fail closed."),
+        timeout_ms: z.number().int().min(1_000).max(24 * 60 * 60_000).optional().describe(`Maximum turn duration. Default: ${config.codingTaskDefaultTimeoutMs}.`)
+      },
+      annotations: CODEX_TASK_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Starting Codex collaboration...", "openai/toolInvocation/invoked": "Codex collaboration started" }
+    },
+    async (args) => {
+      assertCodingTaskExecutionEnabled(config);
+      const current = await allowedCodingTask(config, args.task_id);
+      assertIndependentCodingTaskControl(current, "Direct CodingTask run");
+      if (current.executor !== "codex") throw new CodexProError("Transition this CodingTask to executor=codex before starting a Codex turn.");
+      const run = await launchCodingTaskRun(
+        { dataRoot: config.codingTaskDir, codexBinary: await resolveCodexExecutable(config), env: { CODEX_HOME: config.codexDir }, maxLogBytes: config.codingTaskMaxLogBytes },
+        current.taskId,
+        {
+          operationId: args.operation_id,
+          prompt: args.prompt,
+          expectedRevision: current.revision,
+          executorEpoch: current.executorLease.epoch,
+          leaseId: current.executorLease.leaseId,
+          threadId: current.codexThreadId,
+          model: config.codexModel,
+          effort: config.codexReasoningEffort,
+          timeoutMs: args.timeout_ms ?? config.codingTaskDefaultTimeoutMs
+        }
+      );
+      const task = await allowedCodingTask(config, current.taskId);
+      return textResult(codingTaskRunText("Codex Collaboration", task, run), {
+        ...codingTaskStructured(task),
+        run
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "followup_coding_task",
+    {
+      title: "Follow Up CodingTask",
+      description: "Continue the same Codex collaboration context. An active turn is steered in place; an idle task starts a new turn by resuming its persisted Codex thread.",
+      inputSchema: {
+        task_id: z.string().regex(/^task_[a-f0-9]{24}$/),
+        request_key: z.string().min(1).max(160).describe("Stable idempotency key for this follow-up."),
+        prompt: z.string().min(1).max(262_144).describe("Follow-up guidance, correction, or next requested change."),
+        expected_revision: z.number().int().min(1).optional().describe("Optional revision guard. Recommended for idle follow-ups; active turns may heartbeat to newer revisions."),
+        timeout_ms: z.number().int().min(1_000).max(24 * 60 * 60_000).optional()
+      },
+      annotations: CODEX_TASK_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Sending Codex follow-up...", "openai/toolInvocation/invoked": "Codex follow-up accepted" }
+    },
+    async (args) => {
+      assertCodingTaskExecutionEnabled(config);
+      const current = await allowedCodingTask(config, args.task_id);
+      assertIndependentCodingTaskControl(current, "Direct CodingTask follow-up");
+      if (current.executor !== "codex") throw new CodexProError("Transition this CodingTask to executor=codex before sending a Codex follow-up.");
+      if (current.activeOperation?.executor === "codex") {
+        await reconcileCodingTaskRun(
+          { dataRoot: config.codingTaskDir, codexBinary: await resolveCodexExecutable(config), env: { CODEX_HOME: config.codexDir }, maxLogBytes: config.codingTaskMaxLogBytes },
+          current.taskId,
+          current.activeOperation.operationId,
+          { relaunchQueued: true }
+        );
+      }
+      const reconciled = await allowedCodingTask(config, current.taskId);
+      const followup = await submitCodingTaskFollowup(
+        { dataRoot: config.codingTaskDir, codexBinary: await resolveCodexExecutable(config), env: { CODEX_HOME: config.codexDir }, maxLogBytes: config.codingTaskMaxLogBytes },
+        reconciled.taskId,
+        {
+          requestKey: args.request_key,
+          prompt: args.prompt,
+          expectedRevision: args.expected_revision,
+          model: config.codexModel,
+          effort: config.codexReasoningEffort,
+          timeoutMs: args.timeout_ms ?? config.codingTaskDefaultTimeoutMs
+        }
+      );
+      const task = await allowedCodingTask(config, current.taskId);
+      if (followup.mode === "steer") {
+        return textResult(`${codingTaskText("Codex Follow-up", task)}\n\nFollow-up: ${followup.steer.status}\nRequest: \`${followup.steer.requestKey}\``, {
+          ...codingTaskStructured(task),
+          followup
+        });
+      }
+      return textResult(codingTaskRunText("Codex Follow-up", task, followup.run), {
+        ...codingTaskStructured(task),
+        followup,
+        run: followup.run
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "cancel_coding_task",
+    {
+      title: "Cancel CodingTask Run",
+      description: "Request cancellation of the currently active Codex turn. The detached runner observes the persisted request, interrupts App Server, and records the terminal state.",
+      inputSchema: {
+        task_id: z.string().regex(/^task_[a-f0-9]{24}$/),
+        operation_id: z.string().min(1).max(160).optional().describe("Codex operation to cancel. Omit for the current operation; include it when retrying after a lost response."),
+        reason: z.string().max(1_000).optional()
+      },
+      annotations: BACKGROUND_JOB_CANCEL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Canceling Codex collaboration...", "openai/toolInvocation/invoked": "Cancellation requested" }
+    },
+    async (args) => {
+      const current = await allowedCodingTask(config, args.task_id);
+      if (!current.activeOperation && args.operation_id) {
+        const queued = await getCodingTaskRun(codingTaskStoreConfig(config), current.taskId, args.operation_id).catch((error) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+          throw error;
+        });
+        if (queued?.status === "queued" && !queued.runnerAlive) {
+          const canceledRun = await cancelQueuedCodingTaskRun(
+            codingTaskStoreConfig(config),
+            current.taskId,
+            args.operation_id,
+            args.reason
+          );
+          return textResult(`${codingTaskText("CodingTask Cancellation", current)}\n\nQueued run \`${args.operation_id}\` was canceled before launch.`, {
+            ...codingTaskStructured(current),
+            run: canceledRun,
+            cancellation: { operation_id: args.operation_id, status: "canceled", before_launch: true }
+          });
+        }
+      }
+      const active = current.activeOperation?.executor === "codex" ? current.activeOperation : undefined;
+      const completed = current.lastCompletedOperation?.executor === "codex" ? current.lastCompletedOperation : undefined;
+      const operationId = args.operation_id ?? active?.operationId ?? completed?.operationId;
+      if (active && operationId !== active.operationId) {
+        throw new CodexProError(`CodingTask has a different active Codex operation: ${active.operationId}`);
+      }
+      const completedEpoch = completed?.executorEpoch;
+      const executorEpoch = operationId === active?.operationId
+        ? current.executorLease.epoch
+        : operationId === completed?.operationId && completedEpoch !== undefined
+          ? completedEpoch
+          : undefined;
+      if (!operationId || !executorEpoch) {
+        throw new CodexProError("CodingTask has no active Codex turn to cancel.");
+      }
+      // Cancellation is the durable authority and must win before any dead-run
+      // reconciliation. Live runners observe this request; dead runners are then
+      // fenced to a canceled terminal state without ever being relaunched.
+      const canceled = await requestCodingTaskCancellation(codingTaskStoreConfig(config), current.taskId, {
+        executor: "codex",
+        executorEpoch,
+        leaseId: current.executorLease.leaseId,
+        operationId,
+        reason: args.reason
+      });
+      let run: CodingTaskRunView | undefined;
+      if (active) {
+        run = await reconcileCodingTaskRun(
+          codingTaskStoreConfig(config),
+          current.taskId,
+          operationId,
+          { relaunchQueued: false, staleMs: 0 }
+        );
+      }
+      const authoritative = await allowedCodingTask(config, current.taskId);
+      return textResult(`${codingTaskText("CodingTask Cancellation", authoritative)}\n\nCancellation requested at ${canceled.request.requestedAt}.`, {
+        ...codingTaskStructured(authoritative),
+        run: run ?? null,
+        cancellation: canceled.request
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "review_coding_task",
+    {
+      title: "Review CodingTask",
+      description: "Review the complete isolated task worktree against its committed base, including authoritative Git status, diff statistics, binary-safe diff hash, and bounded patch.",
+      inputSchema: { task_id: z.string().regex(/^task_[a-f0-9]{24}$/) },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Reviewing CodingTask changes...", "openai/toolInvocation/invoked": "CodingTask review ready" }
+    },
+    async (args) => {
+      const task = await allowedCodingTask(config, args.task_id);
+      const review = await reviewCodingTask(codingTaskStoreConfig(config), task.taskId, {
+        maxGitOutputBytes: config.maxOutputBytes,
+        isPathContentAllowed: (relativePath) => !guard.isBlockedRelativePath(relativePath)
+      });
+      const text = [
+        codingTaskText("CodingTask Review", task),
+        "",
+        `Dirty: ${review.dirty ? "yes" : "no"}`,
+        `Diff SHA-256: ${review.diffSha256}`,
+        `Visible diff SHA-256: ${review.visibleDiffSha256}`,
+        `Content complete: ${review.contentComplete ? "yes" : "no"}`,
+        review.omittedPathCount ? `Omitted blocked paths: ${review.omittedPathCount} (${review.omittedPaths.join(", ")})` : "",
+        "",
+        "## Status",
+        "",
+        "```text",
+        review.status || "clean",
+        "```",
+        review.diff ? diffBlock(review.diff) : "\nNo changes against the task base."
+      ].join("\n");
+      return textResult(text, {
+        ...codingTaskStructured(task),
+        review,
+        visible_diff_sha256: review.visibleDiffSha256,
+        content_complete: review.contentComplete,
+        omitted_paths: review.omittedPaths,
+        omitted_path_count: review.omittedPathCount
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "propose_goal",
+    {
+      title: "Propose Goal",
+      description: "Persist an inert, fingerprinted Pro orchestration contract. This only records the plan: it does not create a Goal worktree, start Codex, or modify the source workspace. Ask the user to review the returned card before calling approve_goal.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Allowed source Git workspace. Omit to use the selected workspace."),
+        goal_key: z.string().min(1).max(160).describe("Stable idempotency key for this exact proposal."),
+        title: z.string().min(1).max(500),
+        goal: z.string().min(1).max(20_000),
+        exclusions: z.array(z.string().min(1).max(2_000)).max(100).optional(),
+        completion_criteria: z.array(z.string().min(1).max(2_000)).min(1).max(100),
+        verification: z.array(z.string().min(1).max(2_000)).max(100).optional(),
+        execution_policy: z.literal("supervised").optional().describe("Current vertical slice: supervised only."),
+        workspace_policy: z.literal("isolated").optional().describe("Current vertical slice: isolated integration only."),
+        worker_model: z.string().min(1).max(160).optional(),
+        worker_effort: z.enum(["low", "medium", "high", "xhigh"]).optional(),
+        limits: z.object({
+          max_concurrency: z.number().int().min(1).max(8).optional(),
+          timeout_ms: z.number().int().min(1_000).max(86_400_000).optional(),
+          max_turns_per_worker: z.literal(1).optional().describe("Current vertical slice: exactly one turn per worker."),
+          max_retries_per_worker: z.literal(0).optional().describe("Current vertical slice: no automatic retries."),
+          max_log_bytes: z.number().int().min(65_536).max(104_857_600).optional()
+        }).optional(),
+        permissions: z.object({
+          file_globs: z.array(z.string().min(1).max(1_000)).min(1).max(200),
+          commands: z.array(z.string().min(1).max(1_000)).max(100).optional(),
+          network: z.literal(false).optional(),
+          source_effects: z.object({
+            apply: z.boolean().optional(),
+            commit: z.literal(false).optional(),
+            push: z.literal(false).optional(),
+            draft_pr: z.literal(false).optional()
+          }).optional()
+        }),
+        base_sha: z.string().regex(/^[0-9a-fA-F]{40}$/).optional(),
+        work: z.array(z.object({
+          work_id: z.string().regex(/^work_[a-z0-9][a-z0-9_-]{0,63}$/),
+          title: z.string().min(1).max(500),
+          goal: z.string().min(1).max(20_000),
+          acceptance_criteria: z.array(z.string().min(1).max(2_000)).min(1).max(50),
+          verification: z.array(z.string().min(1).max(2_000)).max(50).optional(),
+          depends_on: z.array(z.string().regex(/^work_[a-z0-9][a-z0-9_-]{0,63}$/)).max(50).optional(),
+          parallel_group: z.string().min(1).max(100).optional(),
+          file_globs: z.array(z.string().min(1).max(1_000)).max(100).optional()
+        })).min(1).max(50)
+      },
+      annotations: GOAL_PLAN_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Persisting Goal proposal...", "openai/toolInvocation/invoked": "Goal proposal ready for review" }
+    },
+    async (args) => {
+      const workspace = await workspaces.getWorkspaceAsync(args.workspace_id);
+      if (workspace.codingTaskId) throw new CodexProError("Propose a Goal from its allowed source repository, not from a CodingTask worktree.");
+      const executionPolicy = args.execution_policy ?? "supervised";
+      const workspacePolicy = args.workspace_policy ?? "isolated";
+      const sourceEffects = args.permissions.source_effects ?? {};
+      const proposed = await proposeGoal(
+        goalStoreConfig(config),
+        workspace,
+        { assertSourceWorkspace: (sourceRoot) => {
+          if (!config.allowedRoots.some((root) => {
+            const relative = path.relative(root, sourceRoot);
+            return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+          })) throw new CodexProError("Goal source workspace is outside allowed roots.");
+        } },
+        {
+          goalKey: args.goal_key,
+          title: args.title,
+          goal: args.goal,
+          exclusions: args.exclusions,
+          completionCriteria: args.completion_criteria,
+          verification: args.verification,
+          executionPolicy,
+          workspacePolicy,
+          workerModel: args.worker_model ?? config.codexModel,
+          workerEffort: args.worker_effort ?? config.codexReasoningEffort,
+          limits: {
+            maxConcurrency: args.limits?.max_concurrency ?? Math.min(3, args.work.length),
+            timeoutMs: args.limits?.timeout_ms ?? config.codingTaskDefaultTimeoutMs,
+            maxTurnsPerWorker: args.limits?.max_turns_per_worker ?? 1,
+            maxRetriesPerWorker: args.limits?.max_retries_per_worker ?? 0,
+            maxLogBytes: args.limits?.max_log_bytes ?? config.codingTaskMaxLogBytes
+          },
+          permissions: {
+            fileGlobs: args.permissions.file_globs,
+            commands: args.permissions.commands ?? [],
+            network: false,
+            sourceEffects: {
+              apply: sourceEffects.apply ?? false,
+              commit: false,
+              push: false,
+              draftPr: false
+            }
+          },
+          baseSha: await resolveCodingTaskBaseSha(workspace, args.base_sha, {
+            assertSourceWorkspace: (sourceRoot) => {
+              if (!config.allowedRoots.some((root) => {
+                const relative = path.relative(root, sourceRoot);
+                return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+              })) throw new CodexProError("Goal source workspace is outside allowed roots.");
+            }
+          }),
+          work: args.work.map((item: any) => ({
+            workId: item.work_id,
+            title: item.title,
+            goal: item.goal,
+            acceptanceCriteria: item.acceptance_criteria,
+            verification: item.verification,
+            dependsOn: item.depends_on,
+            parallelGroup: item.parallel_group,
+            fileGlobs: item.file_globs
+          }))
+        }
+      );
+      return textResult(goalText(proposed.reused ? "Goal Proposal Reopened" : "Goal Proposal", proposed.goal), {
+        ...goalStructured(proposed.goal),
+        reused: proposed.reused,
+        execution_started: false,
+        approval_required: true
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "get_goal",
+    {
+      title: "Get Goal",
+      description: "Read the authoritative persisted Goal contract, approval, work graph, and Blackboard. This status tool never starts or resumes workers.",
+      inputSchema: { goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/) },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Reading Goal...", "openai/toolInvocation/invoked": "Goal status ready" }
+    },
+    async (args) => {
+      const goal = await allowedGoal(config, args.goal_id);
+      return textResult(goalText("Goal", goal), goalStructured(goal));
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "list_goals",
+    {
+      title: "List Goals",
+      description: "List durable Goals whose source repositories remain inside this server's allowed roots.",
+      inputSchema: { limit: z.number().int().min(1).max(100).optional() },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Listing Goals...", "openai/toolInvocation/invoked": "Goal list ready" }
+    },
+    async (args) => {
+      const goals = (await listGoals(goalStoreConfig(config), { limit: args.limit ?? 20 })).filter((goal) => {
+        try {
+          assertGoalSourceAllowed(config, goal);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+      return textResult(`# Goals\n\n${goals.length ? goals.map((goal) => `- ${goal.goalId}: ${goal.title} [${goal.lifecycle}]`).join("\n") : "No Goals found."}`, {
+        goals,
+        goal_count: goals.length
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "approve_goal",
+    {
+      title: "Approve Goal",
+      description: "Bind explicit user approval to the exact persisted Goal contract fingerprint. Call only after the user has reviewed and approved this plan. Approval itself does not start workers.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        contract_fingerprint: z.string().regex(/^[0-9a-f]{64}$/),
+        approval_key: z.string().min(1).max(160),
+        confirm: z.literal(true).describe("Must be true only after explicit user approval of this exact contract.")
+      },
+      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Recording Goal approval...", "openai/toolInvocation/invoked": "Goal contract approved" }
+    },
+    async (args) => {
+      await allowedGoal(config, args.goal_id);
+      const goal = await approveGoal(goalStoreConfig(config), args.goal_id, {
+        expectedRevision: args.expected_revision,
+        contractFingerprint: args.contract_fingerprint,
+        approvalKey: args.approval_key
+      });
+      assertGoalSourceAllowed(config, goal);
+      return textResult(`${goalText("Goal Approved", goal)}\n\nApproval is persisted. No worker has started; use the explicit Goal execution action when ready.`, {
+        ...goalStructured(goal),
+        execution_started: false
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "publish_goal_blackboard",
+    {
+      title: "Publish Goal Blackboard Record",
+      description: "Publish one bounded structured discovery, contract, ownership note, question, answer, blocker, verification result, or Pro decision. Worker-authored records cannot change scope or publish decisions.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        record_key: z.string().min(1).max(160),
+        kind: z.enum(["discovery", "contract", "file_ownership", "question", "answer", "blocker", "verification", "decision"]),
+        author: z.union([z.literal("pro"), z.string().regex(/^worker:work_[a-z0-9][a-z0-9_-]{0,63}$/)]),
+        work_id: z.string().regex(/^work_[a-z0-9][a-z0-9_-]{0,63}$/).optional(),
+        summary: z.string().min(1).max(4_000),
+        evidence: z.array(z.string().min(1).max(2_000)).max(50).optional(),
+        paths: z.array(z.string().min(1).max(1_000)).max(100).optional()
+      },
+      annotations: GOAL_PLAN_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Publishing Goal record...", "openai/toolInvocation/invoked": "Goal Blackboard updated" }
+    },
+    async (args) => {
+      await allowedGoal(config, args.goal_id);
+      const published = await publishGoalBlackboard(goalStoreConfig(config), args.goal_id, {
+        expectedRevision: args.expected_revision,
+        recordKey: args.record_key,
+        kind: args.kind,
+        author: args.author,
+        workId: args.work_id,
+        summary: args.summary,
+        evidence: args.evidence,
+        paths: args.paths
+      });
+      assertGoalSourceAllowed(config, published.goal);
+      return textResult(`${goalText("Goal Blackboard Updated", published.goal)}\n\nRecord: ${published.record.kind} · ${published.record.summary}`, {
+        ...goalStructured(published.goal),
+        record: published.record,
+        reused: published.reused
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "start_goal",
+    {
+      title: "Start Goal",
+      description: "Explicitly start or idempotently continue an approved Goal. Creates Goal-owned isolated CodingTasks for dependency-ready work and launches up to the approved concurrency limit. Never applies changes to the source workspace.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        start_key: z.string().min(1).max(160).describe("Stable idempotency key reused for every start/continue retry of this Goal.")
+      },
+      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Starting approved Goal workers...", "openai/toolInvocation/invoked": "Goal workers launched" }
+    },
+    async (args) => {
+      assertCodingTaskExecutionEnabled(config);
+      await allowedGoal(config, args.goal_id);
+      const started = await startGoal(
+        {
+          dataRoot: config.codingTaskDir,
+          codexBinary: await resolveCodexExecutable(config),
+          codexDir: config.codexDir,
+          maxOutputBytes: config.maxOutputBytes
+        },
+        args.goal_id,
+        { expectedRevision: args.expected_revision, startKey: args.start_key }
+      );
+      assertGoalSourceAllowed(config, started.goal);
+      return textResult(`${goalText("Goal Started", started.goal)}\n\nLaunched or recovered ${started.runs.length} dependency-ready worker run(s).`, {
+        ...goalStructured(started.goal),
+        runs: started.runs,
+        launched_run_count: started.runs.length
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "refresh_goal",
+    {
+      title: "Refresh Goal",
+      description: "Reconcile persisted worker-run results into Goal work status without starting, relaunching, integrating, or applying anything. This is the explicit mutating counterpart to passive get_goal.",
+      inputSchema: { goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/) },
+      annotations: GOAL_PLAN_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Refreshing Goal worker state...", "openai/toolInvocation/invoked": "Goal worker state refreshed" }
+    },
+    async (args) => {
+      await allowedGoal(config, args.goal_id);
+      const goal = await refreshGoal(goalStoreConfig(config), args.goal_id);
+      assertGoalSourceAllowed(config, goal);
+      return textResult(goalText("Goal Refreshed", goal), goalStructured(goal));
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "integrate_goal_work",
+    {
+      title: "Integrate Goal Work",
+      description: "After Pro reviews a terminal Goal worker, apply only its approved, policy-visible patch to the isolated Goal integration worktree and create an internal detached checkpoint. Never changes the source workspace or a remote.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        work_id: z.string().regex(/^work_[a-z0-9][a-z0-9_-]{0,63}$/),
+        expected_revision: z.number().int().min(1),
+        integration_key: z.string().min(1).max(160)
+      },
+      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Integrating reviewed Goal work...", "openai/toolInvocation/invoked": "Goal work integrated" }
+    },
+    async (args) => {
+      assertCodingTaskExecutionEnabled(config);
+      await allowedGoal(config, args.goal_id);
+      const goal = await integrateGoalWork(
+        { dataRoot: config.codingTaskDir, maxOutputBytes: config.maxOutputBytes },
+        args.goal_id,
+        {
+          expectedRevision: args.expected_revision,
+          workId: args.work_id,
+          integrationKey: args.integration_key,
+          isPathContentAllowed: (relativePath) => !guard.isBlockedRelativePath(relativePath)
+        }
+      );
+      assertGoalSourceAllowed(config, goal);
+      return textResult(goalText("Goal Work Integrated", goal), {
+        ...goalStructured(goal),
+        integrated_work_id: args.work_id
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "review_goal",
+    {
+      title: "Review Goal",
+      description: "Authoritatively review the private Goal integration worktree against its approved committed base and run integrated git diff --check. Use this result for Pro's final evidence judgment; do not try to open the private worktree with open_workspace, read, or bash because that expected isolation denial is not a Goal failure. Blocked path content remains omitted. This never applies, commits to source, pushes, or creates a PR.",
+      inputSchema: { goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/) },
+      annotations: READ_ONLY_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Reviewing integrated Goal...", "openai/toolInvocation/invoked": "Goal review ready" }
+    },
+    async (args) => {
+      await allowedGoal(config, args.goal_id);
+      const result = await reviewGoal(
+        { dataRoot: config.codingTaskDir, maxOutputBytes: config.maxOutputBytes },
+        args.goal_id,
+        (relativePath) => !guard.isBlockedRelativePath(relativePath)
+      );
+      assertGoalSourceAllowed(config, result.goal);
+      const review = result.review;
+      const text = [
+        goalText("Goal Review", result.goal),
+        "",
+        `Integrated changes against approved base: ${review.changedFileCount ? "yes" : "no"}`,
+        `Uncommitted integration-worktree changes: ${review.dirty ? "yes" : "no"}`,
+        `Changed files: ${review.changedFileCount}; visible additions: ${review.additions}; visible deletions: ${review.deletions}`,
+        `Content complete: ${review.contentComplete ? "yes" : "no"}`,
+        `Integrated verification: PASSED (${result.verification.command})`,
+        review.omittedPathCount ? `Omitted blocked paths: ${review.omittedPaths.join(", ")}` : "",
+        review.diff ? diffBlock(review.diff) : "\nNo integrated changes."
+      ].filter(Boolean).join("\n");
+      return textResult(text, {
+        ...goalStructured(result.goal),
+        review,
+        verification: result.verification,
+        verification_passed: true,
+        integrated_changes_present: review.changedFileCount > 0,
+        integration_worktree_clean: !review.dirty,
+        content_complete: review.contentComplete,
+        omitted_paths: review.omittedPaths
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "pause_goal",
+    {
+      title: "Pause Goal Scheduling",
+      description: "Pause new Goal scheduling while allowing already-running workers to finish under their existing approved leases. This is not a worker interrupt; use cancel_goal to stop active workers.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        pause_key: z.string().min(1).max(160)
+      },
+      annotations: GOAL_PLAN_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Pausing Goal scheduling...", "openai/toolInvocation/invoked": "Goal scheduling paused" }
+    },
+    async (args) => {
+      await allowedGoal(config, args.goal_id);
+      const goal = await pauseGoal(goalStoreConfig(config), args.goal_id, { expectedRevision: args.expected_revision, requestKey: args.pause_key });
+      assertGoalSourceAllowed(config, goal);
+      return textResult(`${goalText("Goal Paused", goal)}\n\nAlready-running workers continue; no new work will launch until resume_goal and an explicit start_goal continuation.`, goalStructured(goal));
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "resume_goal",
+    {
+      title: "Resume Goal Scheduling",
+      description: "Resume a paused Goal inside the unchanged approved contract. Does not itself spawn workers; call start_goal with the original start_key for dependency-ready work.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        resume_key: z.string().min(1).max(160)
+      },
+      annotations: GOAL_PLAN_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Resuming Goal scheduling...", "openai/toolInvocation/invoked": "Goal scheduling resumed" }
+    },
+    async (args) => {
+      await allowedGoal(config, args.goal_id);
+      const goal = await resumeGoal(goalStoreConfig(config), args.goal_id, { expectedRevision: args.expected_revision, requestKey: args.resume_key });
+      assertGoalSourceAllowed(config, goal);
+      return textResult(goalText("Goal Resumed", goal), goalStructured(goal));
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "cancel_goal",
+    {
+      title: "Cancel Goal",
+      description: "Durably cancel every active Goal-owned worker before marking the Goal terminal. Does not require or resolve a Codex executable and never relaunches work.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        cancel_key: z.string().min(1).max(160),
+        reason: z.string().min(1).max(1_000).optional()
+      },
+      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Canceling Goal workers...", "openai/toolInvocation/invoked": "Goal canceled" }
+    },
+    async (args) => {
+      await allowedGoal(config, args.goal_id);
+      const goal = await cancelGoal(goalStoreConfig(config), args.goal_id, {
+        expectedRevision: args.expected_revision,
+        cancelKey: args.cancel_key,
+        reason: args.reason
+      });
+      assertGoalSourceAllowed(config, goal);
+      return textResult(goalText("Goal Canceled", goal), goalStructured(goal));
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "complete_goal",
+    {
+      title: "Complete Goal",
+      description: "Record Pro's final semantic judgment against every persisted completion criterion and verification requirement. Requires all work integrated; never applies the result to source.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        completion_key: z.string().min(1).max(160),
+        summary: z.string().min(1).max(20_000),
+        criteria: z.array(z.object({
+          requirement: z.string().min(1).max(2_000),
+          status: z.enum(["passed", "failed", "skipped"]),
+          evidence: z.string().min(1).max(4_000)
+        })).max(100),
+        verification: z.array(z.object({
+          requirement: z.string().min(1).max(2_000),
+          status: z.enum(["passed", "failed", "skipped"]),
+          evidence: z.string().min(1).max(4_000)
+        })).max(100),
+        confirm: z.literal(true).describe("True only after Pro reviewed the integrated diff and evidence.")
+      },
+      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Recording Goal completion...", "openai/toolInvocation/invoked": "Goal completion recorded" }
+    },
+    async (args) => {
+      await allowedGoal(config, args.goal_id);
+      const goal = await completeGoal(goalStoreConfig(config), args.goal_id, {
+        expectedRevision: args.expected_revision,
+        completionKey: args.completion_key,
+        summary: args.summary,
+        criteria: args.criteria,
+        verification: args.verification
+      });
+      assertGoalSourceAllowed(config, goal);
+      return textResult(`${goalText("Goal Completed", goal)}\n\nThe result is accepted but remains isolated until a separately authorized apply_goal call.`, goalStructured(goal));
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "apply_goal",
+    {
+      title: "Apply Goal to Source",
+      description: "Apply a completed Goal's reviewed patch to its allowed source workspace without staging or committing. Requires contract permission, explicit user confirmation, exact source HEAD, no overlap with pre-existing dirty paths, and persisted authoritative readback.",
+      inputSchema: {
+        goal_id: z.string().regex(/^goal_[a-f0-9]{24}$/),
+        expected_revision: z.number().int().min(1),
+        application_key: z.string().min(1).max(160),
+        confirm: z.literal(true).describe("True only after the user explicitly approves this source-workspace effect.")
+      },
+      annotations: GOAL_APPROVAL_ANNOTATIONS,
+      _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Applying completed Goal to source...", "openai/toolInvocation/invoked": "Goal applied to source" }
+    },
+    async (args) => {
+      assertCodingTaskExecutionEnabled(config);
+      await allowedGoal(config, args.goal_id);
+      const goal = await applyCompletedGoal(
+        { dataRoot: config.codingTaskDir, maxOutputBytes: config.maxOutputBytes },
+        args.goal_id,
+        {
+          expectedRevision: args.expected_revision,
+          applicationKey: args.application_key,
+          isPathContentAllowed: (relativePath) => !guard.isBlockedRelativePath(relativePath)
+        }
+      );
+      assertGoalSourceAllowed(config, goal);
+      return textResult(`${goalText("Goal Applied", goal)}\n\nSource application: ${goal.sourceApplication?.status}. No commit, push, or PR was created.`, goalStructured(goal));
     }
   );
 
