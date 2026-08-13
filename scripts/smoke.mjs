@@ -312,6 +312,9 @@ const goalMutationErrorProjection = goalMutationErrorStart >= 0 && goalMutationE
 if (!goalMutationErrorProjection.includes('projection: projection ? publicGoalProjection(projection) : null') || goalMutationErrorProjection.includes('projection: projection ?? null')) {
   throw new Error('Goal mutation failures must not reattach the raw persisted projection after building the safe Goal projection');
 }
+if (!goalMutationErrorProjection.includes('const mutationError = publicGoalError(message)') || !goalMutationErrorProjection.includes('mutation_error: mutationError') || !goalMutationErrorProjection.includes('Detailed local error text remains private') || goalMutationErrorProjection.includes('text: message') || goalMutationErrorProjection.includes('error: message') || goalMutationErrorProjection.includes('return errorResult(error)')) {
+  throw new Error('Goal mutation failures must expose only a generic message plus error presence/hash, never raw local error text or paths');
+}
 if (serverSource.includes('projection: result.projection,')) {
   throw new Error('Goal projection success results must use the same safe public projection instead of returning persisted error text');
 }

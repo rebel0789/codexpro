@@ -184,25 +184,32 @@ async function allowedGoal(config: CodexProConfig, goalId: string): Promise<Goal
 
 async function goalMutationErrorResult(config: CodexProConfig, goalId: string, error: unknown): Promise<any> {
   const message = errorText(error);
+  const mutationError = publicGoalError(message);
   try {
     const goal = await allowedGoal(config, goalId);
     const projection = goal.live?.pendingProjectionId
       ? goal.live.projections.find((item) => item.projectionId === goal.live?.pendingProjectionId)
       : goal.live?.projections.at(-1);
+    const recoveryRequired = projection?.status === "recovery_required";
+    const publicMessage = `${recoveryRequired ? "Goal source operation recovery requires user action" : "Goal source operation was rejected"}. Detailed local error text remains private. Error SHA-256: ${mutationError.errorSha256}.`;
     return {
       isError: true,
-      content: [{ type: "text", text: message }],
+      content: [{ type: "text", text: publicMessage }],
       structuredContent: redactStructured({
         ...goalStructured(goal),
-        error: message,
+        mutation_error: mutationError,
         projection: projection ? publicGoalProjection(projection) : null,
         projection_id: projection?.projectionId ?? null,
         projection_status: projection?.status ?? null,
-        recovery_required: projection?.status === "recovery_required"
+        recovery_required: recoveryRequired
       })
     };
   } catch {
-    return errorResult(error);
+    return {
+      isError: true,
+      content: [{ type: "text", text: `Goal source operation was rejected. Detailed local error text remains private. Error SHA-256: ${mutationError.errorSha256}.` }],
+      structuredContent: { mutation_error: mutationError, recovery_required: false }
+    };
   }
 }
 

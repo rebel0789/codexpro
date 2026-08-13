@@ -131,7 +131,13 @@ try {
   };
   const launched = await launchCodingTaskRun({ dataRoot, codexBinary: fakeCodex }, taskId, launchInput);
   assert.notEqual(launched.status, 'queued');
-  await waitFor(async () => (await store.get(taskId)).codexTurnActive === true);
+  await waitFor(async () => {
+    const [activeTask, activeRun] = await Promise.all([
+      store.get(taskId),
+      getCodingTaskRun({ dataRoot }, taskId, 'run-one')
+    ]);
+    return activeTask.codexTurnActive === true && activeRun.runnerAlive === true;
+  });
   assert.equal((await getCodingTaskRun({ dataRoot }, taskId, 'run-one')).runnerAlive, true,
     'live runner metadata must report the exact held lock generation');
   const task = await store.get(taskId);

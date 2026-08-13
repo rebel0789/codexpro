@@ -101,50 +101,14 @@ codexpro start
 codexpro settings set --clear-projects
 ```
 
-## 重启发布版编码体验
+## 运行与文件一致性
 
 - `view_image` 会把 PNG、JPEG、GIF、WebP 作为原生 MCP 图片内容返回，ChatGPT 可以直接检查截图和视觉资源。
 - `read` 会返回 SHA-256。多个 session 可能同时修改一个文件时，把它作为 `expected_sha256` 传给 `write` 或 `edit`；文件已变化时操作会失败，不会静默覆盖新内容。
 - 新文件采用同目录原子替换。已有文件会原位更新，以保留所有权、ACL、扩展属性和硬链接；如果写入期间机器或进程崩溃，文件内容可能不完整。
 - `codexpro start --headless` 不会提问、复制链接、打开浏览器或显示终端控制面板。就绪后输出一行 `CODEXPRO_READY`，在本地运行状态中记录受监管的 runtime PID，收到信号时清理；HTTP runtime 意外退出时 launcher 以非零状态退出。
 
-## 适合谁
-
-CodexPro 适合已经有 ChatGPT Apps / Developer Mode 权限并希望做本地开发的人：
-
-- 想让 ChatGPT Web 直接读取本地代码，而不是反复复制文件片段。
-- 想把 `AGENTS.md`、`.ai-bridge`、git diff、源码文件这些 Codex 风格上下文给 ChatGPT。
-- 想在 ChatGPT 里完成规划、审查、改小文件、跑安全验证。
-- 想在某些模型不能调用工具时，导出一个持久上下文包给它做规划。
-- 想把 ChatGPT 的计划交给 Codex、OpenCode、Pi 或自定义本地代理执行。
-
-账号权限和具体模型界面的工具调用能力是两回事，而且可用范围可能变化。请以 ChatGPT 当前界面和 OpenAI 最新文档为准。
-
-## 它能做什么
-
-```text
-ChatGPT Web 可以看到：
-  AGENTS.md
-  .ai-bridge 计划、状态和执行记录
-  git status
-  show_changes 审查摘要和可选 diff
-  文件树、搜索结果、指定源码文件
-
-ChatGPT Web 可以操作：
-  read    读取文件
-  search  搜索代码
-  write   在工作区内写文件
-  edit    精确替换文本
-  bash    运行安全验证命令
-  start_background_job  启动可跨断线和服务重启继续运行的持久命令
-  create_coding_task     创建可在直接编码与 Codex 协作间切换的持久工作区
-  show_changes 查看当前改动摘要
-
-本地执行器仍然有价值：
-  Codex / OpenCode / Pi 执行计划
-  终端重任务留在本地
-  ChatGPT 回看执行结果和 diff
-```
+## 工具模式与卡片
 
 默认 `CODEXPRO_TOOL_MODE=standard`，只暴露常用编码循环、`codexpro_self_test`、`show_changes`、上下文导出和 handoff。演示时可以用 `--tool-mode minimal`，需要完整兼容工具时用 `--tool-mode full`。
 
@@ -161,43 +125,6 @@ npx codexpro@latest start --root /absolute/path/to/your/repo
 ```
 
 但普通用户更推荐全局安装，这样命令就是固定的 `codexpro setup` 和 `codexpro start`。
-
-## ChatGPT 中的 App 设置
-
-先在 ChatGPT 打开 Developer Mode：
-
-```text
-ChatGPT Settings
--> Security and login
--> Developer mode: on
--> Enforce CSP in developer mode: on
-
-ChatGPT Settings
--> Plugins
--> Plugins 标签页
--> 点击搜索框旁的 +
-```
-
-保留 CSP 开启。CodexPro 的卡片和小组件就是按 CSP 开启的路径设计的，不需要远程脚本、外部字体、iframe 或第三方图片。
-
-在打开的 New Plugin 页面填写：
-
-```text
-Name: CodexPro
-Description: Local workspace bridge for ChatGPT coding
-Connection: Server URL
-Server URL: 粘贴 CodexPro 自动复制的 URL
-Authentication: No Authentication / None
-```
-
-表单可能默认显示 OAuth；请改为 `No Authentication / None`。复制的 Server URL 已经包含私有 `codexpro_token`。不要单独粘贴 token，除非你的 ChatGPT UI 明确支持自定义 header。
-
-URL 中的 token 只适合作为个人 connector 的兼容方式。共享或多用户生产部署必须使用
-OAuth 或 `Authorization: Bearer <token>`。CodexPro
-要求 token 至少 24 个字节；本地引导页加载后会从浏览器地址中移除 token 参数，并返回
-`no-store` 和 `no-referrer` 安全 header。不要分享或提交完整 connector URL。
-
-保持终端里的 CodexPro 进程运行。你停止它之后，ChatGPT 就无法继续连接本地仓库。Cloudflare quick tunnel 的 URL 也会失效。
 
 ## 三种主要模式
 
@@ -550,28 +477,6 @@ codexpro start --headless
 ```bash
 CODEXPRO_TOOL_CARDS=1 codexpro start
 ```
-
-## 公网 HTTPS
-
-ChatGPT Web 需要 HTTPS：
-
-```bash
-codexpro start --tunnel cloudflare
-codexpro ngrok --hostname your.ngrok-free.dev
-codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
-codexpro tailscale --hostname your-device.your-tailnet.ts.net
-codexpro start --tunnel none
-```
-
-稳定主机名请固定 token：
-
-```bash
-mkdir -p ~/.codexpro
-openssl rand -hex 32 > ~/.codexpro/http-token
-chmod 600 ~/.codexpro/http-token
-```
-
-客户端支持 header 时优先用 `Authorization: Bearer <token>`。`?codexpro_token=` 只是个人兼容回退。
 
 ## 安全默认
 

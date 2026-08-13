@@ -1,6 +1,6 @@
 # CodexPro Product Direction
 
-**Accepted:** 2026-08-12  
+**Accepted:** 2026-08-12
 **Status:** Product contract; implementation is incremental and current release status is called out below.
 
 ## Product promise

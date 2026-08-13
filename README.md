@@ -155,15 +155,25 @@ openssl rand -hex 32 > ~/.codexpro/http-token
 chmod 600 ~/.codexpro/http-token
 ```
 
-Prefer `Authorization: Bearer <token>` when the client supports headers. The `?codexpro_token=` query form is a personal compatibility fallback.
+Prefer `Authorization: Bearer <token>` when the client supports headers. The `?codexpro_token=` query form is a personal compatibility fallback for connector forms that cannot set headers:
+
+```text
+https://your-device.your-tailnet.ts.net/mcp?codexpro_token=keep-this-token-stable
+```
+
+Shared or multi-user production deployments require OAuth or header authentication. CodexPro requires at least 24 token bytes, removes token parameters from the local browser address after onboarding, and sends `no-store`/`no-referrer` headers. Never share or commit the connector URL.
 
 ## Safety defaults
 
-- Public tunnels require a CodexPro HTTP token (min 24 bytes)
-- Writes stay hidden unless write mode is `workspace`
-- Safe bash is the default
-- Blocked paths cover `.env`, keys, `.git`, build caches, and similar
-- Attachment import only accepts ChatGPT Apps SDK file objects from approved HTTPS hosts
+- Public tunnels require a CodexPro HTTP token; tokens shorter than 24 bytes are rejected and failed guesses are rate-limited per client address.
+- Generic writes stay hidden unless `CODEXPRO_WRITE_MODE=workspace`.
+- Safe bash blocks broad shell patterns and secret/build/cache paths.
+- Durable background jobs use the same bash policy, require an idempotent key, retain bounded logs outside the repo, and never retry automatically.
+- `--codex-bin` / `CODEXPRO_CODEX_BIN` pins the Codex CLI used by foreground and durable jobs, avoiding service-shell `PATH` drift.
+- `apply_patch` is workspace-scoped and rejects blocked paths, symlink patches, and secret-looking patch content.
+- Attachment import only accepts ChatGPT Apps SDK file objects from approved HTTPS hosts.
+- `show_changes` keeps a review checkpoint so repeated unchanged reviews collapse.
+- Tool-card metadata is off unless `CODEXPRO_TOOL_CARDS=1`.
 
 Read [SECURITY.md](SECURITY.md) before exposing a tunnel.
 
@@ -174,32 +184,7 @@ npm install -g codexpro@latest
 codexpro --version
 ```
 
-Then ChatGPT uses:
-
-```text
-https://your-device.your-tailnet.ts.net/mcp?codexpro_token=keep-this-token-stable
-```
-
-The URL token is a personal-use compatibility fallback for connector forms that cannot set
-headers. Prefer `Authorization: Bearer <token>` when the MCP client supports
-custom headers. Shared or multi-user production deployments require OAuth or
-header authentication. CodexPro requires at least 24 token bytes, removes token
-parameters from the local browser address after onboarding, and sends
-no-store/no-referrer headers. Never share or commit the connector URL.
-
-## Safety Defaults
-
-- Public tunnel mode requires a CodexPro HTTP token.
-- HTTP tokens shorter than 24 bytes are rejected and failed guesses are rate-limited per client address.
-- Generic writes are hidden unless `CODEXPRO_WRITE_MODE=workspace`.
-- Safe bash blocks broad shell patterns and secret/build/cache paths.
-- Durable background jobs use the same bash policy, require an idempotent key, retain bounded logs outside the repo, and never retry automatically.
-- `--codex-bin` / `CODEXPRO_CODEX_BIN` pins the Codex CLI used by foreground and durable jobs, avoiding service-shell `PATH` drift.
-- `apply_patch` is workspace-scoped and rejects blocked paths, symlink patches, and secret-looking patch content.
-- `show_changes` keeps a review checkpoint so repeated unchanged reviews collapse.
-- Tool-card metadata is off unless `CODEXPRO_TOOL_CARDS=1`.
-
-Read [SECURITY.md](SECURITY.md) before exposing CodexPro through any tunnel.
+Restart `codexpro start` after updating. Saved profiles under `~/.codexpro` stay in place.
 
 ## RAM And ChatGPT Memory
 

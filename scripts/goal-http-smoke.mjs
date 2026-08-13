@@ -427,6 +427,25 @@ process.stdin.on('data', (chunk) => {
     confirm: true
   });
   assert.deepEqual(await fs.readFile(liveStatePath), beforeLifoRefusal, 'non-LIFO revert refusal must be passive');
+  const privateProjectionArtifact = path.join(dataRoot, 'goals', liveGoalId, 'projections', projectedTwo.structuredContent.projection_id, 'before.json');
+  await fs.chmod(privateProjectionArtifact, 0o644);
+  let privateArtifactFailure;
+  try {
+    privateArtifactFailure = await callToolError(client, 'revert_goal_projection', {
+      goal_id: liveGoalId,
+      expected_revision: projectedTwo.structuredContent.revision,
+      projection_id: projectedTwo.structuredContent.projection_id,
+      revert_key: 'http-live-private-artifact-error-v1',
+      confirm: true
+    }, [privateProjectionArtifact, dataRoot, liveRoot]);
+  } finally {
+    await fs.chmod(privateProjectionArtifact, 0o600);
+  }
+  assert.match(privateArtifactFailure.content?.find?.((part) => part.type === 'text')?.text || '', /Detailed local error text remains private/);
+  assert.equal('error' in privateArtifactFailure.structuredContent, false, 'Goal mutation failures must not expose a raw error field');
+  assert.equal(privateArtifactFailure.structuredContent.mutation_error?.hasError, true);
+  assert.match(privateArtifactFailure.structuredContent.mutation_error?.errorSha256 || '', /^[0-9a-f]{64}$/);
+  assert.deepEqual(await fs.readFile(liveStatePath), beforeLifoRefusal, 'private artifact validation failure must not rewrite Goal state');
   const revertedTwo = await callTool(client, 'revert_goal_projection', {
     goal_id: liveGoalId,
     expected_revision: projectedTwo.structuredContent.revision,
