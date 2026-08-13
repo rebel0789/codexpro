@@ -25,8 +25,10 @@ function onlySkill(inventory, name) {
   return matches[0];
 }
 
-const workspaceRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-skill-workspace-'));
-const homeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-skill-home-'));
+const workspaceRootRaw = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-skill-workspace-'));
+const homeRootRaw = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-skill-home-'));
+const workspaceRoot = await fs.realpath(workspaceRootRaw);
+const homeRoot = await fs.realpath(homeRootRaw);
 
 try {
   await writeSkill(workspaceRoot, path.join('.codex', 'skills', 'smoke-skill'), 'smoke-skill', 'Preferred workspace skill.', 'Workspace Codex Skill');
@@ -37,13 +39,21 @@ try {
   await writeSkill(homeRoot, path.join('.codex', 'plugins', 'cache', 'test-plugin-a', '1.0.0', 'skills', 'global-smoke-skill'), 'global-smoke-skill', 'Suppressed plugin global duplicate.', 'Plugin Global Duplicate');
   await writeSkill(homeRoot, path.join('.codex', 'plugins', 'cache', 'test-plugin-a', '1.0.0', 'skills', 'plugin-only-skill'), 'plugin-only-skill', 'First plugin copy.', 'Plugin First Copy');
   await writeSkill(homeRoot, path.join('.codex', 'plugins', 'cache', 'test-plugin-b', '2.0.0', 'skills', 'plugin-only-skill'), 'plugin-only-skill', 'Second plugin copy.', 'Plugin Second Copy');
+  await writeSkill(homeRoot, path.join('.cc-switch', 'skills', 'linked-skill'), 'linked-skill', 'Symlinked user skill.', 'Symlinked User Skill');
+  // Point the junction at the pre-realpath home spelling when it differs so
+  // Windows short/long path mismatches are exercised end-to-end.
+  await fs.symlink(
+    path.join(homeRootRaw, '.cc-switch', 'skills', 'linked-skill'),
+    path.join(homeRoot, '.codex', 'skills', 'linked-skill'),
+    process.platform === 'win32' ? 'junction' : 'dir'
+  );
 
   const workspace = {
     id: 'skill-precedence-smoke',
     root: workspaceRoot,
     openedAt: new Date().toISOString()
   };
-  const discoveryOptions = { includeGlobal: true, maxSkills: 50, homeDir: homeRoot };
+  const discoveryOptions = { includeGlobal: true, maxSkills: 50, homeDir: homeRootRaw };
   const inventory = await discoverSkillInventory(workspace, discoveryOptions);
 
   const workspaceWinner = onlySkill(inventory, 'smoke-skill');
@@ -61,6 +71,11 @@ try {
     throw new Error(`plugin duplicate was not reduced to one plugin winner: ${JSON.stringify(pluginWinner)}`);
   }
 
+  const linkedSkill = onlySkill(inventory, 'linked-skill');
+  if (linkedSkill.source !== 'user' || linkedSkill.path !== '~/.cc-switch/skills/linked-skill/SKILL.md') {
+    throw new Error(`symlinked user skill was not discovered through its real directory: ${JSON.stringify(linkedSkill)}`);
+  }
+
   const loadedWorkspace = await loadSkill(workspace, { name: 'smoke-skill', maxSkills: 50, homeDir: homeRoot });
   if (!loadedWorkspace.text.includes('# Workspace Codex Skill')) {
     throw new Error(`name-only load did not choose the workspace winner: ${loadedWorkspace.skill.path}`);
@@ -69,6 +84,11 @@ try {
   const loadedUser = await loadSkill(workspace, { name: 'global-smoke-skill', maxSkills: 50, homeDir: homeRoot });
   if (!loadedUser.text.includes('# User Global Preferred Skill')) {
     throw new Error(`name-only load did not choose the user winner: ${loadedUser.skill.path}`);
+  }
+
+  const loadedLinkedSkill = await loadSkill(workspace, { name: 'linked-skill', maxSkills: 50, homeDir: homeRoot });
+  if (!loadedLinkedSkill.text.includes('# Symlinked User Skill')) {
+    throw new Error(`name-only load did not follow the symlinked skill directory: ${loadedLinkedSkill.skill.path}`);
   }
 
   const loadedPluginOverride = await loadSkill(workspace, {

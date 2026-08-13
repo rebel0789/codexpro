@@ -31,7 +31,8 @@ CodexPro can expose:
 - optional durable shell execution through `start_background_job`, governed by the same bash mode and stored under a private local CodexPro state directory
 - optional CodingTask worktrees with exclusive direct/Codex mutation ownership and private state outside allowed projects
 - optional supervised or persistent Goal orchestration on supported POSIX hosts, with separately fingerprinted policies, parallel isolated CodingTasks, a private integration worktree, and source effects reserved to explicit supervised actions
-- optional write/edit/apply_patch capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
+- optional write/edit/apply_patch/import_file capability depending on `CODEXPRO_WRITE_MODE`, advertised only in workspace write mode
+- optional ChatGPT attachment import through `import_file`, which downloads only platform-provided HTTPS file references from approved origins and never accepts arbitrary model-supplied URLs
 - optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
 - optional local execute/review looping through `codexpro loop-handoff`, run from the user's terminal only with a user-provided reviewer command and iteration limit
 

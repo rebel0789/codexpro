@@ -34,6 +34,8 @@ export interface CodexProConfig {
   maxReadBytes: number;
   maxWriteBytes: number;
   maxOutputBytes: number;
+  maxBashTimeoutMs: number;
+  maxImportBytes: number;
   maxSearchResults: number;
   maxHttpSessions: number;
   httpSessionTtlMs: number;
@@ -418,6 +420,9 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     maxReadBytes: numberFrom(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000),
     maxWriteBytes: numberFrom(process.env.CODEXPRO_MAX_WRITE_BYTES, 1_000_000, 1_000, 10_000_000),
     maxOutputBytes: numberFrom(process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000),
+    // Default hard cap is 10 minutes. Operators can raise up to 15 minutes.
+    maxBashTimeoutMs: numberFrom(process.env.CODEXPRO_MAX_BASH_TIMEOUT_MS, 600_000, 1_000, 900_000),
+    maxImportBytes: numberFrom(process.env.CODEXPRO_MAX_IMPORT_BYTES, 5_000_000, 1_000, 50_000_000),
     maxSearchResults: numberFrom(process.env.CODEXPRO_MAX_SEARCH_RESULTS, 200, 5, 2_000),
     maxHttpSessions: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS, 64, 1, 512),
     httpSessionTtlMs: numberFrom(process.env.CODEXPRO_HTTP_SESSION_TTL_MS, 30 * 60_000, 60_000, 24 * 60 * 60_000),

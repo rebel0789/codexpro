@@ -6,10 +6,10 @@
     <title>CodexPro - Use ChatGPT like your local coding agent</title>
     <meta
       name="description"
-      content="CodexPro connects ChatGPT Developer Mode to explicitly allowed local projects through MCP so ChatGPT can inspect, edit, verify, and hand off code safely."
+      content="CodexPro connects ChatGPT Plugins to explicitly allowed local projects through MCP so ChatGPT can inspect, edit, verify, and hand off code safely."
     />
     <meta property="og:title" content="CodexPro" />
-    <meta property="og:description" content="Use ChatGPT like your local coding agent for token-protected, explicitly allowed projects." />
+    <meta property="og:description" content="Local MCP bridge: paste a Server URL into ChatGPT Plugins and work on repos you allow." />
     <meta property="og:image" content="https://rebel0789.github.io/codexpro/og.svg" />
     <meta name="theme-color" content="#0b1220" />
     <link rel="alternate" hreflang="zh-CN" href="https://rebel0789.github.io/codexpro/zh.html" />
@@ -41,7 +41,7 @@
           <p class="eyebrow">Install in your repo</p>
           <h1>Use ChatGPT like your local coding agent.</h1>
           <p class="hero-lede">
-            Install the CLI, run setup inside a project, then paste the copied Server URL into ChatGPT Developer Mode. ChatGPT gets bounded tools for the launch project and any additional projects you explicitly allow.
+            Install the CLI, run setup inside a project, then paste the copied Server URL into ChatGPT Plugins. ChatGPT gets bounded tools for the launch project and any additional projects you explicitly allow.
           </p>
           <div class="install-line" role="group" aria-label="Install command">
             <code>npm install -g codexpro
@@ -85,8 +85,8 @@ codexpro setup</code>
               </div>
               <div>
                 <span>03</span>
-                <strong>ChatGPT app</strong>
-                <p>Read, search, edit, review, verify, or hand off through Developer Mode.</p>
+                <strong>ChatGPT Plugins</strong>
+                <p>Read, search, edit, review, verify, or hand off through MCP.</p>
               </div>
             </div>
             <div class="trust-row">
@@ -132,7 +132,7 @@ codexpro setup</code>
             Codex and ChatGPT are different product surfaces. If one workflow is unavailable and another surface you already have access to is still available, CodexPro lets you work against the same local repo without changing either product's limits.
           </p>
           <p>
-            If your ChatGPT account exposes a stronger model in the web app, and that model surface can call Developer Mode apps, CodexPro lets it work against your local repo through MCP. Some model surfaces cannot call connectors or MCP tools directly. CodexPro does not provide, proxy, resell, or unlock models; it gives compatible ChatGPT sessions local coding tools and repo context.
+            If your ChatGPT account exposes a stronger model in the web app, and that model surface can call custom MCP plugins, CodexPro lets it work against your local repo through MCP. Some model surfaces cannot call connectors or MCP tools directly. CodexPro does not provide, proxy, resell, or unlock models; it gives compatible ChatGPT sessions local coding tools and repo context.
           </p>
         </div>
         <div class="value-matrix">
@@ -193,7 +193,7 @@ codexpro setup</code>
           <p class="eyebrow">Compared with generic workspace bridges</p>
           <h2>CodexPro is the ChatGPT-first local coding loop.</h2>
           <p>
-            The transport can look similar: local MCP server, workspace root, and a tunnel. CodexPro is more opinionated. It is built for one job: make ChatGPT Developer Mode useful against explicitly allowed local projects without widening the trust boundary.
+            The transport can look similar: local MCP server, workspace root, and a tunnel. CodexPro is more opinionated. It is built for one job: make ChatGPT Plugins useful against explicitly allowed local projects without widening the trust boundary.
           </p>
           <p>
             That means setup first, explicit safety modes, repo-backed context files, reviewable diffs, compact cards, and no model proxying, account pooling, quota bypassing, third-party Pro scraping, or OS sandbox claims.
@@ -245,8 +245,8 @@ codexpro setup</code>
           <div class="step">
             <span>3</span>
             <div>
-              <strong>Turn on Developer Mode</strong>
-              <p>In ChatGPT, open Settings -> Security and login. Turn on Developer mode and keep Enforce CSP in developer mode enabled. Then open Settings -> Plugins, stay on the Plugins tab, and click the circular + beside Search plugins.</p>
+              <strong>Create the ChatGPT plugin</strong>
+              <p>In ChatGPT, open Settings -> Security and login and turn on Developer mode (keep CSP enforcement on). Then open Settings -> Plugins, stay on the Plugins tab, and click the circular + beside Search plugins.</p>
             </div>
           </div>
           <div class="step">
@@ -406,15 +406,15 @@ cloudflared tunnel route dns codexpro codexpro.example.com</code></pre>
           </article>
           <article>
             <small>ChatGPT settings path</small>
-            <h3>Enable plugins once</h3>
+            <h3>Enable Plugins once</h3>
             <dl>
               <div><dt>Open</dt><dd>ChatGPT Settings</dd></div>
               <div><dt>Go to</dt><dd>Security and login</dd></div>
-              <div><dt>Enable</dt><dd>Developer mode</dd></div>
+              <div><dt>Prerequisite</dt><dd>Developer mode on</dd></div>
               <div><dt>Keep on</dt><dd>Enforce CSP in developer mode</dd></div>
               <div><dt>Then</dt><dd>Plugins -> Plugins tab -> + beside Search plugins</dd></div>
             </dl>
-            <p>This is a one-time ChatGPT setting. CodexPro widgets work with CSP enabled.</p>
+            <p>Developer mode is only the settings toggle that unlocks custom plugins. CodexPro widgets work with CSP enabled.</p>
           </article>
           <article>
             <small>Create Plugin fields</small>
@@ -566,7 +566,7 @@ codexpro settings delete --yes</code></pre>
           </article>
           <article>
             <h3>Should CSP stay enabled?</h3>
-            <p>Yes. In Settings -> Security and login, turn on Developer mode and keep Enforce CSP in developer mode enabled. Create and manage the connection under Settings -> Plugins.</p>
+            <p>Yes. Keep Enforce CSP in developer mode enabled. Create and manage the connection under Settings -> Plugins.</p>
           </article>
         </div>
       </section>

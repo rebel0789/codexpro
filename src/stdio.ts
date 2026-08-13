@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { loadConfig } from "./config.js";
 import { createCodexProServer } from "./server.js";
 
-const CODEXPRO_VERSION = "0.29.0";
+const CODEXPRO_VERSION = "0.30.0";
 
 function printHelp(): void {
   console.log(`CodexPro MCP stdio server

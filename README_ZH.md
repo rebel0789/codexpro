@@ -5,7 +5,7 @@
 <h1 align="center">CodexPro</h1>
 
 <p align="center">
-  让 ChatGPT Web 看见你的本地仓库，并像本地代码代理一样工作。
+  让 ChatGPT 在你明确允许的本地仓库上使用编码工具。
 </p>
 
 <p align="center">
@@ -20,68 +20,80 @@
   ·
   <a href="https://rebel0789.github.io/codexpro/zh.html">中文网站</a>
   ·
-  <a href="https://github.com/rebel0789/codexpro">GitHub 点星</a>
-  ·
-  <a href="https://www.npmjs.com/package/codexpro">npm</a>
-  ·
-  <a href="DOMAIN_SETUP.md">稳定 URL 指南</a>
-  ·
   <a href="FAQ_ZH.md">中文 FAQ</a>
   ·
   <a href="SECURITY.md">安全说明</a>
 </p>
 
+## 它是什么
+
+CodexPro 是本地 MCP server。它连接**你的 ChatGPT 会话**、**你的机器**和**你允许的仓库**。
+
+ChatGPT 可以读取、搜索、编辑、审查、验证、导入附件，并写 handoff 计划。范围始终限制在这些 root 内。
+
+它不是托管 SaaS、模型代理、配额绕过、账号池或远程 shell 服务。
+
 ## 安装
 
-CodexPro 需要 Node.js 20+，以及当前能使用自定义 MCP App 的 ChatGPT 账号和 Web 界面。OpenAI 2026 年 7 月的文档说明：包含写入和修改操作的完整 MCP 目前面向 Business、Enterprise 和 Edu；Pro 目前只能连接 read/fetch 权限的 MCP App。该文档没有把 Plus 列为支持自定义 MCP 的账号层级。
+需要：
 
-先安装 CLI：
+- Node.js 20+
+- 能创建自定义 MCP 插件的 ChatGPT 账号
+- ChatGPT Web 可用的 HTTPS 地址（tunnel 或 Tailscale Funnel）
 
 ```bash
 npm install -g codexpro
-```
-
-GitHub `main` 文档可能早于 npm 发布；用 `npm install -g codexpro` 前请看 npm badge/version，未发布的 `main` 行为请用下面的 source checkout 方式。
-
-进入你想让 ChatGPT 工作的仓库，然后运行 setup：
-
-```bash
 cd /path/to/your/repo
 codexpro setup
 ```
 
-CodexPro 会自动复制 ChatGPT Server URL。先到 `Settings -> Security and login` 打开 Developer mode，再到 `Settings -> Plugins -> Plugins` 标签页，点击搜索框旁的圆形 `+` 图标。打开 **New Plugin** 后，粘贴这个 URL，连接方式选择 `Server URL`，并选择 `Authentication: No Authentication / None`。表单可能默认显示 OAuth，请在创建前改为 No Authentication / None。
+## 在 ChatGPT 中连接
 
-### 当前 Plugins UI
+1. `Settings -> Security and login` → 打开 **Developer mode**（保持 CSP 开启）。
+2. `Settings -> Plugins` → Plugins 标签页 → 搜索框旁的 **+**。
+3. 创建名为 `CodexPro` 的插件。
+4. 连接方式：**Server URL** → 粘贴 CodexPro 复制的 URL。
+5. 认证：**No Authentication / None**（表单可能默认 OAuth，创建前改掉）。
+
+CodexPro 的认证就在这个 URL 里的 token。不要分享该 URL。
 
 | 打开 Plugins 并点击 `+` | 填写 New Plugin 表单 |
 | --- | --- |
 | ![打开 Plugins 并点击加号](docs/images/chatgpt-plugins-add.png) | ![填写 New Plugin 表单](docs/images/chatgpt-plugin-details.png) |
 
-以后同一个仓库日常启动只需要：
+同一仓库日常启动：
 
 ```bash
 codexpro start
 ```
 
-CodexPro 把 ChatGPT Developer Mode 变成本地仓库的 MCP 代码代理。ChatGPT 可以读取文件、搜索代码、查看 git 状态、写入或精确编辑文件，并运行安全范围内的验证命令。
+如果创建插件失败，运行 `codexpro connection-test`，确认 ChatGPT 请求是否到达本地 server。
 
-CodexPro 不是速率限制绕过工具。它不会绕过、提升、合并、转售或修改 ChatGPT、Codex、OpenAI 或第三方模型的限制。它只是通过官方 Developer Mode / MCP App 路径，把你自己的 ChatGPT 会话连接到你自己的本地仓库。
+## ChatGPT 能做什么
 
-如果 Codex 当前工作流暂时不可用，而你的 ChatGPT 页面仍然可用，CodexPro 可以让你继续在同一个本地仓库上工作。反过来也一样：ChatGPT 负责高上下文规划，Codex、OpenCode、Pi 或其他本地执行器负责终端里的实际执行。
+在 workspace write 模式（常规 agent 设置）下：
+
+- 读取、搜索、检查仓库
+- 用 `write`、`edit` 或受保护的 `apply_patch` 编辑
+- 用 `import_file` 导入 ChatGPT 附件
+- 用 `bash` 运行白名单检查
+- 用 `show_changes` 审查 diff
+- 在 `.ai-bridge` 下写计划
+- 为不能调工具的会话导出 context bundle
 
 ## 多项目
 
-在主项目的 profile 里明确加入其他项目：
+一个 CodexPro 进程可以允许多个仓库：
 
 ```bash
 codexpro settings set --project ~/code/web --project ~/code/api
+codexpro settings show
 codexpro start
 ```
 
-`open_workspace` 会为当前 MCP session 选择一个已允许的项目。之后其他工具可以省略 `workspace_id`，直接使用当前选择。`open_current_workspace` 会切回启动时的主项目。
+让 ChatGPT 对已允许项目执行 `open_workspace`。`open_current_workspace` 切回启动仓库。
 
-项目选择按 MCP session 隔离，但 ChatGPT conversation 是否一一对应独立 MCP session 由客户端决定。需要严格的进程隔离、不同权限或不同公网地址时，仍然应该启动多个 CodexPro 进程。
+两个 ChatGPT 账号或需要硬隔离时，用不同端口和 Server URL 跑两个 CodexPro 进程。
 
 移除保存的额外项目：
 
@@ -514,55 +526,77 @@ codexpro start --mode handoff --no-bash
 ```bash
 codexpro setup
 codexpro start
+codexpro start --root /path/to/repo
 codexpro doctor
+codexpro connection-test
 codexpro settings
-codexpro settings list
-codexpro settings set --tunnel ngrok --hostname your-name.ngrok-free.dev
-codexpro settings delete --yes
-codexpro pro-bundle --copy
-codexpro execute-handoff --agent opencode --model provider/model --dry-run
-codexpro watch-handoff --agent opencode --model provider/model --yes
+codexpro inspect
+codexpro review
 ```
 
-终端控制键：
-
-```text
-Enter  打开 ChatGPT connector 设置
-c      再次复制 Server URL
-o      打开本地 admin dashboard
-h      显示帮助
-q      停止 CodexPro
-```
-
-本地 admin dashboard 是带 token 保护的 setup/settings 页面。它会显示当前 workspace、local MCP endpoint、安全模式、安装/启动命令、ChatGPT 连接步骤、saved profile 设置和 allowed roots。
-
-页面也提供 GitHub、npm、docs 链接，以及 global install、guided setup、daily start、source checkout setup 和高级重启命令的复制按钮。它能修改下一次启动使用的 saved profile：tunnel provider、public hostname、port、mode、bash mode、transcript、Codex session 模式、write mode、tool mode、widget origin 和 tunnel config 路径。修改后需要重新运行 `codexpro start` 才会生效。
-
-浏览器 admin 页面只负责 setup/settings/status 和 MCP endpoint；不能切换 ChatGPT 账号，不能直接保存原始 Cloudflare tunnel token，也不能把 CodexPro 作为后台服务开关。Cloudflare dashboard-managed tunnel 请把 token 放在本地文件里，再填写 Cloudflare token file。
-
-## FAQ
-
-中文常见问题见 [FAQ_ZH.md](FAQ_ZH.md)。
-
-核心结论：
-
-- 需要当前能访问自定义 MCP App 的 ChatGPT 账号和 Web 界面。
-- 完整写入能力目前以 Business、Enterprise 和 Edu 为准；Pro 目前只支持 read/fetch 权限。
-- CodexPro 不绕过任何速率限制。
-- 某些 Pro / planning 模型界面不能直接连接 MCP 工具，使用 `pro-bundle` 作为上下文回退。
-- quick tunnel 每次重启 URL 会变。
-- 想每天同一个 URL，用 ngrok free dev domain 或 Cloudflare named tunnel。
-
-## 开源与贡献
-
-项目地址：[github.com/rebel0789/codexpro](https://github.com/rebel0789/codexpro)
-
-欢迎提 issue、补文档、补平台兼容性、补测试。提交 PR 前请至少运行：
+常用模式：
 
 ```bash
-npm run build
-npm run smoke
-npm audit --omit=dev
+codexpro start --no-bash
+codexpro start --tool-mode minimal
+codexpro start --tool-mode full
+codexpro start --mode handoff
+codexpro start --mode pro
+codexpro start --headless
 ```
 
-如果 CodexPro 对你有用，请在 GitHub 点星。这样其他使用 ChatGPT、Codex、OpenCode、Pi 和 MCP 的开发者更容易找到它。
+可选工具卡片：
+
+```bash
+CODEXPRO_TOOL_CARDS=1 codexpro start
+```
+
+## 公网 HTTPS
+
+ChatGPT Web 需要 HTTPS：
+
+```bash
+codexpro start --tunnel cloudflare
+codexpro ngrok --hostname your.ngrok-free.dev
+codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
+codexpro tailscale --hostname your-device.your-tailnet.ts.net
+codexpro start --tunnel none
+```
+
+稳定主机名请固定 token：
+
+```bash
+mkdir -p ~/.codexpro
+openssl rand -hex 32 > ~/.codexpro/http-token
+chmod 600 ~/.codexpro/http-token
+```
+
+客户端支持 header 时优先用 `Authorization: Bearer <token>`。`?codexpro_token=` 只是个人兼容回退。
+
+## 安全默认
+
+- 公网 tunnel 需要 CodexPro HTTP token（至少 24 bytes）
+- 非 workspace write 模式不暴露写入工具
+- 默认 safe bash
+- 拦截 `.env`、密钥、`.git`、构建缓存等路径
+- 附件导入只接受已批准 HTTPS 主机上的 ChatGPT Apps SDK 文件对象
+
+公网暴露前先读 [SECURITY.md](SECURITY.md)。
+
+## 更新
+
+```bash
+npm install -g codexpro@latest
+codexpro --version
+```
+
+更新后重启 `codexpro start`。`~/.codexpro` 下的配置会保留。
+
+## 文档
+
+- [中文网站](https://rebel0789.github.io/codexpro/zh.html)
+- [中文 FAQ](FAQ_ZH.md)
+- [Security](SECURITY.md)
+- [稳定 URL 指南](DOMAIN_SETUP.md)
+- [Changelog](CHANGELOG.md)
+- [Contributors](CONTRIBUTORS.md)

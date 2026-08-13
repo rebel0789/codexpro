@@ -8,6 +8,7 @@ import type { CodexProConfig } from "./config.js";
 import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./guard.js";
 import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, withFileWriteLocks } from "./fsOps.js";
 import { viewWorkspaceImage } from "./imageOps.js";
+import { importAttachmentFile } from "./importOps.js";
 import { searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
 import {
@@ -1105,6 +1106,7 @@ const MINIMAL_TOOL_NAMES = [
   "write",
   "edit",
   "apply_patch",
+  "import_file",
   "bash",
   "start_background_job",
   "get_background_job",
@@ -1169,6 +1171,7 @@ const FULL_TOOL_NAMES = [
   "write",
   "edit",
   "apply_patch",
+  "import_file",
   "bash",
   "start_background_job",
   "get_background_job",
@@ -1216,6 +1219,7 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   "write",
   "edit",
   "apply_patch",
+  "import_file",
   "bash",
   "start_background_job",
   "get_background_job",
@@ -1272,7 +1276,7 @@ function toolNamesForMode(config: CodexProConfig): string[] {
     }
   }
   if (config.writeMode !== "workspace") {
-    for (const writeTool of ["write", "edit", "apply_patch", "project_goal", "revert_goal_projection", "apply_goal"]) {
+    for (const writeTool of ["write", "edit", "apply_patch", "import_file", "project_goal", "revert_goal_projection", "apply_goal"]) {
       const toolIndex = names.indexOf(writeTool);
       if (toolIndex !== -1) names.splice(toolIndex, 1);
     }
@@ -1327,7 +1331,7 @@ function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (["start_goal", "resume_goal"].includes(name) && !goalExecutionEnabled(config)) return false;
   if (name === "bash" && config.bashMode === "off") return false;
   if (name === "start_background_job" && config.bashMode === "off") return false;
-  if (["write", "edit", "apply_patch", "project_goal", "revert_goal_projection", "apply_goal"].includes(name) && config.writeMode !== "workspace") return false;
+  if (["write", "edit", "apply_patch", "import_file", "project_goal", "revert_goal_projection", "apply_goal"].includes(name) && config.writeMode !== "workspace") return false;
   if (name === "codex_sessions") return config.codexSessions !== "off";
   if (name === "read_codex_session") return config.codexSessions === "read";
   if (name === "inspect_workspace" && !config.analysisEnabled) return false;
@@ -1839,7 +1843,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
   });
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.29.0" }, { instructions: serverInstructions(config) });
+  const server = new McpServer({ name: "CodexPro", version: "0.30.0" }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
 
@@ -1969,6 +1973,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         contextDir: config.contextDir,
         maxReadBytes: config.maxReadBytes,
         maxWriteBytes: config.maxWriteBytes,
+        maxImportBytes: config.maxImportBytes,
         maxOutputBytes: config.maxOutputBytes,
         maxSearchResults: config.maxSearchResults,
         backgroundJobDir: config.backgroundJobDir,
@@ -2941,6 +2946,76 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
   registerCodexTool(
     config,
     server,
+    "import_file",
+    {
+      title: "Import Attachment File",
+      description:
+        "Import a ChatGPT Apps SDK attachment into the workspace. Accepts only a platform file object with download_url and file_id. Not a general URL downloader. Overwrite is off by default.",
+      inputSchema: {
+        workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
+        file: z
+          .object({
+            download_url: z.string().describe("Temporary HTTPS download URL provided by ChatGPT."),
+            file_id: z.string().describe("ChatGPT file id for this attachment."),
+            mime_type: z.string().optional().describe("Optional MIME type declared by ChatGPT."),
+            file_name: z.string().optional().describe("Optional original file name declared by ChatGPT.")
+          })
+          .describe("ChatGPT Apps SDK file reference from openai/fileParams."),
+        destination: z.string().describe("Destination path relative to the workspace root."),
+        overwrite: z.boolean().optional().describe("Replace an existing destination file. Default: false."),
+        expected_sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional().describe("Optional SHA-256 of the attachment bytes. Import fails on mismatch.")
+      },
+      annotations: LOCAL_WRITE_ANNOTATIONS,
+      _meta: {
+        ...toolCardMeta(),
+        "openai/fileParams": ["file"],
+        "openai/toolInvocation/invoking": "Importing attachment...",
+        "openai/toolInvocation/invoked": "Attachment imported"
+      }
+    },
+    async (args) => {
+      const workspace = workspaces.getWorkspace(args.workspace_id);
+      const resolved = guard.resolve(workspace, args.destination, { forWrite: true });
+      assertWriteToolAllowed(config, resolved.relPath);
+      const result = await importAttachmentFile(config, guard, workspace, {
+        file: args.file,
+        destination: String(args.destination ?? ""),
+        overwrite: args.overwrite === true,
+        expectedSha256: args.expected_sha256
+      });
+      invalidateWorkspaceAnalysis(workspace.id);
+      const text = [
+        "# Import File",
+        "",
+        `Path: ${result.path}`,
+        `Bytes: ${result.bytes}`,
+        `SHA-256: ${result.sha256}`,
+        `Declared MIME: ${result.declared_mime_type ?? "unknown"}`,
+        `Detected MIME: ${result.detected_mime_type ?? "unknown"}`,
+        `MIME status: ${result.mime_type_status}`,
+        `Verified: ${result.verified}`,
+        `Overwritten: ${result.overwritten}`
+      ].join("\n");
+      return textResult(text, {
+        workspace_id: workspace.id,
+        root: workspace.root,
+        path: result.path,
+        bytes: result.bytes,
+        declared_mime_type: result.declared_mime_type,
+        detected_mime_type: result.detected_mime_type,
+        mime_type_status: result.mime_type_status,
+        sha256: result.sha256,
+        verified: result.verified,
+        file_id: result.file_id,
+        file_name: result.file_name,
+        overwritten: result.overwritten
+      });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
     "bash",
     {
       title: "Bash",
@@ -2951,7 +3026,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         command: z.string().describe("Command to run."),
         session_id: z.string().optional().describe(config.requireBashSession && config.bashSessionId ? `Required bash session id for this server: ${config.bashSessionId}.` : "Optional bash session id. If configured on the server, a provided value must match it."),
         cwd: z.string().optional().describe("Working directory relative to workspace root. Default: ."),
-        timeout_ms: z.number().int().min(1000).max(180000).optional().describe("Timeout in milliseconds. Default: 30000.")
+        timeout_ms: z
+          .number()
+          .int()
+          .min(1000)
+          .max(config.maxBashTimeoutMs)
+          .optional()
+          .describe(`Timeout in milliseconds. Default: 30000. Max: ${config.maxBashTimeoutMs}.`)
       },
       annotations: BASH_ANNOTATIONS,
       _meta: {

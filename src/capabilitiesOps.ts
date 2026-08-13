@@ -84,29 +84,97 @@ async function safeReaddir(dir: string): Promise<fs.Dirent[]> {
 
 function realpathOrUndefined(filePath: string): string | undefined {
   try {
-    return fs.realpathSync(filePath);
+    // Prefer native realpath so Windows short/8.3 names and junctions collapse
+    // to the same canonical spelling used for ~/ display matching.
+    return fs.realpathSync.native(filePath);
   } catch {
-    return undefined;
+    try {
+      return fs.realpathSync(filePath);
+    } catch {
+      return undefined;
+    }
   }
 }
 
-function displayPath(absPath: string, workspaceRoot: string, home = os.homedir()): string {
-  if (absPath === workspaceRoot) return "$WORKSPACE";
-  if (absPath.startsWith(`${workspaceRoot}${path.sep}`)) {
+function uniquePaths(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const value of paths) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+function stripWinLongPathPrefix(value: string): string {
+  return value.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/i, "");
+}
+
+function homePathCandidates(requestedHomeDir: string, homeDir: string): string[] {
+  // Keep both the caller-supplied home and its realpath. On Windows, junction
+  // targets often preserve the pre-realpath path form (for example long vs 8.3
+  // names), so ~/ display must accept either spelling.
+  const resolvedRequested = path.resolve(requestedHomeDir);
+  return uniquePaths(
+    [homeDir, resolvedRequested, realpathOrUndefined(resolvedRequested), realpathOrUndefined(homeDir)]
+      .filter((value): value is string => Boolean(value))
+      .map(stripWinLongPathPrefix)
+  );
+}
+
+function samePath(left: string, right: string): boolean {
+  const a = stripWinLongPathPrefix(left);
+  const b = stripWinLongPathPrefix(right);
+  return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
+}
+
+function homeRelativeDisplay(absPath: string, home: string): string | undefined {
+  const candidates: Array<[string, string]> = [[absPath, home]];
+  const realAbs = realpathOrUndefined(absPath);
+  const realHome = realpathOrUndefined(home);
+  if (realAbs && realHome) candidates.push([realAbs, realHome]);
+  if (realAbs) candidates.push([realAbs, home]);
+  if (realHome) candidates.push([absPath, realHome]);
+
+  for (const [child, parent] of candidates) {
+    const normalizedChild = stripWinLongPathPrefix(child);
+    const normalizedParent = stripWinLongPathPrefix(parent);
+    if (samePath(normalizedChild, normalizedParent)) return "~";
+    if (isSubpath(normalizedChild, normalizedParent)) {
+      return `~/${path.relative(normalizedParent, normalizedChild).split(path.sep).join("/")}`;
+    }
+  }
+
+  // Windows short vs long path spellings can make path.relative walk through "..".
+  // Walk ancestors of absPath until a realpath matches home's realpath.
+  if (!realHome) return undefined;
+  let current = path.resolve(absPath);
+  const trail: string[] = [];
+  while (true) {
+    const realCurrent = realpathOrUndefined(current);
+    if (realCurrent && samePath(realCurrent, realHome)) {
+      return trail.length === 0 ? "~" : `~/${trail.reverse().join("/")}`;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    trail.push(path.basename(current).split(path.sep).join("/"));
+    current = parent;
+  }
+  return undefined;
+}
+
+function displayPath(absPath: string, workspaceRoot: string, homes: string | string[] = os.homedir()): string {
+  const homeList = Array.isArray(homes) ? homes : [homes];
+  if (absPath === workspaceRoot || isSubpath(absPath, workspaceRoot)) {
+    if (absPath === workspaceRoot) return "$WORKSPACE";
     return `$WORKSPACE/${path.relative(workspaceRoot, absPath).split(path.sep).join("/")}`;
   }
-  if (absPath === home) return "~";
-  if (absPath.startsWith(`${home}${path.sep}`)) {
-    return `~/${path.relative(home, absPath).split(path.sep).join("/")}`;
+  for (const home of homeList) {
+    const relative = homeRelativeDisplay(absPath, home);
+    if (relative) return relative;
   }
   return absPath;
-}
-
-function skillSource(skillPath: string, workspaceRoot: string, home = os.homedir()): SkillInventoryItem["source"] {
-  if (skillPath.startsWith(`${workspaceRoot}${path.sep}`)) return "workspace";
-  if (skillPath.includes(`${path.sep}.codex${path.sep}plugins${path.sep}`)) return "plugin";
-  if (skillPath.startsWith(`${home}${path.sep}`)) return "user";
-  return "other";
 }
 
 function skillSourceRank(source: SkillInventoryItem["source"]): number {
@@ -154,9 +222,10 @@ function frontmatterValue(text: string, key: string): string | undefined {
 async function findSkillFiles(
   root: string,
   maxDepth: number,
-  out: Array<{ file: string; precedence: number }>,
+  out: Array<{ file: string; precedence: number; source: SkillInventoryItem["source"] }>,
   maxItems: number,
-  precedence: number
+  precedence: number,
+  source: SkillInventoryItem["source"]
 ): Promise<void> {
   if (out.length >= maxItems || maxDepth < 0) return;
   const entries = (await safeReaddir(root)).sort((a, b) => a.name.localeCompare(b.name));
@@ -165,11 +234,22 @@ async function findSkillFiles(
     if (entry.name === "node_modules" || entry.name === ".git") continue;
     const abs = path.join(root, entry.name);
     if (entry.isFile() && entry.name === "SKILL.md") {
-      out.push({ file: abs, precedence });
+      out.push({ file: abs, precedence, source });
       continue;
     }
     if (entry.isDirectory()) {
-      await findSkillFiles(abs, maxDepth - 1, out, maxItems, precedence);
+      await findSkillFiles(abs, maxDepth - 1, out, maxItems, precedence, source);
+      continue;
+    }
+    if (entry.isSymbolicLink()) {
+      try {
+        const target = realpathOrUndefined(abs);
+        if (target && (await fsp.stat(target)).isDirectory()) {
+          await findSkillFiles(target, maxDepth - 1, out, maxItems, precedence, source);
+        }
+      } catch {
+        // Ignore broken or inaccessible skill directory links.
+      }
     }
   }
 }
@@ -182,6 +262,7 @@ async function discoverSkillRecords(
   const workspaceRoot = realpathOrUndefined(workspace.root) ?? path.resolve(workspace.root);
   const requestedHomeDir = options.homeDir ?? os.homedir();
   const homeDir = realpathOrUndefined(requestedHomeDir) ?? path.resolve(requestedHomeDir);
+  const homes = homePathCandidates(requestedHomeDir, homeDir);
   const workspaceRoots = [
     path.join(workspaceRoot, ".codex", "skills"),
     path.join(workspaceRoot, ".agents", "skills"),
@@ -190,25 +271,29 @@ async function discoverSkillRecords(
     const real = realpathOrUndefined(dir);
     return real && isSubpath(real, workspaceRoot) ? [real] : [];
   });
+  // Source comes from the configured scan root, not the symlink/junction target
+  // path. Windows junctions often resolve to a different spelling of the same
+  // home directory, which would otherwise misclassify user skills as "other".
   const roots = [
-    ...workspaceRoots,
+    ...workspaceRoots.map((dir) => ({ dir, source: "workspace" as const })),
     ...(options.includeGlobal
       ? [
-          path.join(homeDir, ".codex", "skills"),
-          path.join(homeDir, ".agents", "skills"),
-          path.join(homeDir, ".codex", "plugins", "cache")
+          { dir: path.join(homeDir, ".codex", "skills"), source: "user" as const },
+          { dir: path.join(homeDir, ".agents", "skills"), source: "user" as const },
+          { dir: path.join(homeDir, ".codex", "plugins", "cache"), source: "plugin" as const }
         ]
       : [])
-  ].filter((dir) => fs.existsSync(dir));
+  ].filter((root) => fs.existsSync(root.dir));
 
-  const skillFiles: Array<{ file: string; precedence: number }> = [];
+  const skillFiles: Array<{ file: string; precedence: number; source: SkillInventoryItem["source"] }> = [];
   for (const [precedence, root] of roots.entries()) {
     await findSkillFiles(
-      root,
-      root.includes(`${path.sep}plugins${path.sep}cache`) ? 9 : 3,
+      root.dir,
+      root.dir.includes(`${path.sep}plugins${path.sep}cache`) ? 9 : 3,
       skillFiles,
       maxSkills,
-      precedence
+      precedence,
+      root.source
     );
     if (skillFiles.length >= maxSkills) break;
   }
@@ -229,8 +314,8 @@ async function discoverSkillRecords(
     items.push({
       name,
       description,
-      source: skillSource(realFile, workspaceRoot, homeDir),
-      path: displayPath(realFile, workspaceRoot, homeDir),
+      source: discovered.source,
+      path: displayPath(realFile, workspaceRoot, homes),
       absPath: realFile,
       precedence: discovered.precedence
     });

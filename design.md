@@ -17,7 +17,7 @@ CodexPro should explain itself in this order:
 
 1. Install the CLI.
 2. Run setup inside one repo.
-3. Paste the copied Server URL into ChatGPT Developer Mode.
+3. Paste the copied Server URL into ChatGPT Plugins (turn Developer mode on first if needed).
 4. Let ChatGPT inspect, edit, verify, or hand off work inside that workspace.
 5. Keep the safety boundary visible: it is a local bridge, not a quota bypass,
    model proxy, hosted SaaS, or OS sandbox.

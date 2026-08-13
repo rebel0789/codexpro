@@ -6,10 +6,10 @@
     <title>CodexPro - 让 ChatGPT Web 连接本地仓库</title>
     <meta
       name="description"
-      content="CodexPro 通过 ChatGPT Developer Mode 和 MCP，把 ChatGPT Web 连接到你的本地代码仓库，支持读取、搜索、编辑、git 检查和安全验证。"
+      content="CodexPro 通过 ChatGPT Plugins 和 MCP，把 ChatGPT Web 连接到你明确允许的本地仓库，支持读取、搜索、编辑、git 检查和安全验证。"
     />
     <meta property="og:title" content="CodexPro 中文文档" />
-    <meta property="og:description" content="让 ChatGPT Web 看见 Codex 风格仓库上下文，并像本地代码代理一样工作。" />
+    <meta property="og:description" content="本地 MCP 桥：把 Server URL 粘贴到 ChatGPT Plugins，在你允许的仓库上工作。" />
     <meta property="og:image" content="https://rebel0789.github.io/codexpro/og.svg" />
     <meta name="theme-color" content="#0b1220" />
     <link rel="alternate" hreflang="en" href="https://rebel0789.github.io/codexpro/" />
@@ -41,7 +41,7 @@
           <p class="eyebrow">在仓库里安装</p>
           <h1>把 ChatGPT 连接到本地代码。</h1>
           <p class="hero-lede">
-            安装 CLI，在项目里运行 setup，然后把复制好的 Server URL 粘贴到 ChatGPT Developer Mode。CodexPro 会处理本地 server、token、tunnel 和 workspace 工具。
+            安装 CLI，在项目里运行 setup，然后把复制好的 Server URL 粘贴到 ChatGPT Plugins。CodexPro 会处理本地 server、token、tunnel 和 workspace 工具。
           </p>
           <div class="install-line" role="group" aria-label="安装命令">
             <code>npm install -g codexpro
@@ -132,13 +132,13 @@ codexpro setup</code>
           <p class="eyebrow">用好已有订阅</p>
           <h2>把 ChatGPT 变成本地开发工作流的一部分。</h2>
           <p>
-            CodexPro 面向已经有 ChatGPT Apps / Developer Mode 权限的开发者。它让 ChatGPT 不再只是回答问题，而是通过 MCP 获取本地仓库工具：读取文件、精确编辑、搜索源码、查看 git 状态、查看 diff，并运行允许范围内的验证命令。
+            CodexPro 面向已经有 ChatGPT Plugins / MCP 权限的开发者。它让 ChatGPT 不再只是回答问题，而是通过 MCP 获取本地仓库工具：读取文件、精确编辑、搜索源码、查看 git 状态、查看 diff，并运行允许范围内的验证命令。
           </p>
           <p>
             Codex 和 ChatGPT 是不同产品界面。某个工作流暂时不可用时，如果另一个你本来就有权限的界面仍然可用，CodexPro 可以让它继续在同一个本地仓库上工作，但不会修改任何产品限制。
           </p>
           <p>
-            如果你的 ChatGPT 账号在 Web 产品里提供更强模型，并且该模型界面可以调用 Developer Mode Apps，CodexPro 可以让它通过 MCP 使用本地仓库工具。CodexPro 不提供、不代理、不转售、也不解锁模型。
+            如果你的 ChatGPT 账号在 Web 产品里提供更强模型，并且该模型界面可以调用自定义 MCP 插件，CodexPro 可以让它通过 MCP 使用本地仓库工具。CodexPro 不提供、不代理、不转售、也不解锁模型。
           </p>
         </div>
         <div class="value-matrix">

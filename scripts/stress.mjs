@@ -2,8 +2,10 @@ import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REQUEST_TIMEOUT_MS = process.platform === 'win32' ? 45_000 : 20_000;
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
 function assert(ok, message) {
   if (!ok) throw new Error(message);
@@ -864,6 +866,36 @@ async function runAnalysisBudgetStress() {
   }
 }
 
+async function runBashHomeEnvStress() {
+  const { resolveUsableHomeDir, makeRestrictedBashEnv } = await import(pathToFileURL(path.join(repoRoot, 'dist', 'bashOps.js')).href);
+  const { loadConfig } = await import(pathToFileURL(path.join(repoRoot, 'dist', 'config.js')).href);
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-bash-home-root-'));
+  const realHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-bash-home-'));
+  try {
+    const resolved = resolveUsableHomeDir({ HOME: '=', USERPROFILE: realHome });
+    assert(path.resolve(resolved) === path.resolve(realHome), `invalid HOME was not replaced: ${resolved}`);
+    const fallback = resolveUsableHomeDir({ HOME: '=' });
+    assert(path.isAbsolute(fallback) && fallback !== '=', `invalid HOME alone did not fall back: ${fallback}`);
+    const config = loadConfig(['--root', root, '--bash', 'full', '--write', 'off']);
+    assert(config.maxBashTimeoutMs === 600_000, `default bash timeout cap drifted: ${config.maxBashTimeoutMs}`);
+    const env = makeRestrictedBashEnv(config, {
+      HOME: '=',
+      USERPROFILE: realHome,
+      PATH: process.env.PATH,
+      APPDATA: path.join(realHome, 'AppData', 'Roaming'),
+      LOCALAPPDATA: path.join(realHome, 'AppData', 'Local')
+    });
+    assert(path.resolve(env.HOME) === path.resolve(realHome), `restricted env kept invalid HOME: ${env.HOME}`);
+    assert(!String(env.HOME).includes('='), `restricted HOME still looks relative: ${env.HOME}`);
+    if (process.platform === 'win32') {
+      assert(path.resolve(env.USERPROFILE) === path.resolve(realHome), `Windows USERPROFILE was wrong: ${env.USERPROFILE}`);
+    }
+  } finally {
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    await fs.rm(realHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
 const root = await makeFixture();
 await runFullModeStress(root);
 await runGlobalSkillStress(root);
@@ -872,6 +904,7 @@ await runMcpInventoryStress();
 await runMaxReadSearchStress();
 await runNodeFallbackSearchLimitStress();
 await runBashOutputTerminationStress();
+await runBashHomeEnvStress();
 await runGuardEdgeStress();
 await runSupertoolModeStress(root);
 await runShowChangesStatsStress();

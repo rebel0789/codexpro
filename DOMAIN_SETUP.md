@@ -117,7 +117,7 @@ codexpro stable \
   --bash safe
 ```
 
-Add this once in ChatGPT Developer Mode:
+Add this once in ChatGPT Plugins:
 
 ```text
 Name: CodexPro
@@ -191,7 +191,7 @@ codexpro ngrok \
   --bash safe
 ```
 
-Add this once in ChatGPT Developer Mode:
+Add this once in ChatGPT Plugins:
 
 ```text
 Name: CodexPro
