@@ -160,6 +160,60 @@ Normal coding 模式下，ChatGPT 可以在配置的工作区内写入和精确�
 
 如果你只想让 ChatGPT 规划，不想让它直接改源码，用 handoff 模式。
 
+## 如何在直接编码和 Codex 协作之间切换？
+
+受信任的仓库必须同时显式启用 workspace write 和 full bash：
+
+```bash
+codexpro start --root /path/to/repo --write workspace --bash full
+```
+
+安全默认值不会改变。创建 CodingTask、运行、follow-up 和 Direct → Codex 切换同时要求 `writeMode=workspace` 与 `bashMode=full`，因为 Codex App Server 可以执行超出 safe shell allowlist 的项目命令。状态、列表、审查、取消以及 Codex → Direct 切换无需 full bash，仍可用于检查和恢复。
+
+以 direct owner 创建一个 CodingTask，并用返回的 `workspace_id` 调用普通编码工具。直接操作空闲后，使用 `transition_coding_task` 把独占写入权交给 Codex，再调用 `run_coding_task`；后续请求用 `followup_coding_task`，会复用同一任务、thread 和 worktree。Codex 空闲后可切回 direct，并通过 `review_coding_task` 或 `show_changes` 审查。
+
+任务在断线和服务重启后仍可恢复。CodexPro 会拒绝并发写入，也暂时拒绝 CodingTask worktree 中的普通后台任务。它不会自动 commit、merge、push、创建 PR 或删除 worktree。Codex 默认使用 `gpt-5.6-sol` / `high`，禁用网络且 approval policy 为 `never`；可通过 `--task-dir`、`--codex-model` 和 `--codex-reasoning-effort` 配置。自定义 `--codex-dir` 会作为 `CODEX_HOME` 传给独立 Codex 进程。
+
+旧 `.ai-bridge` handoff 仍保留作兼容和规划用途，但不是持久 CodingTask 协作流程。
+
+## Pro 如何编排多个 Codex worker？
+
+在普通 Chat 中提出较大的结果目标。Pro 可以先保存不执行的 `propose_goal` 契约并展示带指纹的 Goal 卡片；只有你接受该精确范围后才调用 `approve_goal`，而批准本身仍不会启动工作。`start_goal` 会并行启动依赖已满足的隔离 CodingTask，随后 Pro 刷新持久状态、审查证据、按依赖顺序集成结果，并根据每一条批准的标准判断是否完成。
+
+`workspace_policy=isolated` 会让所有集成 checkpoint 保持私有，直到单独确认 `apply_goal`。`workspace_policy=live` 下 worker 和 Pro integration 仍然隔离；`review_goal` 之后，只有单独确认的 `project_goal` 才能把返回的精确 integration HEAD/review fingerprint 投影到源工作区。批准、集成、审查、完成或取消都不会隐式投影。
+
+Live 会保留既有且不相关的 tracked、staged、untracked 修改。每次 source effect 都检查批准的 HEAD 和目标路径 CAS，使用 per-repository lock，并先写 durable journal；相同 key 可恢复重试。若用户修改了同一路径，系统不会覆盖而进入 `recovery_required`。symlink、submodule、冲突 index 和非普通文件失败关闭。
+
+`cancel_goal` 不会回滚源码。回滚需单独确认 `revert_goal_projection`，且只允许 latest-applied-first（LIFO）。最终 checkpoint 已经投影时，`apply_goal` 会 zero-write 地采用并封存它。不会 stage、commit、merge、push 或创建 PR。supervised worker 每次只有一个 turn，没有自动重试和 worker 网络；worker 执行需要 workspace write + full bash，而 project/revert/apply 只需要 workspace write，不需要 bash 或 Codex。
+
+## 离开 Chat 后，Persistent Goal 会继续吗？
+
+在受支持的 POSIX 主机上可以，但只能执行已批准 envelope 内的机械工作。Persistent Goal 必须使用 Isolated、空 Goal `commands` 列表、network=false、关闭全部 source effect。每个 worker 可批准 1–4 个 semantic turn，并在全部 turn 间共享总计 0–2 次 fresh retry；默认 retry 为 0。超过一个 turn 时，提案必须精确包含少一个、有序且批准后不可修改的 `continuation_intents`，最多三个。经过独立的 propose → approve → start 后，本地独立 scheduler 会并行启动依赖已满足的 worker。中间 turn 成功后仍保持私有，不能集成或解锁依赖，只会在同一 CodingTask、worktree、Codex thread 和 session 上执行下一个已批准 intent。只有最终批准 turn 可以产生一次 cumulative private integration。你可以离开页面，之后用被动的 `get_goal` / `review_goal` 重新连接；scheduler 会停在 `waiting_review`，stop reason 为 `semantic_review`，因为只有 Pro 能判断完成，任何后续源码操作都必须在这个 Persistent 契约之外获得用户单独授权。
+
+工作进行时电脑与独立 scheduler 进程必须保持运行；启动、控制或重新连接时需要 CodexPro server 可用。这不是 ChatGPT 内置 Scheduled Tasks，也不会在断线时让 Pro 继续推理。Persistent start/resume 仍明确要求 workspace write + full bash，因为本地 Codex App Server 可以执行项目命令。Continuation 是事先批准的全新 semantic turn；fresh retry 使用新 operation 重复该 turn 的精确批准 prompt，但不消耗 turn；同一 operation 的 crash/reconnect recovery 保留原 operation，也不消耗 retry。同一 thread 表示向一个持久 Codex thread 追加 turn，不保证 context compaction 后所有早期 token 仍逐字存在。
+
+这个两 turn 流程已在[真实 ordinary Chat](https://chatgpt.com/c/6a7cab4a-fa74-83ee-bb1c-5040c68524c0)通过。Goal `goal_d96c4d1de3d6382cc4ebcc86` 复用了 CodingTask `task_f1c84e9b39654c8aaebb2e6b` 和同一个 thread/session `019ff70a-ea6f-7a83-94d6-f81fe92527a2`；turn 2 运行时 turn 1 仍未集成，最终只有一个私有 integration commit，scheduler 随后停在 `waiting_review` / `semantic_review`。v16 卡片显示 2/2 turn 与 final-only integration。离开再重连没有改变 source 状态，Chat host 重复的被动 status/review 调用也没有修改或重新启动工作。
+
+Pause、resume、cancel 都是显式持久控制。Pause 生效后不会开始新的 worker launch、integration 或依赖推进；重新连接或读取状态不会 resume。Resume 针对同一批准指纹幂等执行，不会重跑已完成工作。Cancel 会 fence 活跃工作并进入 terminal，但不会回滚源码或删除保留的 worktree。
+
+## Persistent Goal 何时会自动 retry？
+
+只有批准的 Persistent 契约在公开字段 `limits.max_retries_per_worker` 中仍有总预算，且 runner positive proof 明确命中 `infra-pre-turn-v1` 两种 failure 之一时：`app_server_startup / infrastructure / runner_start` 或 `app_server_initialize_transport / infrastructure / app_server_initialize`。Outcome 必须已知，该失败 attempt 不得返回新的 thread/session/turn identity，也不得写出 thread-establish 或 turn-start 请求；HEAD、status、diff/stat、changed paths、mode 与 index-visible Git state 必须和 attempt 前观察精确相同。若更早的 semantic turn 已建立 thread/session，它继续作为新 attempt 的 resume 目标。第一次 retry 等待 1 秒，第二次等待 5 秒；schedule 与 allowlist 都带指纹且不可自适应修改。
+
+Timeout；model、tool、input、approval failure；policy/path/content/provenance/validation/identity conflict；cancel；任何部分 Git 改动；ambiguous response loss；unknown outcome 都不会 retry。Pause/cancel 优先于等待中的 backoff，被动 get/list/review 永远不会启动它。系统持久保留每个 attempt，但公开状态只显示有上限的安全 summary/hash，不返回 raw prompt、error、log 或私有路径。[Phase 10 的真实 ordinary-Chat 流程](https://chatgpt.com/c/6a7cc1a8-bd5c-83ee-9779-7e032776dadd)经历一次 initialize-transport failure、1 秒 backoff，再由第二个 attempt 的真实 Codex 成功；最终 v17 卡片显示一个 semantic turn、两个 attempt、retry 1/1 和一个私有 changed file。
+
+## Windows 支持 Goal 编排吗？
+
+本版本不支持。整个 Goal 功能面（不只是 Live 投影）都依赖由 POSIX advisory lock 支撑的 crash-safe GoalStore lock。因此 CodexPro 会在 Windows 上隐藏全部 Goal 工具，并返回 `server_config.goalOrchestration.supported=false`。Direct coding 和独立 CodingTask（包括 Direct↔Codex 切换）仍可使用。
+
+## CodexPro 能运行超过 180 秒的 benchmark 吗？
+
+可以。前台 `bash` 继续用于短命令；长 benchmark 或测试套件用 `start_background_job`。它会快速返回持久 job id，ChatGPT/MCP 断线或 CodexPro 重启后仍可用 `wait_for_background_job`、`get_background_job`、`list_background_jobs` 恢复状态。只有明确要停止时才调用 `cancel_background_job`。
+
+每次启动都必须提供稳定 `job_key`。相同 key 和相同命令只会返回现有任务，不会重复运行。CodexPro 不会自动重试失败或推进 benchmark 阶段，命令仍受 safe/full bash 和 bash session guard 约束。
+
+对 identity 敏感的工作还应传入完整 `expected_git_head` 并设置 `require_clean_worktree: true`；两项会被检查两次，并成为幂等执行契约的一部分。如果服务环境解析到的 Codex 与终端不同，请用 `--codex-bin /absolute/path/to/codex` 重启，并通过 `server_config` 检查 `codexBin`。
+
 ## CodexPro 能把 bash 绑定到某个会话 id 吗？
 
 CodexPro 不能附加到、读取或复用某一个 Codex App 聊天会话或终端会话。

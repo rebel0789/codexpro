@@ -286,6 +286,8 @@ const saved = run([
   'full',
   '--bash-transcript',
   'full',
+  '--codex-bin',
+  process.execPath,
   '--widget-domain',
   'https://widgets.codexpro.test',
   '--tool-cards',
@@ -300,7 +302,7 @@ if (!saved.includes('Saved workspace settings')) {
 }
 
 const shown = run(['settings', 'show', '--root', root], env);
-for (const expected of ['Tunnel', 'ngrok', 'codexpro-test.ngrok-free.app', '19087', 'Tool cards', 'on', 'Bash transcript', 'full', 'Projects', realReuseRoot, '<saved>']) {
+for (const expected of ['Tunnel', 'ngrok', 'codexpro-test.ngrok-free.app', '19087', 'Tool cards', 'on', 'Bash transcript', 'full', 'Codex CLI', process.execPath, 'Projects', realReuseRoot, '<saved>']) {
   if (!shown.includes(expected)) {
     throw new Error(`settings show missing ${expected}\n${shown}`);
   }
@@ -313,6 +315,7 @@ if (
   profile.toolMode !== 'full'
   || profile.toolCards !== true
   || profile.bashTranscript !== 'full'
+  || profile.codexBin !== process.execPath
   || profile.widgetDomain !== 'https://widgets.codexpro.test'
   || JSON.stringify(profile.allowedRoots) !== JSON.stringify([realReuseRoot])
 ) {

@@ -63,7 +63,8 @@ Options:
   --allow-home              Allow opening any workspace under your home directory.
   --mode <agent|handoff|pro>
                              Default: agent.
-                             agent = ChatGPT can read, write/edit/apply_patch files, search, and run safe bash.
+                             agent = ChatGPT can directly code with the configured write/bash policy.
+                             CodingTask execution additionally requires --write workspace --bash full.
                              handoff = ChatGPT writes .ai-bridge plans for a local implementation agent.
                              pro = export context for models that cannot call MCP tools.
   --agent                   Shortcut for --mode agent.
@@ -71,7 +72,7 @@ Options:
   --pro-planning            Shortcut for --mode pro.
   --host <host>             Local bind host. Default: 127.0.0.1.
   --port <port>             Local port. Default: 8787.
-  --bash <off|safe|full>    Bash mode. Default: safe.
+  --bash <off|safe|full>    Bash mode. Default: safe. CodingTask execution requires explicit full.
   --no-bash                 Shortcut for --bash off.
   --bash-transcript <compact|full>
                              Chat transcript for bash results. Default: compact.
@@ -83,9 +84,18 @@ Options:
                              Opt in to read local ~/.codex session history.
                              metadata lists ids/titles/cwd; read allows bounded transcript reads.
   --codex-dir <dir>          Codex config/session directory. Default: ~/.codex.
+                             A custom value is forwarded as CODEX_HOME to detached Codex.
+  --codex-bin <path>         Exact Codex CLI used by shell jobs and handoffs.
+                             Saved profiles and CODEXPRO_CODEX_BIN are also supported.
+  --task-dir <dir>           Private CodingTask state/worktree directory outside projects.
+                             Default: ~/.codexpro/tasks.
+  --codex-model <model>      Codex collaboration model. Default: gpt-5.6-sol.
+  --codex-reasoning-effort <low|medium|high|xhigh>
+                             Codex collaboration reasoning effort. Default: high.
   --write <off|handoff|workspace>
                              Write mode. Default: workspace in agent mode, handoff otherwise.
                              handoff = no generic write/edit/apply_patch tools; handoff tools write bounded .ai-bridge files.
+                             CodingTask execution requires explicit workspace together with --bash full.
   --tool-mode <minimal|standard|full>
                              Tool surface exposed to ChatGPT. Default: standard.
                              minimal = config/self-test plus open/read/write/edit/apply_patch/bash/show_changes.
@@ -176,6 +186,10 @@ Loop handoff options:
 
 Default agent mode:
   codexpro start --root /path/to/repo
+
+Trusted web Direct + Codex collaboration:
+  codexpro start --root /path/to/repo --write workspace --bash full
+  Required for CodingTask create/run/follow-up and Direct -> Codex. Defaults stay safer.
 
 Guided setup:
   codexpro setup
@@ -591,16 +605,41 @@ function isWindowsCommandCandidate(command) {
   return process.platform === 'win32' && /\.(cmd|bat|exe)$/i.test(command);
 }
 
-function resolveCodexCommand() {
-  const explicit = String(process.env.CODEXPRO_CODEX_BIN ?? '').trim();
+function resolveCodexCommand(requested = process.env.CODEXPRO_CODEX_BIN ?? '') {
+  const explicit = String(requested ?? '').trim();
   if (explicit) {
     if (isPathLike(explicit)) return resolveExecutablePath(explicit);
     const candidates = commandPaths(explicit);
     if (process.platform !== 'win32') return candidates[0] || explicit;
     return candidates.find(isWindowsCommandCandidate) || explicit;
   }
-  if (process.platform !== 'win32') return 'codex';
+  if (process.platform !== 'win32') return commandPaths('codex')[0] || 'codex';
   return commandPaths('codex').find(isWindowsCommandCandidate) || 'codex';
+}
+
+function codexBinOption(args, profile = {}, fallback = '') {
+  const requested = optionValue(args, profile, 'codexBin', ['CODEXPRO_CODEX_BIN'], fallback);
+  if (!requested) return '';
+  const resolved = resolveCodexCommand(requested);
+  if (!commandAvailable(resolved)) {
+    throw new Error(`Configured Codex CLI is unavailable: ${resolved}. Check --codex-bin or CODEXPRO_CODEX_BIN.`);
+  }
+  return isPathLike(resolved) ? resolveExecutablePath(resolved) : resolved;
+}
+
+function codexCollaborationOptions(args, profile = {}, fallbackTaskDir = '') {
+  const taskDir = optionValue(args, profile, 'taskDir', ['CODEXPRO_TASK_DIR'], fallbackTaskDir);
+  const codexModel = String(optionValue(args, profile, 'codexModel', ['CODEXPRO_CODEX_MODEL'], 'gpt-5.6-sol')).trim();
+  const codexReasoningEffort = String(
+    optionValue(args, profile, 'codexReasoningEffort', ['CODEXPRO_CODEX_REASONING_EFFORT'], 'high')
+  ).trim();
+  if (!codexModel || codexModel.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(codexModel)) {
+    throw new Error('--codex-model must be a valid model identifier using letters, numbers, dot, underscore, colon, slash, or dash.');
+  }
+  if (!['low', 'medium', 'high', 'xhigh'].includes(codexReasoningEffort)) {
+    throw new Error('--codex-reasoning-effort must be low, medium, high, or xhigh.');
+  }
+  return { taskDir: String(taskDir || ''), codexModel, codexReasoningEffort };
 }
 
 function resolveAgentCommand(command) {
@@ -727,6 +766,10 @@ function saveRuntimeConnection(root, details, options = {}) {
     bash: options.bash ?? '',
     bashTranscript: options.bashTranscript ?? '',
     codexSessions: options.codexSessions ?? '',
+    codexBin: options.codexBin ?? '',
+    taskDir: options.taskDir ?? '',
+    codexModel: options.codexModel ?? '',
+    codexReasoningEffort: options.codexReasoningEffort ?? '',
     bashSession: options.bashSession ?? '',
     requireBashSession: Boolean(options.requireBashSession),
     write: options.write ?? '',
@@ -1568,7 +1611,7 @@ function buildExecutorCommand(args, root, planPath, planText) {
     return {
       agent,
       model,
-      command: resolveCodexCommand(),
+      command: codexBinOption(args, {}, resolveCodexCommand()),
       args: [
         'exec',
         '--ephemeral',
@@ -3155,6 +3198,8 @@ function profileFromPreference(root, args, profile, preference) {
   const bashTranscript = bashTranscriptOption(args, profile);
   const codexSessions = codexSessionsOption(args, profile);
   const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
+  const codexBin = codexBinOption(args, profile);
+  const { taskDir, codexModel, codexReasoningEffort } = codexCollaborationOptions(args, profile);
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = optionalWriteOption(args, profile, mode);
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
@@ -3176,6 +3221,10 @@ function profileFromPreference(root, args, profile, preference) {
     ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
     ...(codexSessions !== 'off' ? { codexSessions } : {}),
     ...(codexDir ? { codexDir } : {}),
+    ...(codexBin ? { codexBin } : {}),
+    ...(taskDir ? { taskDir: resolveConfigPath(root, taskDir) } : {}),
+    codexModel,
+    codexReasoningEffort,
     ...(bashSession ? { bashSession } : {}),
     ...(requireBashSession ? { requireBashSession: true } : {}),
     ...(write ? { write } : {}),
@@ -3255,7 +3304,9 @@ async function runSetupWizard(argv) {
 
   printBox('CodexPro setup', [
     'This wizard prepares a ChatGPT connector for the folder you choose.',
-    'Press Enter to accept defaults. Stable tunnel choices are saved per workspace under ~/.codexpro.'
+    'Press Enter to accept defaults. Stable tunnel choices are saved per workspace under ~/.codexpro.',
+    'CodingTask execution stays disabled by the safe bash default; trusted repos must explicitly use --write workspace --bash full.',
+    'Task status, list, review, cancel, and Codex -> Direct recovery stay available under safer policies.'
   ]);
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -3301,6 +3352,8 @@ async function runSetupWizard(argv) {
     const bashTranscript = bashTranscriptOption(defaults, profile);
     const codexSessions = codexSessionsOption(defaults, profile);
     const codexDir = optionValue(defaults, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
+    const codexBin = codexBinOption(defaults, profile);
+    const { taskDir, codexModel, codexReasoningEffort } = codexCollaborationOptions(defaults, profile);
     const write = optionalWriteOption(defaults, profile, mode);
     const toolMode = optionalChoice('tool-mode', optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], ''), ['minimal', 'standard', 'full']);
     const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
@@ -3309,6 +3362,9 @@ async function runSetupWizard(argv) {
     if (bashTranscript !== 'compact') args.push('--bash-transcript', bashTranscript);
     if (codexSessions !== 'off') args.push('--codex-sessions', codexSessions);
     if (codexDir) args.push('--codex-dir', codexDir);
+    if (codexBin) args.push('--codex-bin', codexBin);
+    if (taskDir) args.push('--task-dir', resolveConfigPath(root, taskDir));
+    args.push('--codex-model', codexModel, '--codex-reasoning-effort', codexReasoningEffort);
     const { bashSession, requireBashSession } = bashSessionOptions(defaults, profile);
     if (bashSession) args.push('--bash-session', bashSession);
     if (requireBashSession) args.push('--require-bash-session');
@@ -3404,6 +3460,10 @@ async function runSetupWizard(argv) {
         ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
         ...(codexSessions !== 'off' ? { codexSessions } : {}),
         ...(codexDir ? { codexDir } : {}),
+        ...(codexBin ? { codexBin } : {}),
+        ...(taskDir ? { taskDir: resolveConfigPath(root, taskDir) } : {}),
+        codexModel,
+        codexReasoningEffort,
         ...(bashSession ? { bashSession } : {}),
         ...(requireBashSession ? { requireBashSession: true } : {}),
         ...(write ? { write } : {}),
@@ -3460,6 +3520,10 @@ function printProfile(root, profile) {
     labelValue('Bash transcript', safe.bashTranscript ?? 'compact'),
     labelValue('Codex sessions', safe.codexSessions ?? 'off'),
     ...(safe.codexDir ? [labelValue('Codex dir', safe.codexDir)] : []),
+    ...(safe.codexBin ? [labelValue('Codex CLI', safe.codexBin)] : []),
+    ...(safe.taskDir ? [labelValue('CodingTask dir', safe.taskDir)] : []),
+    labelValue('Codex model', safe.codexModel ?? 'gpt-5.6-sol'),
+    labelValue('Codex reasoning', safe.codexReasoningEffort ?? 'high'),
     ...(safe.bashSession ? [labelValue('Bash session', `${safe.bashSession}${safe.requireBashSession ? ' required' : ''}`)] : []),
     ...(safe.widgetDomain ? [labelValue('Widget origin', safe.widgetDomain)] : []),
     ...(Array.isArray(safe.allowedRoots) && safe.allowedRoots.length
@@ -3506,6 +3570,8 @@ function saveSettingsFromArgs(root, args, profile) {
   const bashTranscript = bashTranscriptOption(args, profile);
   const codexSessions = codexSessionsOption(args, profile);
   const codexDir = optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], profile.codexDir ?? '');
+  const codexBin = codexBinOption(args, profile);
+  const { taskDir, codexModel, codexReasoningEffort } = codexCollaborationOptions(args, profile);
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = writeOption(args, profile, mode);
   const bash = optionalChoice('bash', optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], profile.bash ?? ''), ['off', 'safe', 'full']);
@@ -3537,6 +3603,10 @@ function saveSettingsFromArgs(root, args, profile) {
     ...(bashTranscript !== 'compact' ? { bashTranscript } : {}),
     ...(codexSessions !== 'off' ? { codexSessions } : {}),
     ...(codexDir ? { codexDir } : {}),
+    ...(codexBin ? { codexBin } : {}),
+    ...(taskDir ? { taskDir: resolveConfigPath(root, taskDir) } : {}),
+    codexModel,
+    codexReasoningEffort,
     ...(bashSession ? { bashSession } : {}),
     ...(requireBashSession ? { requireBashSession: true } : {}),
     ...(mode !== 'agent' || args.write !== undefined || profile.write ? { write } : {}),
@@ -3935,6 +4005,10 @@ async function main() {
   const bashTranscript = bashTranscriptOption(args, profile);
   const codexSessions = codexSessionsOption(args, profile);
   const codexDir = resolveCodexDir(root, optionValue(args, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], ''));
+  const codexBin = codexBinOption(args, profile, resolveCodexCommand());
+  const collaboration = codexCollaborationOptions(args, profile, path.join(codexProHome(), 'tasks'));
+  const taskDir = resolveConfigPath(root, collaboration.taskDir);
+  const { codexModel, codexReasoningEffort } = collaboration;
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = writeOption(args, profile, mode);
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
@@ -3963,6 +4037,10 @@ async function main() {
     CODEXPRO_BASH_SESSION_ID: bashSession,
     CODEXPRO_REQUIRE_BASH_SESSION: requireBashSession ? '1' : '0',
     CODEXPRO_CODEX_SESSIONS: codexSessions,
+    CODEXPRO_CODEX_BIN: codexBin,
+    CODEXPRO_TASK_DIR: taskDir,
+    CODEXPRO_CODEX_MODEL: codexModel,
+    CODEXPRO_CODEX_REASONING_EFFORT: codexReasoningEffort,
     CODEXPRO_WRITE_MODE: write,
     CODEXPRO_TOOL_MODE: toolMode,
     CODEXPRO_WIDGET_DOMAIN: widgetDomain,
@@ -3995,6 +4073,9 @@ async function main() {
     labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}`),
     labelValue('Bash transcript', bashTranscript),
     labelValue('Codex sessions', codexSessions),
+    labelValue('Codex CLI', codexBin),
+    labelValue('CodingTask', `${codexModel} (${codexReasoningEffort})`),
+    labelValue('Task state', taskDir),
     ...(bashSession ? [labelValue('Bash session', `${bashSession}${requireBashSession ? ' required' : ''}`)] : []),
     labelValue('Local URL', `http://${host}:${port}/mcp`),
     labelValue(
@@ -4036,6 +4117,10 @@ async function main() {
     bash,
     bashTranscript,
     codexSessions,
+    codexBin,
+    taskDir,
+    codexModel,
+    codexReasoningEffort,
     bashSession,
     requireBashSession,
     toolCards,

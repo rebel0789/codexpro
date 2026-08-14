@@ -218,6 +218,81 @@ Use handoff mode if you want ChatGPT to write a plan only and let Codex execute 
 
 Use `CODEXPRO_WRITE_MODE=off` when you want direct `write` and `edit` tools removed from the advertised MCP tool list while still allowing bounded handoff/context files.
 
+## How do I switch between direct coding and Codex collaboration?
+
+Start CodexPro for a trusted repository with both execution capabilities explicitly enabled:
+
+```bash
+codexpro start --root /path/to/repo --write workspace --bash full
+```
+
+The defaults remain safer. CodingTask creation, `run_coding_task`, `followup_coding_task`, and Direct → Codex transfer require both `writeMode=workspace` and `bashMode=full`, because Codex App Server can execute project commands beyond the safe-shell allowlist. Status, list, review, cancel, and Codex → Direct transfer stay available without full bash.
+
+Create one CodingTask in direct mode and use its returned workspace id with the normal coding tools. When the direct operation is idle, call `transition_coding_task` to transfer exclusive ownership to Codex, then `run_coding_task`. Use `followup_coding_task` for another turn in the same persisted task/thread. After Codex is idle, transition ownership back to direct mode and use `review_coding_task` or `show_changes`.
+
+The worktree and context stay the same across both directions and connector restarts. CodexPro rejects concurrent mutations instead of trying to merge two writers. It also rejects general background jobs in task worktrees initially because they could outlive the ownership boundary.
+
+This flow does not auto-commit, merge, push, open a PR, or delete the task. Codex runs with workspace write access but no network and approval policy `never`; requests that would need approval or interactive input fail closed. Task metadata, bounded logs, and the worktree live outside the project under `~/.codexpro/tasks` by default and are retained for recovery and review. Change the defaults with `--task-dir`, `--codex-model`, and `--codex-reasoning-effort`. A custom `--codex-dir` is passed to detached Codex as `CODEX_HOME`.
+
+The older `.ai-bridge` handoff commands remain available for compatibility and planning-only workflows. They are not the persistent CodingTask collaboration path.
+
+## How does Pro orchestrate multiple Codex workers?
+
+Ask for a larger outcome in ordinary Chat. Pro can persist an inert `propose_goal` contract, show its fingerprinted Goal card, and call `approve_goal` only after you accept that exact scope. Approval does not execute anything. `start_goal` launches dependency-ready isolated CodingTasks concurrently; Pro then refreshes their persisted state, reviews worker evidence, integrates accepted patches in dependency order, and records completion against every approved criterion.
+
+Choose `workspace_policy=isolated` to keep every integrated checkpoint private until a separately confirmed `apply_goal`. With `workspace_policy=live`, workers and Pro integration still stay isolated; after `review_goal`, a separate confirmed `project_goal` may copy only the exact returned integration HEAD/review fingerprint into source. Approval, integration, review, completion, and cancellation never imply projection.
+
+Live source effects preserve unrelated tracked, staged, and untracked changes. They use the approved base HEAD, per-path content/index CAS, a per-repository lock, and a durable journal so same-key retries can recover. An overlapping user edit is not overwritten; the projection becomes `recovery_required`. Symlinks, submodules, conflicted indexes, and non-regular files fail closed.
+
+`cancel_goal` never reverts source. `revert_goal_projection` is a separately confirmed, latest-applied-first (LIFO) operation with the same no-overwrite rules. Once the final projected checkpoint is complete, `apply_goal` adopts and seals that exact checkpoint with zero source writes. No Goal source effect stages, commits, pushes, merges, or opens a PR. Supervised workers get one turn with no automatic retries or worker network; trusted worker execution requires workspace writes and full bash, while project/revert/final apply are source-only and require workspace write mode, not bash or Codex.
+
+## Can a persistent Goal continue after I leave Chat?
+
+Yes, on a supported POSIX host, but only inside its approved mechanical execution envelope. A persistent Goal must be Isolated, have an empty Goal `commands` list, and disable network and every source effect. Each worker is approved for 1–4 semantic turns plus an aggregate 0–2 fresh retries across all turns; public proposal fields are `limits.max_turns_per_worker` and `limits.max_retries_per_worker`, and retries default to zero. If the turn budget is greater than one, the proposal must contain exactly one fewer ordered `continuation_intents` (at most three), and their prompts and order cannot change after approval. After separate propose → approve → start actions, the detached local scheduler launches dependency-ready workers concurrently. Intermediate successful turns remain private, cannot integrate or unlock dependencies, and advance only to the next already-approved intent on the same CodingTask, worktree, Codex thread, and session. Only the final authorized turn may produce one cumulative private integration. You can navigate away and later reconnect with passive `get_goal` / `review_goal`; the scheduler stops at `waiting_review` with `semantic_review` because only Pro can judge completion, and any later source action needs separate user authority outside this Persistent contract.
+
+The computer and detached scheduler process must stay running while work progresses; the CodexPro server must be available to start, control, or reconnect. This is not ChatGPT's built-in Scheduled Tasks and does not keep Pro reasoning while Chat is disconnected. Persistent start and resume still require explicit workspace-write and full-bash authority because the local Codex App Server can execute project commands. A continuation is a mandatory new semantic turn authorized in advance. A fresh retry repeats that turn's exact approved prompt under a new operation and does not consume a turn. Same-operation crash/reconnect recovery keeps the original operation and consumes no retry. Same-thread continuation appends to one persisted Codex thread; it does not guarantee that every previous token remains verbatim after context compaction.
+
+This two-turn flow is verified in [ordinary Chat](https://chatgpt.com/c/6a7cab4a-fa74-83ee-bb1c-5040c68524c0). Goal `goal_d96c4d1de3d6382cc4ebcc86` reused CodingTask `task_f1c84e9b39654c8aaebb2e6b` and one thread/session `019ff70a-ea6f-7a83-94d6-f81fe92527a2`; turn one remained non-integrated while turn two ran, and the final result was exactly one private integration commit before the scheduler stopped at `waiting_review` / `semantic_review`. The v16 card showed 2/2 turns and final-only integration. Leaving and reconnecting did not change source state, and duplicate passive status/review calls from the Chat host did not mutate or relaunch work.
+
+Pause, resume, and cancel are explicit durable controls. After pause takes effect, no new worker launch, integration, or dependency advancement starts; reconnecting or reading status does not resume it. Resume is idempotent against the same approved fingerprint and does not rerun completed work. Cancel fences active work and is terminal, but never reverts source or deletes retained worktrees.
+
+## When will a persistent Goal retry automatically?
+
+Only when the approved Persistent contract has a remaining retry budget and the
+runner positively proves one of the two `infra-pre-turn-v1` failures: App
+Server `app_server_startup / infrastructure / runner_start`, or
+`app_server_initialize_transport / infrastructure / app_server_initialize`.
+The outcome must be known, the failed attempt must have returned no new
+thread/session/turn identity and written no thread-establish or turn-start
+request, and HEAD, status, diff/stat, changed paths, modes, and index-visible
+Git state must exactly match the pre-attempt observation. Retry 1 waits 1
+second; retry 2 waits 5 seconds. A thread/session established by an earlier
+semantic turn stays bound as the new attempt's resume target. This schedule and
+allowlist are fingerprinted, not adaptive.
+
+CodexPro does **not** retry timeouts; model, tool, input, or approval failures;
+policy, path, content, provenance, validation, or identity conflicts;
+cancellation; any partial Git change; ambiguous response loss; or an unknown
+outcome. Pause/cancel wins over a pending backoff, and passive get/list/review
+never launches it. Every attempt is retained, while public status exposes only
+bounded safe summaries and hashes—not raw prompts, errors, logs, or private
+paths. The [real ordinary-Chat Phase 10 flow](https://chatgpt.com/c/6a7cc1a8-bd5c-83ee-9779-7e032776dadd) exercised one initialize-transport
+failure, a 1-second retry, then real Codex success on the second attempt; the
+final v17 card showed one semantic turn, two attempts, retries 1/1, and one
+private changed file.
+
+## Does Goal orchestration work on Windows?
+
+Not in this release. The complete Goal surface—not only Live projection—depends on a crash-safe GoalStore lock backed by POSIX advisory locking. CodexPro therefore hides all Goal tools on Windows and reports `server_config.goalOrchestration.supported=false`. Direct coding and standalone CodingTasks, including Direct↔Codex transitions, remain available.
+
+## Can CodexPro run a benchmark longer than 180 seconds?
+
+Yes. Keep foreground `bash` for bounded commands and call `start_background_job` for a long benchmark or test suite. It returns a durable job id quickly; `wait_for_background_job`, `get_background_job`, and `list_background_jobs` recover status after a ChatGPT/MCP disconnect or CodexPro restart. Use `cancel_background_job` only when you explicitly want to stop it.
+
+Every start requires a stable `job_key`. Repeating the same key and command returns the existing job instead of launching twice. CodexPro does not retry failures or advance benchmark phases automatically. The command still follows safe/full bash policy and any required bash session label.
+
+For identity-sensitive work, also pass the full `expected_git_head` and `require_clean_worktree: true`. They are checked twice and become part of the idempotent execution contract. If a service environment resolves a different Codex installation than your terminal, restart it with `--codex-bin /absolute/path/to/codex` and verify `codexBin` through `server_config`.
+
 ## Can CodexPro bind bash to a specific session id?
 
 CodexPro cannot attach to, read, or execute inside a specific Codex app conversation or terminal session.

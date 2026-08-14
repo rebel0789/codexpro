@@ -129,7 +129,7 @@ function isAllowedPackageScript(command: string): boolean {
   return packageScriptPattern.test(command);
 }
 
-function assertSafeCommand(config: CodexProConfig, command: string): void {
+export function assertBashCommandAllowed(config: CodexProConfig, command: string): void {
   if (config.bashMode === "off") {
     throw new CodexProError("bash tool is disabled. Start with CODEXPRO_BASH_MODE=safe or CODEXPRO_BASH_MODE=full to enable it.");
   }
@@ -154,7 +154,7 @@ function assertSafeCommand(config: CodexProConfig, command: string): void {
   }
 }
 
-function assertBashSession(config: CodexProConfig, sessionId?: string): string | undefined {
+export function assertBashSession(config: CodexProConfig, sessionId?: string): string | undefined {
   const requested = sessionId?.trim();
   if (!config.bashSessionId) {
     if (config.requireBashSession) {
@@ -199,7 +199,7 @@ export function resolveUsableHomeDir(env: NodeJS.ProcessEnv = process.env): stri
 }
 
 export function makeRestrictedBashEnv(
-  config: CodexProConfig,
+  config: Pick<CodexProConfig, "inheritEnv">,
   env: NodeJS.ProcessEnv = process.env
 ): NodeJS.ProcessEnv {
   if (config.inheritEnv) {
@@ -231,11 +231,21 @@ export function makeRestrictedBashEnv(
   return restricted;
 }
 
-function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
-  return makeRestrictedBashEnv(config);
+export function makeBashEnv(
+  config: Pick<CodexProConfig, "inheritEnv" | "codexBin">,
+  env: NodeJS.ProcessEnv = process.env
+): NodeJS.ProcessEnv {
+  const base = makeRestrictedBashEnv(config, env);
+  if (!config.codexBin) return base;
+  const codexDir = path.dirname(config.codexBin);
+  const currentPath = base.PATH ?? "";
+  const pathEntries = currentPath.split(path.delimiter).filter(Boolean);
+  base.PATH = [codexDir, ...pathEntries.filter((entry) => entry !== codexDir)].join(path.delimiter);
+  base.CODEXPRO_CODEX_BIN = config.codexBin;
+  return base;
 }
 
-function bashExecutable(): string {
+export function bashExecutable(): string {
   return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
 }
 
@@ -273,16 +283,16 @@ export async function runBash(
 ): Promise<BashResult> {
   if (!command?.trim()) throw new CodexProError("command is required.");
   const bashSessionId = assertBashSession(config, options.sessionId);
-  assertSafeCommand(config, command);
+  assertBashCommandAllowed(config, command);
   const cwdResolved = guard.resolve(workspace, options.cwd ?? ".");
   const cwd = cwdResolved.absPath;
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 30_000, config.maxBashTimeoutMs));
   const start = Date.now();
 
   return new Promise((resolve, reject) => {
-    const child = spawn(bashExecutable(), ["-lc", command], {
+    const child = spawn(bashExecutable(), ["-c", command], {
       cwd,
-      env: makeEnv(config),
+      env: makeBashEnv(config),
       stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
       windowsHide: true

@@ -6,6 +6,7 @@ import { DEFAULT_ANALYSIS_LIMITS, type AnalysisLimits } from "./analysis/types.j
 export type BashMode = "off" | "safe" | "full";
 export type BashTranscriptMode = "compact" | "full";
 export type CodexSessionsMode = "off" | "metadata" | "read";
+export type CodexReasoningEffort = "low" | "medium" | "high" | "xhigh";
 export type WriteMode = "off" | "handoff" | "workspace";
 export type ToolMode = "minimal" | "standard" | "full";
 export const MIN_HTTP_TOKEN_BYTES = 24;
@@ -24,6 +25,9 @@ export interface CodexProConfig {
   requireBashSession: boolean;
   codexSessions: CodexSessionsMode;
   codexDir: string;
+  codexBin?: string;
+  codexModel: string;
+  codexReasoningEffort: CodexReasoningEffort;
   writeMode: WriteMode;
   toolMode: ToolMode;
   inheritEnv: boolean;
@@ -35,6 +39,12 @@ export interface CodexProConfig {
   maxSearchResults: number;
   maxHttpSessions: number;
   httpSessionTtlMs: number;
+  backgroundJobDir: string;
+  backgroundJobDefaultTimeoutMs: number;
+  backgroundJobMaxLogBytes: number;
+  codingTaskDir: string;
+  codingTaskDefaultTimeoutMs: number;
+  codingTaskMaxLogBytes: number;
   blockedGlobs: string[];
   contextDir: string;
   toolCards: boolean;
@@ -148,6 +158,25 @@ function toRealDir(input: string): string {
   return fs.realpathSync.native(resolved);
 }
 
+function executableFrom(value: string | undefined): string | undefined {
+  const requested = value?.trim();
+  if (!requested) return undefined;
+  const resolved = path.resolve(expandHome(requested));
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`CODEXPRO_CODEX_BIN does not exist: ${resolved}`);
+  }
+  const stat = fs.statSync(resolved);
+  if (!stat.isFile()) {
+    throw new Error(`CODEXPRO_CODEX_BIN is not a file: ${resolved}`);
+  }
+  try {
+    fs.accessSync(resolved, process.platform === "win32" ? fs.constants.F_OK : fs.constants.X_OK);
+  } catch {
+    throw new Error(`CODEXPRO_CODEX_BIN is not executable: ${resolved}`);
+  }
+  return fs.realpathSync.native(resolved);
+}
+
 function numberFrom(value: string | undefined, fallback: number, min: number, max: number): number {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -232,6 +261,47 @@ function contextDirFrom(value: string | undefined): string {
   return normalized;
 }
 
+function dedicatedStateDirFrom(value: string | undefined, fallback: string, envName: string): string {
+  const requested = path.resolve(expandHome(value?.trim() || fallback));
+  const missingParts: string[] = [];
+  let existing = requested;
+  while (!fs.existsSync(existing)) {
+    const parent = path.dirname(existing);
+    if (parent === existing) break;
+    missingParts.unshift(path.basename(existing));
+    existing = parent;
+  }
+  const resolved = path.join(fs.realpathSync.native(existing), ...missingParts);
+  const parsed = path.parse(resolved);
+  const realHome = fs.realpathSync.native(os.homedir());
+  if (resolved === parsed.root || resolved === realHome) {
+    throw new Error(`${envName} must be a dedicated directory, not the filesystem root or home directory.`);
+  }
+  return resolved;
+}
+
+function codexModelFrom(value: string | undefined): string {
+  const model = value?.trim() || "gpt-5.6-sol";
+  if (model.length > 160 || !/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/.test(model)) {
+    throw new Error("CODEXPRO_CODEX_MODEL must be a valid model identifier using letters, numbers, dot, underscore, colon, slash, or dash.");
+  }
+  return model;
+}
+
+function codexReasoningEffortFrom(value: string | undefined): CodexReasoningEffort {
+  const normalized = value?.trim();
+  if (normalized === "low" || normalized === "medium" || normalized === "high" || normalized === "xhigh") return normalized;
+  if (normalized) {
+    throw new Error("CODEXPRO_CODEX_REASONING_EFFORT must be one of: low, medium, high, xhigh.");
+  }
+  return "high";
+}
+
+function isInsidePath(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
 function boolFrom(value: string | undefined, fallback = false): boolean {
   if (value === undefined) return fallback;
   return ["1", "true", "yes", "y", "on"].includes(value.toLowerCase());
@@ -269,6 +339,7 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   const bashSessionArg = typeof args["bash-session"] === "string" ? args["bash-session"] : undefined;
   const codexSessionsArg = typeof args["codex-sessions"] === "string" ? args["codex-sessions"] : undefined;
   const codexDirArg = typeof args["codex-dir"] === "string" ? args["codex-dir"] : undefined;
+  const codexBinArg = typeof args["codex-bin"] === "string" ? args["codex-bin"] : undefined;
   const requireBashSessionArg =
     args["require-bash-session"] === true
       ? "true"
@@ -304,6 +375,27 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
   if (requireBashSession && !bashSessionId) {
     throw new Error("CODEXPRO_REQUIRE_BASH_SESSION requires CODEXPRO_BASH_SESSION_ID or --bash-session.");
   }
+  const backgroundJobDir = dedicatedStateDirFrom(
+    process.env.CODEXPRO_JOB_DIR,
+    path.join(os.homedir(), ".codexpro", "jobs"),
+    "CODEXPRO_JOB_DIR"
+  );
+  const codingTaskDir = dedicatedStateDirFrom(
+    process.env.CODEXPRO_TASK_DIR,
+    path.join(os.homedir(), ".codexpro", "tasks"),
+    "CODEXPRO_TASK_DIR"
+  );
+  for (const [envName, stateDir] of [
+    ["CODEXPRO_JOB_DIR", backgroundJobDir],
+    ["CODEXPRO_TASK_DIR", codingTaskDir]
+  ] as const) {
+    const containingRoot = allowedRoots.find((allowedRoot) => isInsidePath(allowedRoot, stateDir));
+    if (containingRoot) {
+      throw new Error(
+        `${envName} must stay outside every allowed workspace so durable state cannot pollute or leak through the repo: ${stateDir} is inside ${containingRoot}.`
+      );
+    }
+  }
 
   return {
     defaultRoot,
@@ -319,6 +411,9 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     requireBashSession,
     codexSessions: codexSessionsFrom(codexSessionsArg ?? process.env.CODEXPRO_CODEX_SESSIONS),
     codexDir: expandHome(codexDirArg || process.env.CODEXPRO_CODEX_DIR || path.join(os.homedir(), ".codex")),
+    codexBin: executableFrom(codexBinArg ?? process.env.CODEXPRO_CODEX_BIN),
+    codexModel: codexModelFrom(process.env.CODEXPRO_CODEX_MODEL),
+    codexReasoningEffort: codexReasoningEffortFrom(process.env.CODEXPRO_CODEX_REASONING_EFFORT),
     writeMode: writeModeFrom(writeArg ?? process.env.CODEXPRO_WRITE_MODE),
     toolMode: toolModeFrom(toolModeArg ?? process.env.CODEXPRO_TOOL_MODE),
     inheritEnv: process.env.CODEXPRO_INHERIT_ENV === "1",
@@ -331,6 +426,32 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     maxSearchResults: numberFrom(process.env.CODEXPRO_MAX_SEARCH_RESULTS, 200, 5, 2_000),
     maxHttpSessions: numberFrom(process.env.CODEXPRO_MAX_HTTP_SESSIONS, 64, 1, 512),
     httpSessionTtlMs: numberFrom(process.env.CODEXPRO_HTTP_SESSION_TTL_MS, 30 * 60_000, 60_000, 24 * 60 * 60_000),
+    backgroundJobDir,
+    backgroundJobDefaultTimeoutMs: numberFrom(
+      process.env.CODEXPRO_BACKGROUND_JOB_TIMEOUT_MS,
+      6 * 60 * 60_000,
+      1_000,
+      24 * 60 * 60_000
+    ),
+    backgroundJobMaxLogBytes: numberFrom(
+      process.env.CODEXPRO_BACKGROUND_JOB_MAX_LOG_BYTES,
+      10 * 1024 * 1024,
+      64 * 1024,
+      100 * 1024 * 1024
+    ),
+    codingTaskDir,
+    codingTaskDefaultTimeoutMs: numberFrom(
+      process.env.CODEXPRO_CODING_TASK_TIMEOUT_MS,
+      6 * 60 * 60_000,
+      1_000,
+      24 * 60 * 60_000
+    ),
+    codingTaskMaxLogBytes: numberFrom(
+      process.env.CODEXPRO_CODING_TASK_MAX_LOG_BYTES,
+      10 * 1024 * 1024,
+      64 * 1024,
+      100 * 1024 * 1024
+    ),
     blockedGlobs: [...DEFAULT_BLOCKED_GLOBS, ...extraBlockedGlobs],
     contextDir: contextDirFrom(process.env.CODEXPRO_CONTEXT_DIR),
     toolCards: boolFrom(toolCardsArg ?? process.env.CODEXPRO_TOOL_CARDS, false),

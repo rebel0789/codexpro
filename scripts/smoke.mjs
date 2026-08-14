@@ -1,7 +1,14 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { goalLiveProjectionSupported, goalOrchestrationSupported } from '../dist/server.js';
+
+if (goalOrchestrationSupported('win32') !== false || goalLiveProjectionSupported('win32') !== false || goalOrchestrationSupported(process.platform) !== (process.platform !== 'win32')) {
+  throw new Error('Goal platform capability reporting is inconsistent.');
+}
+const goalToolNames = new Set(['propose_goal', 'get_goal', 'list_goals', 'approve_goal', 'publish_goal_blackboard', 'start_goal', 'refresh_goal', 'integrate_goal_work', 'review_goal', 'project_goal', 'revert_goal_projection', 'pause_goal', 'resume_goal', 'cancel_goal', 'complete_goal', 'apply_goal']);
 
 function encode(message) {
   return `${JSON.stringify(message)}\n`;
@@ -78,6 +85,12 @@ assertCommand(['dist/http.js', '--help'], 'CodexPro MCP HTTP server');
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-'));
 const alternateWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-alternate-'));
+const smokeStateRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-state-')));
+const smokeTaskRoot = path.join(smokeStateRoot, 'tasks');
+const smokeJobRoot = path.join(smokeStateRoot, 'jobs');
+process.env.CODEXPRO_TASK_DIR = smokeTaskRoot;
+process.env.CODEXPRO_JOB_DIR = smokeJobRoot;
+process.once('exit', () => rmSync(smokeStateRoot, { recursive: true, force: true }));
 await fs.writeFile(path.join(alternateWorkspace, 'selected.txt'), 'alternate workspace\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'other.txt'), 'keep\n', 'utf8');
@@ -228,18 +241,102 @@ const client = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--al
   }
 });
 
-await client.request('initialize', {
+const initialized = await client.request('initialize', {
   protocolVersion: '2024-11-05',
   capabilities: {},
   clientInfo: { name: 'codexpro-smoke', version: '0.1.0' }
 });
+const serverInstructionText = initialized.instructions ?? '';
+if (/Persistent Goals[^.]*zero-retry/i.test(serverInstructionText) || !/1-4 upfront-approved semantic turns/i.test(serverInstructionText) || !/0-2 total fresh retries per work item/i.test(serverInstructionText) || !/Same-operation recovery is not a retry/i.test(serverInstructionText) || !/scheduler never invents or mutates/i.test(serverInstructionText) || !/only after the final authorized turn/i.test(serverInstructionText)) {
+  throw new Error(`server instructions did not describe Phase 10 turn and retry authority: ${serverInstructionText}`);
+}
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'import_file', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'import_file', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context', 'propose_goal', 'get_goal', 'list_goals', 'approve_goal', 'publish_goal_blackboard', 'refresh_goal', 'integrate_goal_work', 'review_goal', 'project_goal', 'revert_goal_projection', 'pause_goal', 'cancel_goal', 'complete_goal', 'apply_goal'].filter((name) => goalOrchestrationSupported() || !goalToolNames.has(name))) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
-const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
+const goalPlatformConfig = await client.request('tools/call', { name: 'server_config', arguments: {} });
+if (goalPlatformConfig.structuredContent.goalOrchestration?.supported !== goalOrchestrationSupported() || goalPlatformConfig.structuredContent.goalLiveProjection?.supported !== goalLiveProjectionSupported()) {
+  throw new Error(`server_config did not report Goal platform capability: ${JSON.stringify(goalPlatformConfig.structuredContent)}`);
+}
+if (goalPlatformConfig.structuredContent.goalScheduling?.persistentSupported !== goalOrchestrationSupported() || goalPlatformConfig.structuredContent.goalScheduling?.executionEnabled !== false || goalPlatformConfig.structuredContent.goalScheduling?.usesShell !== false || goalPlatformConfig.structuredContent.goalScheduling?.refreshRelaunches !== false) {
+  throw new Error(`server_config did not honestly report persistent scheduling gates: ${JSON.stringify(goalPlatformConfig.structuredContent.goalScheduling)}`);
+}
+if (goalOrchestrationSupported() && (goalPlatformConfig.structuredContent.goalScheduling?.persistentContract?.maxRetriesPerWorker !== '0-2 total fresh retries per work item' || JSON.stringify(goalPlatformConfig.structuredContent.goalScheduling?.persistentContract?.retryBackoffMs) !== '[1000,5000]' || goalPlatformConfig.structuredContent.goalScheduling?.persistentContract?.retryAlgorithm !== 'infra-pre-turn-v1' || JSON.stringify(goalPlatformConfig.structuredContent.goalScheduling?.persistentContract?.retryableFailures) !== JSON.stringify([
+  { code: 'app_server_startup', category: 'infrastructure', phase: 'runner_start', outcomeKnown: true, turnStarted: false },
+  { code: 'app_server_initialize_transport', category: 'infrastructure', phase: 'app_server_initialize', outcomeKnown: true, turnStarted: false }
+]))) {
+  throw new Error(`server_config did not expose the fixed retry contract: ${JSON.stringify(goalPlatformConfig.structuredContent.goalScheduling?.persistentContract)}`);
+}
+if (toolNames.includes('start_goal') || toolNames.includes('resume_goal')) {
+  throw new Error(`execution-gated Goal tools leaked under bash=safe: ${toolNames.filter((name) => ['start_goal', 'resume_goal'].includes(name)).join(', ')}`);
+}
+for (const passiveOrControl of ['propose_goal', 'approve_goal', 'get_goal', 'list_goals', 'review_goal', 'refresh_goal', 'pause_goal', 'cancel_goal']) {
+  if (goalOrchestrationSupported() && !toolNames.includes(passiveOrControl)) throw new Error(`Goal passive/control tool was hidden with execution disabled: ${passiveOrControl}`);
+}
+const proposeDescriptor = tools.tools.find((tool) => tool.name === 'propose_goal');
+if (goalOrchestrationSupported() && !JSON.stringify(proposeDescriptor?.inputSchema).includes('persistent')) {
+  throw new Error(`propose_goal schema did not advertise persistent policy: ${JSON.stringify(proposeDescriptor?.inputSchema)}`);
+}
+const proposeSchemaText = JSON.stringify(proposeDescriptor?.inputSchema);
+if (goalOrchestrationSupported() && (!proposeSchemaText.includes('continuation_intents') || !proposeSchemaText.includes('intent_id') || !proposeSchemaText.includes('max_turns_per_worker') || !proposeSchemaText.includes('maximum":4') || !proposeSchemaText.includes('max_retries_per_worker') || !proposeSchemaText.includes('maximum":2'))) {
+  throw new Error(`propose_goal schema did not expose bounded semantic turns and the two-retry cap: ${proposeSchemaText}`);
+}
+const serverSource = await fs.readFile(path.resolve('src/server.ts'), 'utf8');
+const publicFailureStart = serverSource.indexOf('failure: attempt.failure ? {');
+const publicFailureEnd = serverSource.indexOf('} : null', publicFailureStart);
+const publicFailureProjection = publicFailureStart >= 0 && publicFailureEnd > publicFailureStart
+  ? serverSource.slice(publicFailureStart, publicFailureEnd)
+  : '';
+if (!publicFailureProjection || publicFailureProjection.includes('summary:') || !publicFailureProjection.includes('summarySha256:') || !publicFailureProjection.includes('outcomeKnown:') || !publicFailureProjection.includes('turnStarted:')) {
+  throw new Error(`public attempt failure projection must omit raw summary/private paths while retaining tuple and summary hash authority: ${publicFailureProjection}`);
+}
+const goalStructuredStart = serverSource.indexOf('function goalStructured(');
+const goalStructuredEnd = serverSource.indexOf('\nfunction goalSchedulerStructured(', goalStructuredStart);
+const goalStructuredProjection = goalStructuredStart >= 0 && goalStructuredEnd > goalStructuredStart
+  ? serverSource.slice(goalStructuredStart, goalStructuredEnd)
+  : '';
+if (!goalStructuredProjection || goalStructuredProjection.includes('source_root:') || goalStructuredProjection.includes('integration_worktree_root:')) {
+  throw new Error('public Goal structured results must not expose source or private integration absolute paths');
+}
+if (!serverSource.includes('review: publicReview') || !serverSource.includes('const { worktreeRoot: _privateWorktreeRoot, ...publicReview } = review;')) {
+  throw new Error('review_goal must omit the private integration worktree root from its public review snapshot');
+}
+const publicGoalProjectionStart = serverSource.indexOf('function publicGoalWork(');
+const publicGoalProjectionEnd = serverSource.indexOf('\nfunction goalText(', publicGoalProjectionStart);
+const publicGoalProjectionSource = publicGoalProjectionStart >= 0 && publicGoalProjectionEnd > publicGoalProjectionStart
+  ? serverSource.slice(publicGoalProjectionStart, publicGoalProjectionEnd)
+  : '';
+if (!publicGoalProjectionSource || /\berror\s*:/.test(publicGoalProjectionSource) || publicGoalProjectionSource.includes('safeGoalSummary(runtime?.error') || !publicGoalProjectionSource.includes('...publicGoalError(work.error)') || !publicGoalProjectionSource.includes('error_sha256: publicGoalError(runtime?.error')) {
+  throw new Error('public Goal status projections must expose only error presence, never raw error text or private paths');
+}
+const goalMutationErrorStart = serverSource.indexOf('async function goalMutationErrorResult(');
+const goalMutationErrorEnd = serverSource.indexOf('\nfunction boundedGoalText(', goalMutationErrorStart);
+const goalMutationErrorProjection = goalMutationErrorStart >= 0 && goalMutationErrorEnd > goalMutationErrorStart
+  ? serverSource.slice(goalMutationErrorStart, goalMutationErrorEnd)
+  : '';
+if (!goalMutationErrorProjection.includes('projection: projection ? publicGoalProjection(projection) : null') || goalMutationErrorProjection.includes('projection: projection ?? null')) {
+  throw new Error('Goal mutation failures must not reattach the raw persisted projection after building the safe Goal projection');
+}
+if (!goalMutationErrorProjection.includes('const mutationError = publicGoalError(message)') || !goalMutationErrorProjection.includes('mutation_error: mutationError') || !goalMutationErrorProjection.includes('Detailed local error text remains private') || goalMutationErrorProjection.includes('text: message') || goalMutationErrorProjection.includes('error: message') || goalMutationErrorProjection.includes('return errorResult(error)')) {
+  throw new Error('Goal mutation failures must expose only a generic message plus error presence/hash, never raw local error text or paths');
+}
+if (serverSource.includes('projection: result.projection,')) {
+  throw new Error('Goal projection success results must use the same safe public projection instead of returning persisted error text');
+}
+const publicProjectionStart = serverSource.indexOf('function publicGoalProjection(');
+const publicProjectionEnd = serverSource.indexOf('\nfunction publicGoalWork(', publicProjectionStart);
+const publicProjectionSource = publicProjectionStart >= 0 && publicProjectionEnd > publicProjectionStart
+  ? serverSource.slice(publicProjectionStart, publicProjectionEnd)
+  : '';
+if (!publicProjectionSource.includes('changedPaths: projection.changedPaths.slice()') || !publicProjectionSource.includes('changedPathCount: projection.changedPaths.length')) {
+  throw new Error('safe Goal projections must preserve exact policy-validated relative changed-path evidence and its authoritative count');
+}
+if (tools.tools.find((tool) => tool.name === 'approve_goal')?.annotations?.destructiveHint !== false || tools.tools.find((tool) => tool.name === 'cancel_goal')?.annotations?.destructiveHint !== true) {
+  throw new Error('Goal approval/cancel annotations do not match their actual effects.');
+}
+const toolCardUri = 'ui://widget/codexpro-tool-card-v17.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
   const meta = toolsByName.get(name)?._meta ?? {};
@@ -259,8 +356,33 @@ async function expectToolError(name, args, pattern, targetClient = client) {
     throw new Error(`${name} error did not match ${pattern}: ${text}`);
   }
 }
+if (goalOrchestrationSupported()) {
+  await expectToolError('codexpro', { action: 'start_goal', args: { goal_id: `goal_${'0'.repeat(24)}`, expected_revision: 1, start_key: 'hidden-start' } }, /unknown|unavailable|not available|not registered/i);
+}
 for (const visualTool of toolNames) {
   if (hasWidgetMeta(visualTool) || hasToolCardStatusMeta(visualTool)) throw new Error(`${visualTool} exposed widget metadata while CODEXPRO_TOOL_CARDS is off`);
+}
+const executionInventoryClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'full', '--tool-mode', 'full'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_WRITE_MODE: 'workspace', CODEXPRO_TOOL_CARDS: '0' }
+});
+try {
+  await executionInventoryClient.request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'codexpro-goal-execution-inventory', version: '0.1.0' } });
+  executionInventoryClient.notify('notifications/initialized');
+  const executionInventory = await executionInventoryClient.request('tools/list', {});
+  const executionTools = new Map(executionInventory.tools.map((tool) => [tool.name, tool]));
+  if (goalOrchestrationSupported() && (!executionTools.has('start_goal') || !executionTools.has('resume_goal'))) throw new Error('Goal execution tools were hidden despite the explicit full execution gate.');
+  if (
+    goalOrchestrationSupported() &&
+    (executionTools.get('start_goal')?.annotations?.readOnlyHint !== false ||
+      executionTools.get('start_goal')?.annotations?.destructiveHint !== false ||
+      executionTools.get('resume_goal')?.annotations?.readOnlyHint !== false ||
+      executionTools.get('resume_goal')?.annotations?.destructiveHint !== false)
+  ) {
+    throw new Error('Goal start/resume annotations did not report non-destructive private execution mutations.');
+  }
+} finally {
+  executionInventoryClient.close();
 }
 const cardClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe', '--tool-mode', 'full'], {
   cwd: path.resolve('.'),
@@ -274,6 +396,7 @@ await cardClient.request('initialize', {
 cardClient.notify('notifications/initialized');
 const cardTools = await cardClient.request('tools/list', {});
 const cardRenderToolNames = new Set([
+  'codexpro',
   'open_current_workspace',
   'open_workspace',
   'workspace_snapshot',
@@ -282,7 +405,31 @@ const cardRenderToolNames = new Set([
   'git_status',
   'handoff_to_agent',
   'handoff_to_codex',
-  'bash'
+  'bash',
+  'create_coding_task',
+  'get_coding_task',
+  'list_coding_tasks',
+  'transition_coding_task',
+  'run_coding_task',
+  'followup_coding_task',
+  'cancel_coding_task',
+  'review_coding_task',
+  'propose_goal',
+  'get_goal',
+  'list_goals',
+  'approve_goal',
+  'publish_goal_blackboard',
+  'start_goal',
+  'refresh_goal',
+  'integrate_goal_work',
+  'review_goal',
+  'project_goal',
+  'revert_goal_projection',
+  'pause_goal',
+  'resume_goal',
+  'cancel_goal',
+  'complete_goal',
+  'apply_goal'
 ]);
 for (const tool of cardTools.tools) {
   const meta = tool._meta ?? {};
@@ -294,6 +441,25 @@ for (const tool of cardTools.tools) {
   }
 }
 const cardOpened = await cardClient.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+const calledToolTemplateUri = cardTools.tools.find((tool) => tool.name === 'open_current_workspace')?._meta?.ui?.resourceUri;
+if (cardOpened.isError || calledToolTemplateUri !== toolCardUri) {
+  throw new Error(`card tool call did not retain its declared template: ${JSON.stringify({ calledToolTemplateUri, cardOpened })}`);
+}
+const calledToolTemplate = await cardClient.request('resources/read', { uri: calledToolTemplateUri });
+const calledToolTemplateContent = calledToolTemplate.contents?.[0];
+if (calledToolTemplateContent?.uri !== calledToolTemplateUri || calledToolTemplateContent?.mimeType !== 'text/html;profile=mcp-app' || !calledToolTemplateContent?.text?.includes('ui/notifications/tool-result')) {
+  throw new Error(`declared tool template was not fetchable through the intended MCP resource flow: ${JSON.stringify(calledToolTemplate)}`);
+}
+if (calledToolTemplateContent?._meta?.ui?.domain || calledToolTemplateContent?._meta?.['openai/widgetDomain']) {
+  throw new Error(`implicit documentation origin leaked into the component template: ${JSON.stringify(calledToolTemplateContent?._meta)}`);
+}
+const wrappedCardOpened = await cardClient.request('tools/call', {
+  name: 'codexpro',
+  arguments: { action: 'open_current_workspace', args: { include_tree: false } }
+});
+if (wrappedCardOpened.structuredContent.codexpro_tool !== 'open_current_workspace' || wrappedCardOpened.structuredContent.codexpro_super_action !== 'open_current_workspace') {
+  throw new Error(`supertool card result lost wrapped action identity: ${JSON.stringify(wrappedCardOpened.structuredContent)}`);
+}
 const cardSearch = await cardClient.request('tools/call', {
   name: 'search',
   arguments: { workspace_id: cardOpened.structuredContent.workspace_id, query: 'read', path: 'demo.txt', max_results: 5 }
@@ -364,7 +530,17 @@ const resources = await client.request('resources/list', {});
 const toolCard = resources.resources.find((resource) => resource.uri === toolCardUri);
 if (!toolCard) throw new Error(`missing tool-card resource: ${toolCardUri}`);
 if (toolCard.mimeType !== 'text/html;profile=mcp-app') throw new Error(`unexpected tool-card mime type: ${toolCard.mimeType}`);
-const legacyToolCardUris = ['ui://widget/codexpro-tool-card-v9.html', 'ui://widget/codexpro-tool-card-v8.html'];
+const legacyToolCardUris = [
+  'ui://widget/codexpro-tool-card-v16.html',
+  'ui://widget/codexpro-tool-card-v15.html',
+  'ui://widget/codexpro-tool-card-v14.html',
+  'ui://widget/codexpro-tool-card-v13.html',
+  'ui://widget/codexpro-tool-card-v12.html',
+  'ui://widget/codexpro-tool-card-v11.html',
+  'ui://widget/codexpro-tool-card-v10.html',
+  'ui://widget/codexpro-tool-card-v9.html',
+  'ui://widget/codexpro-tool-card-v8.html'
+];
 for (const legacyToolCardUri of legacyToolCardUris) {
   const legacyToolCard = resources.resources.find((resource) => resource.uri === legacyToolCardUri);
   if (!legacyToolCard) throw new Error(`missing legacy tool-card resource: ${legacyToolCardUri}`);
@@ -393,7 +569,7 @@ for (const legacyToolCardUri of legacyToolCardUris) {
     throw new Error('legacy tool-card widget resource did not preserve requested URI');
   }
   if (!(legacyWidget.contents?.[0]?.text ?? '').includes('Result unavailable')) {
-    throw new Error('legacy tool-card widget resource did not serve v10 HTML');
+    throw new Error('legacy tool-card widget resource did not serve current HTML');
   }
 }
 const current = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
@@ -486,6 +662,41 @@ const inventory = await client.request('tools/call', { name: 'codexpro_inventory
 if (inventory.structuredContent.codexpro_tool !== 'codexpro_inventory') throw new Error('inventory result was not tagged for widget rendering');
 const opened = await client.request('tools/call', { name: 'open_workspace', arguments: { root: tmp, include_tree: true } });
 const ws = opened.structuredContent.workspace_id;
+if (goalOrchestrationSupported()) {
+  const retryProposalBase = {
+    workspace_id: ws,
+    title: 'Retry policy smoke',
+    goal: 'Verify the exact bounded persistent retry contract.',
+    completion_criteria: ['The private checkpoint is ready for Pro review.'],
+    execution_policy: 'persistent',
+    workspace_policy: 'isolated',
+    limits: { max_turns_per_worker: 1, max_retries_per_worker: 2 },
+    permissions: { file_globs: ['src/**'], commands: [], network: false, source_effects: { apply: false, commit: false, push: false, draft_pr: false } },
+    work: [{ work_id: 'work_retry_policy', title: 'Retry policy', goal: 'Exercise the exact approved task once.', acceptance_criteria: ['The task result is bounded.'], continuation_intents: [] }]
+  };
+  const persistentRetryProposal = await client.request('tools/call', { name: 'propose_goal', arguments: { ...retryProposalBase, goal_key: 'phase10-persistent-retry-policy' } });
+  const retryPolicy = persistentRetryProposal.structuredContent?.goal?.retryPolicy;
+  if (persistentRetryProposal.isError || retryPolicy?.algorithm !== 'infra-pre-turn-v1' || JSON.stringify(retryPolicy?.backoffMs) !== '[1000,5000]' || !/^[0-9a-f]{64}$/.test(retryPolicy?.fingerprint ?? '') || JSON.stringify(retryPolicy?.retryableFailures) !== JSON.stringify([
+    { code: 'app_server_startup', category: 'infrastructure', phase: 'runner_start', outcomeKnown: true, turnStarted: false },
+    { code: 'app_server_initialize_transport', category: 'infrastructure', phase: 'app_server_initialize', outcomeKnown: true, turnStarted: false }
+  ])) {
+    throw new Error(`persistent retry proposal did not return the authoritative retry policy: ${JSON.stringify(persistentRetryProposal.structuredContent)}`);
+  }
+  const isolatedGoalState = path.join(smokeTaskRoot, 'goals', persistentRetryProposal.structuredContent.goal_id, 'state.json');
+  if (!await fs.stat(isolatedGoalState).then((stat) => stat.isFile(), () => false)) {
+    throw new Error(`general smoke did not isolate durable Goal state under CODEXPRO_TASK_DIR: ${isolatedGoalState}`);
+  }
+  const goalsBeforeRejectedRetry = await client.request('tools/call', { name: 'list_goals', arguments: { limit: 100 } });
+  await expectToolError('propose_goal', { ...retryProposalBase, goal_key: 'phase10-supervised-retry-rejected', execution_policy: 'supervised' }, /Supervised Goals support exactly one semantic turn, zero retries/i);
+  const goalsAfterRejectedRetry = await client.request('tools/call', { name: 'list_goals', arguments: { limit: 100 } });
+  if (JSON.stringify(goalsAfterRejectedRetry.structuredContent) !== JSON.stringify(goalsBeforeRejectedRetry.structuredContent)) {
+    throw new Error('rejected supervised retry proposal mutated durable Goal state');
+  }
+  const compactGoalList = JSON.stringify(goalsAfterRejectedRetry.structuredContent);
+  if (!compactGoalList.includes('retriesUsed') || compactGoalList.includes('retryPolicy') || compactGoalList.includes('attempts') || compactGoalList.includes('Verify the exact bounded persistent retry contract.')) {
+    throw new Error(`list_goals did not preserve the compact retry-count-only contract: ${compactGoalList}`);
+  }
+}
 const viewedImage = await client.request('tools/call', { name: 'view_image', arguments: { workspace_id: ws, path: 'pixel.png' } });
 const imagePart = viewedImage.content?.find?.((part) => part.type === 'image');
 if (!imagePart?.data || imagePart.mimeType !== 'image/png' || viewedImage.structuredContent.width !== 1 || viewedImage.structuredContent.height !== 1) {
@@ -1214,7 +1425,7 @@ await handoffWriteClient.request('initialize', {
 handoffWriteClient.notify('notifications/initialized');
 const handoffWriteTools = await handoffWriteClient.request('tools/list', {});
 const handoffWriteToolNames = handoffWriteTools.tools.map((tool) => tool.name);
-for (const hiddenWriteTool of ['write', 'edit', 'apply_patch', 'import_file']) {
+for (const hiddenWriteTool of ['write', 'edit', 'apply_patch', 'import_file', 'project_goal', 'revert_goal_projection', 'apply_goal']) {
   if (handoffWriteToolNames.includes(hiddenWriteTool)) {
     throw new Error(`--write handoff should not advertise ${hiddenWriteTool} tool; got ${handoffWriteToolNames.join(', ')}`);
   }
@@ -1227,7 +1438,7 @@ const handoffSelfTest = await handoffWriteClient.request('tools/call', { name: '
 if (handoffSelfTest.structuredContent.status === 'fail') {
   throw new Error(`codexpro_self_test failed under --write handoff: ${JSON.stringify(handoffSelfTest.structuredContent)}`);
 }
-for (const hiddenWriteTool of ['write', 'edit', 'apply_patch', 'import_file']) {
+for (const hiddenWriteTool of ['write', 'edit', 'apply_patch', 'import_file', 'project_goal', 'revert_goal_projection', 'apply_goal']) {
   if (handoffSelfTest.structuredContent.expected_tools?.includes?.(hiddenWriteTool) || handoffSelfTest.structuredContent.registered_tools?.includes?.(hiddenWriteTool)) {
     throw new Error(`codexpro_self_test exposed ${hiddenWriteTool} under --write handoff: ${JSON.stringify(handoffSelfTest.structuredContent)}`);
   }
@@ -1249,9 +1460,17 @@ const noBashToolNames = noBashTools.tools.map((tool) => tool.name);
 if (noBashToolNames.includes('bash')) {
   throw new Error(`--bash off should not advertise bash tool; got ${noBashToolNames.join(', ')}`);
 }
+for (const sourceEffectTool of ['project_goal', 'revert_goal_projection', 'apply_goal']) {
+  if (goalOrchestrationSupported() && !noBashToolNames.includes(sourceEffectTool)) {
+    throw new Error(`--bash off must retain write-gated Goal source tool ${sourceEffectTool}; got ${noBashToolNames.join(', ')}`);
+  }
+}
 const noBashConfig = await noBashClient.request('tools/call', { name: 'server_config', arguments: {} });
 if (noBashConfig.structuredContent.bashMode !== 'off') {
   throw new Error(`server_config did not report bash off: ${JSON.stringify(noBashConfig.structuredContent)}`);
+}
+if (noBashConfig.structuredContent.goalLiveProjection?.requiresBashMode !== false || noBashConfig.structuredContent.goalLiveProjection?.sourceWritesEnabled !== true) {
+  throw new Error(`server_config did not report the Goal Live write-only gate: ${JSON.stringify(noBashConfig.structuredContent)}`);
 }
 noBashClient.close();
 
@@ -1317,9 +1536,15 @@ if (metadataSessions.structuredContent.total_found !== 0 || JSON.stringify(metad
 }
 standardCodexSessionsClient.close();
 
-const fullTranscriptClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
+const fullTranscriptClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'full'], {
   cwd: path.resolve('.'),
-  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_BASH_TRANSCRIPT: 'full' }
+  env: {
+    ...process.env,
+    CODEXPRO_ROOT: tmp,
+    CODEXPRO_ALLOWED_ROOTS: tmp,
+    CODEXPRO_BASH_TRANSCRIPT: 'full',
+    CODEXPRO_CODEX_BIN: process.execPath
+  }
 });
 await fullTranscriptClient.request('initialize', {
   protocolVersion: '2024-11-05',
@@ -1332,6 +1557,17 @@ const fullTranscriptText = fullTranscriptBash.content?.[0]?.text ?? '';
 const fullTranscriptStdout = (fullTranscriptBash.structuredContent.stdout ?? '').trim();
 if (!fullTranscriptText.includes('## stdout') || !fullTranscriptStdout || !fullTranscriptText.includes(fullTranscriptStdout)) {
   throw new Error(`full bash transcript mode did not preserve raw stdout in chat text: ${fullTranscriptText}`);
+}
+const pinnedCodexConfig = await fullTranscriptClient.request('tools/call', { name: 'server_config', arguments: {} });
+if (pinnedCodexConfig.structuredContent.codexBin !== await fs.realpath(process.execPath)) {
+  throw new Error(`server_config did not report the pinned Codex executable: ${JSON.stringify(pinnedCodexConfig.structuredContent)}`);
+}
+const pinnedCodexBash = await fullTranscriptClient.request('tools/call', {
+  name: 'bash',
+  arguments: { command: '"$CODEXPRO_CODEX_BIN" --version' }
+});
+if (pinnedCodexBash.isError || !String(pinnedCodexBash.structuredContent.stdout).includes(process.version)) {
+  throw new Error(`bash did not preserve the pinned Codex executable: ${JSON.stringify(pinnedCodexBash)}`);
 }
 fullTranscriptClient.close();
 
@@ -1365,6 +1601,16 @@ const invalidContextDir = spawnSync('node', ['dist/stdio.js', '--root', tmp, '--
 });
 if (invalidContextDir.status === 0 || !String(invalidContextDir.stderr || invalidContextDir.stdout).includes('CODEXPRO_CONTEXT_DIR')) {
   throw new Error(`invalid CODEXPRO_CONTEXT_DIR=src was not rejected: status=${invalidContextDir.status} stdout=${invalidContextDir.stdout} stderr=${invalidContextDir.stderr}`);
+}
+
+const invalidCodexBin = spawnSync('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_CODEX_BIN: path.join(tmp, 'missing-codex') },
+  encoding: 'utf8',
+  timeout: 5000
+});
+if (invalidCodexBin.status === 0 || !String(invalidCodexBin.stderr || invalidCodexBin.stdout).includes('CODEXPRO_CODEX_BIN does not exist')) {
+  throw new Error(`missing CODEXPRO_CODEX_BIN was not rejected: status=${invalidCodexBin.status} stdout=${invalidCodexBin.stdout} stderr=${invalidCodexBin.stderr}`);
 }
 
 const codexSessionsClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--tool-mode', 'full'], {

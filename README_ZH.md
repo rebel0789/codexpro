@@ -95,7 +95,360 @@ codexpro start
 
 两个 ChatGPT 账号或需要硬隔离时，用不同端口和 Server URL 跑两个 CodexPro 进程。
 
-## 命令
+移除保存的额外项目：
+
+```bash
+codexpro settings set --clear-projects
+```
+
+## 运行与文件一致性
+
+- `view_image` 会把 PNG、JPEG、GIF、WebP 作为原生 MCP 图片内容返回，ChatGPT 可以直接检查截图和视觉资源。
+- `read` 会返回 SHA-256。多个 session 可能同时修改一个文件时，把它作为 `expected_sha256` 传给 `write` 或 `edit`；文件已变化时操作会失败，不会静默覆盖新内容。
+- 新文件采用同目录原子替换。已有文件会原位更新，以保留所有权、ACL、扩展属性和硬链接；如果写入期间机器或进程崩溃，文件内容可能不完整。
+- `codexpro start --headless` 不会提问、复制链接、打开浏览器或显示终端控制面板。就绪后输出一行 `CODEXPRO_READY`，在本地运行状态中记录受监管的 runtime PID，收到信号时清理；HTTP runtime 意外退出时 launcher 以非零状态退出。
+
+## 工具模式与卡片
+
+默认 `CODEXPRO_TOOL_MODE=standard`，只暴露常用编码循环、`codexpro_self_test`、`show_changes`、上下文导出和 handoff。演示时可以用 `--tool-mode minimal`，需要完整兼容工具时用 `--tool-mode full`。
+
+默认工具数量较少是故意的：ChatGPT 面对少量高信号工具时更稳定。workspace open 默认不做 skill discovery；需要 repo-local skills 时传 `include_skills=true`，需要 user/plugin skills 时再加 `include_global_skills=true`。然后用 `load_skill` 按名称、source 和显示出的 path 加载需要的 `SKILL.md`；如果仍有重名匹配，CodexPro 会报歧义错误，不会随便选一个，也不会把几十个 skill 变成单独 action。
+
+CodexPro 默认给 ChatGPT 暴露纯 MCP 工具描述，不附带 widget/card metadata。需要紧凑卡片时用 `CODEXPRO_TOOL_CARDS=1` 启动；当前资源是 v17，v16 到 v8 继续作为兼容资源。workspace、分析、改动、Git、handoff、CodingTask、Goal 和 bash 验证会使用结构化卡片，read/search 保持为普通聊天输出。ChatGPT 可能按 URI 缓存 UI，因此 renderer payload 每次变化都必须使用新 URI：v13 的旧缓存问题促成 v14，权威 changed-file-count UI 的变化要求 v15，有上限的 Persistent turn history 使用 v16，而独立的 attempt/retry ledger 使用 v17。终端输出和 raw diff 会折叠或截断，避免在聊天里刷出大段原始数据。更新 connector 后，刷新一次 ChatGPT plugin connection 以加载当前 widget resource。隐式的旧文档站域名不会再作为 iframe origin 声明，因此 ChatGPT 可以使用默认 sandbox；只有在你拥有独立的 HTTPS component origin 时才设置 `CODEXPRO_WIDGET_DOMAIN`，正式提交 app 前也应配置这种独立域名。
+
+## 其他启动方式
+
+不想全局安装时，也可以用：
+
+```bash
+npx codexpro@latest start --root /absolute/path/to/your/repo
+```
+
+但普通用户更推荐全局安装，这样命令就是固定的 `codexpro setup` 和 `codexpro start`。
+
+## 三种主要模式
+
+### 1. Normal coding
+
+默认模式。ChatGPT 可以在工作区内读取、搜索、写入、精确编辑文件，并运行安全验证命令。
+
+```bash
+codexpro start
+```
+
+适合小改动、文档更新、定位 bug、查看 diff、跑 lint/test/build。
+
+如果你正在另一个 Codex 会话里工作，不希望 ChatGPT 触发任何 shell 命令，用：
+
+```bash
+codexpro start --no-bash
+```
+
+如果想保留 bash，但要求 ChatGPT 明确命中你启动的这个 CodexPro 终端会话标签，用：
+
+```bash
+codexpro start --bash-session main --require-bash-session
+```
+
+开启后，`bash` 工具调用必须带上 `session_id: "main"` 才会执行。
+
+### 2. Handoff
+
+规划模式。ChatGPT 不直接写源码，只写入：
+
+```text
+.ai-bridge/current-plan.md
+```
+
+然后你在本地终端决定是否执行：
+
+```bash
+codexpro execute-handoff --agent opencode --model provider/model --dry-run
+codexpro execute-handoff --agent opencode --model provider/model
+```
+
+也可以启动监听器，让本地终端在计划变更后执行：
+
+```bash
+codexpro start --mode handoff
+codexpro start --mode handoff --no-bash
+codexpro watch-handoff --agent opencode --model provider/model --yes
+```
+
+执行结果会写回：
+
+```text
+.ai-bridge/agent-status.md
+.ai-bridge/implementation-diff.patch
+.ai-bridge/execution-log.jsonl
+```
+
+然后让 ChatGPT 通过 `read_handoff` 或 `codex_context` 审查结果。
+
+### 3. Pro context fallback
+
+有些 ChatGPT 模型或产品界面不能直接调用 Developer Mode Apps、连接器或 MCP 工具。即使同一个符合条件的账号可以创建 CodexPro app，某个具体模型界面仍然可能没有工具调用能力。
+
+这时不要强行让它调用工具。先导出一个持久上下文包：
+
+```bash
+codexpro pro-bundle --root /absolute/path/to/your/repo --copy
+```
+
+它会写入：
+
+```text
+.ai-bridge/pro-context.md
+```
+
+把这个上下文粘贴给不能调用工具的模型，让它产出窄范围实现计划。然后保存计划并应用：
+
+```bash
+codexpro pro-apply --root /absolute/path/to/your/repo --file plan.md
+```
+
+这会写入 `.ai-bridge/current-plan.md`，再交给 Codex、OpenCode、Pi 或自定义本地代理执行。
+
+如果你的 ChatGPT 账号已经在 Web 产品里提供 GPT-5.5 或更强模型，并且该模型界面可以调用 Developer Mode Apps，CodexPro 可以让它通过 MCP 使用本地仓库工具。CodexPro 不提供、不代理、不转售、也不解锁模型。
+
+## 稳定 URL 怎么选
+
+ChatGPT App 需要一个可访问的 Server URL。你有三个常用选择：
+
+```text
+Cloudflare quick tunnel   最快演示路径。每次重启 URL 都变。
+ngrok free dev domain     推荐给大多数用户。免费账号给一个稳定 dev domain。
+Cloudflare named tunnel   适合已有自定义域名的用户。
+```
+
+### Cloudflare quick tunnel
+
+最适合录 demo 或临时试用：
+
+```bash
+codexpro start
+```
+
+缺点很明确：quick tunnel 的 URL 每次重启都会变。如果你把 quick URL 放进 ChatGPT App，下一次启动时需要重新编辑 ChatGPT App 的 Server URL。
+
+### ngrok free dev domain
+
+推荐给大多数用户。创建一个免费 ngrok 账号，在 ngrok Dashboard 的 Universal Gateway -> Domains 找到你的 dev domain，比如：
+
+```text
+your-name.ngrok-free.dev
+```
+
+一次性认证 ngrok：
+
+```bash
+ngrok config add-authtoken YOUR_NGROK_TOKEN
+```
+
+保存到 CodexPro：
+
+```bash
+codexpro settings set --tunnel ngrok --hostname your-name.ngrok-free.dev
+```
+
+以后启动：
+
+```bash
+codexpro start
+```
+
+ChatGPT 里的 Server URL 可以保持不变。
+
+### Cloudflare named tunnel
+
+如果你有自己的域名，可以用 Cloudflare named tunnel：
+
+```bash
+cloudflared tunnel login
+cloudflared tunnel create codexpro
+cloudflared tunnel route dns codexpro codexpro.example.com
+```
+
+之后日常启动：
+
+```bash
+codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
+```
+
+更多域名细节见 [DOMAIN_SETUP.md](DOMAIN_SETUP.md)。
+
+## Codex 风格上下文
+
+CodexPro 不读取 Codex 的隐藏运行时记忆。它给 ChatGPT 的是显式工作区上下文：
+
+```text
+open_current_workspace  当前 root、安全模式、AGENTS 状态、git 状态
+codex_context           AGENTS 链、.ai-bridge 文件、可选 git status/diff
+read_handoff            只读 .ai-bridge 文件
+workspace_snapshot      更大的项目快照和 handoff 上下文
+```
+
+`codex_context` 会读取从仓库根目录到目标路径上的指令文件：
+
+```text
+AGENTS.override.md
+AGENTS.md
+agents.md
+.agents.md
+```
+
+并加入：
+
+```text
+.ai-bridge/current-plan.md
+.ai-bridge/agent-status.md
+.ai-bridge/implementation-diff.patch
+.ai-bridge/codex-status.md
+.ai-bridge/decisions.md
+.ai-bridge/open-questions.md
+.ai-bridge/execution-log.jsonl
+git status
+可选 git diff
+```
+
+推荐流程：
+
+```text
+先调用 server_config 和 codexpro_self_test
+如果 self-test 失败，先停下来报告失败项
+先调用 open_current_workspace，include_tree=false
+再调用 codex_context，target_path 指向要改的文件，include_diff=false
+然后只读取当前任务需要的文件
+```
+
+这样 ChatGPT 会更接近 Codex 的指令模型，同时不会依赖隐藏状态或大范围重复扫描。
+
+## 持久后台任务
+
+前台 `bash` 工具有意限制为最多 180 秒。长测试、benchmark、build 或任何需要在 ChatGPT/MCP 断线后继续执行的命令，应使用以下 MCP 流程：
+
+```text
+start_background_job
+  job_key: release-candidate-151cc47:benchmark-run
+  command: python3 benchmarks/benchmark.py run ...
+  timeout_ms: 21600000
+  expected_git_head: 151cc47...完整的40位SHA...
+  require_clean_worktree: true
+
+wait_for_background_job
+  job_key: release-candidate-151cc47:benchmark-run
+  wait_ms: 60000
+```
+
+`start_background_job` 会快速返回。独立本地 runner 默认把原子状态和有上限的 stdout/stderr 日志写入 `~/.codexpro/jobs`，所以 HTTP/MCP 连接或 CodexPro 服务重启不会终止任务。新会话可用 `get_background_job`、`list_background_jobs` 和 `wait_for_background_job` 恢复观察；只有显式调用 `cancel_background_job` 才会请求终止。
+
+`job_key` 是必填的幂等键。相同键和相同执行契约只会返回现有任务，不会重复启动；相同键配上不同 command、cwd、timeout、日志上限或 Git guard 会失败。release 或 benchmark 工作应传入完整的 `expected_git_head` 并设置 `require_clean_worktree: true`；CodexPro 在接受启动前和独立 runner 真正执行前各检查一次，不匹配时不会启动命令。CodexPro 不会自动重试失败任务，也不会自动从 benchmark run 推进到 judge/report。
+
+后台命令仍受 `CODEXPRO_BASH_MODE` 和可选 bash session guard 约束。safe 模式只接受原有 allowlist；不在 allowlist 内的受信任长命令需要 full 模式。shell job 使用确定性的非 login shell。launchd/systemd 等服务环境应使用 `codexpro start --codex-bin /absolute/path/to/codex` 或 `CODEXPRO_CODEX_BIN` 固定目标 Codex CLI，并在 `server_config` 中确认 `codexBin`。需要时可通过 `CODEXPRO_JOB_DIR`、`CODEXPRO_BACKGROUND_JOB_TIMEOUT_MS`、`CODEXPRO_BACKGROUND_JOB_MAX_LOG_BYTES` 调整本地默认值。
+
+## 直接编码与 Codex 协作
+
+在受信任的仓库中使用网页 Direct + Codex 协作时，必须显式开启两项能力：
+
+```bash
+codexpro start --root /path/to/repo --write workspace --bash full
+```
+
+更安全的默认值保持不变。创建 CodingTask、`run_coding_task`、`followup_coding_task` 以及 Direct → Codex 切换都同时要求 `writeMode=workspace` 和 `bashMode=full`，因为 Codex App Server 可以执行超出 safe shell allowlist 的项目命令。任务状态、列表、审查、取消以及 Codex → Direct 切换不要求 full bash，断线后仍能检查和恢复。
+
+一个 CodingTask 始终使用同一个持久 Git worktree 和上下文。先以 direct owner 创建任务，用返回的 `workspace_id` 让 ChatGPT 直接读写和验证；空闲后调用 `transition_coding_task` 把独占写入权交给 Codex，再用 `run_coding_task` 和 `followup_coding_task` 在同一持久 thread 中继续。Codex 完成后切回 direct，并用 `review_coding_task` 或 `show_changes` 审查差异。
+
+默认 Codex 模型为 `gpt-5.6-sol`，reasoning effort 为 `high`。可用 `--task-dir`、`--codex-model`、`--codex-reasoning-effort` 或相应环境变量配置。自定义 `--codex-dir` 会作为 `CODEX_HOME` 传给独立 Codex 进程，使其使用指定的认证、配置和 session 存储。Codex 使用 workspace write、禁用网络、approval policy 为 `never`；需要审批或交互输入时会失败关闭。
+
+CodingTask 不会自动 commit、merge、push、创建 PR 或删除 worktree。任务状态、有限日志和 worktree 默认保留在项目之外的 `~/.codexpro/tasks`，便于断线恢复和审查。普通后台任务最初不允许在 CodingTask worktree 中运行，以免未跟踪进程跨越所有权切换。旧 `.ai-bridge` handoff 仅保留作兼容和规划用途。
+
+## Pro 编排的 Goal（尚未发布）
+
+Goal 编排依赖 POSIX advisory lock。本版本在 Windows 上不支持并会隐藏全部 Goal 工具，`server_config.goalOrchestration.supported` 会返回 `false` 及平台原因。Windows 用户仍可使用 Direct coding 和独立 CodingTask，包括 Direct↔Codex 所有权切换。
+
+复杂任务可以由 Pro 先调用 `propose_goal` 保存一份不执行任何工作的指纹化计划。用户审查 Goal 卡片后，`approve_goal` 只记录对该精确契约的批准；`start_goal` 才会启动执行。当前尚未发布的切片支持两个独立指纹化的执行策略。
+
+`supervised` 支持 isolated 或 live，每个 worker 一次 turn、零自动重试。Pro 显式刷新、审查并按依赖顺序集成结果，再启动新解锁的工作。Live 只改变单独批准的 source-effect 步骤：worker 与 Pro 的私有 integration worktree 始终隔离。`review_goal` 返回精确的 integration HEAD 和 review fingerprint；`project_goal` 只有在用户再次确认、revision/key 匹配且两者仍与权威复查一致时，才会投影该 checkpoint。
+
+`persistent` 是更严格的 Isolated-only 契约：Goal 的 `commands` 列表为空、network=false、全部 source-effect 权限为 false。每个 worker 可批准 1–4 个 semantic turn（包含 initial turn），并在这些 turn 之间共享总计 0–2 次 fresh retry；公开提案字段是 `limits.max_turns_per_worker` 与 `limits.max_retries_per_worker`，retry 默认值为 0。Supervised 仍严格为一个 turn、零 retry。超过一个 turn 时，Persistent 提案必须精确包含少一个、有序且不可变的 `continuation_intents`，最多三个。经过明确的 propose → approve → start 后，本地独立 scheduler 会并行启动依赖已满足的 worker。每个 continuation 都在同一 CodingTask、worktree、Codex thread 与 session 上以新的 operation/turn 继续。中间 turn 成功后仍保持私有且不可集成，也不会解锁依赖；scheduler 只会立即执行下一个已批准 intent。只有最终批准 turn 的精确 terminal provenance、scope 与 cumulative patch 都通过后，才机械地集成一次。用户可以离开 Chat 页面；最终状态是 `waiting_review`，stop reason 为 `semantic_review`。重新连接后使用 `get_goal` / `review_goal`，由 Pro 判断语义完成情况；任何后续源码操作都必须在这个 Persistent 契约之外获得用户单独授权。
+
+这属于本地持久执行，不是 ChatGPT 内置 Scheduled Tasks，也不是 Pro 在离线状态下继续判断。工作进行时电脑与独立 scheduler 进程必须保持运行；启动、控制或重新连接时需要 CodexPro server 可用。scheduler 不能发明新工作、重新解释完成标准、完成 Goal、project/apply 源码、stage、commit、merge、push 或创建 PR。Continuation、fresh retry 与 same-operation recovery 是三种不同权限：continuation 是批准预算中必须执行的新 semantic turn；fresh retry 不消耗 turn，而是在新的确定性 operation 下重复完全相同的 prompt/scope/task/worktree/model/effort，并在 thread/session 已建立时继续使用它们；同一预留 operation 的 crash/response-loss recovery 不消耗 retry budget。同一 thread 表示向持久 thread 追加 turn，不保证 compaction 后所有早期 token 仍逐字存在。
+
+Fresh retry 只使用不可变且带指纹的 `infra-pre-turn-v1`，固定 backoff 为 `[1000,5000]` ms。Runner 必须提供两个允许 tuple 之一的 positive proof：`app_server_startup / infrastructure / runner_start` 或 `app_server_initialize_transport / infrastructure / app_server_initialize`；两者都必须是 `outcomeKnown=true`、`turnStarted=false`，该失败 attempt 没有返回 thread/session/turn identity，也没有写出 thread-establish 或 turn-start 请求，并且权威 Git observation 精确不变。若更早的 semantic turn 已建立 thread/session，它仍是新 attempt 不可变的 resume 目标。所有失败 attempt 都保留。Timeout、model/tool/input/approval、policy/path/content/provenance/validation/identity conflict、cancel、部分 Git 改动、ambiguous response loss 或 unknown outcome 都不会 retry；不确定时失败关闭。
+
+`pause_goal` 会先持久关闭调度门；已运行的 worker 进程可能完成，但 pause 线性化后不会开始新的 launch、retry、integration 或依赖推进。`resume_goal` 是针对同一批准指纹和 resource envelope 的显式幂等执行动作，不会重跑已完成工作。`cancel_goal` 优先于等待中的 backoff，会 fence 并终止活跃 worker，随后进入 terminal，但不会回滚源码、删除 worktree 或执行其他 source effect。`get_goal`、`list_goals`、`review_goal` 是被动读取，`refresh_goal` 只读写 store；读取或重新连接都不会暗中启动 retry 或 resume。
+
+Phase 8 已在受支持的 POSIX 主机上通过真实 ordinary Chat 验证：Goal `goal_cd1d3bf868c2bdade5b1c7af` 在用户离开页面后继续，真实 `gpt-5.6-sol`/`high` A/B worker 并行运行，再执行 summary 依赖，最后停在 semantic review；私有集成只有 `a.md`、`b.md`、`summary.md`，source HEAD/index/refs 保持不变。使用已安装真实 Codex App Server 的 built HTTP/MCP 流程也通过了 recovery、pause/resume/cancel、权威 review count 和进程清理。由于 Goal 在 Windows 上按契约不受支持，因此没有运行原生 Windows 执行测试。
+
+Phase 9 的有界 continuation 已通过 built public HTTP/MCP 入口验证。确定性的两 turn 流程证明：turn 1 成功后仍无 integration commit 或 dependency unlock；turn 2 复用同一 task/base/worktree/thread/session，读取到 turn 1 的精确 bytes，最终只产生一个 cumulative integration commit。MCP client 与 HTTP server 断开后，独立 scheduler 仍继续；重启后的被动 `get_goal` / `list_goals` / `review_goal` 没有启动或修改任何执行。已安装真实 Codex 的流程也通过：Goal `goal_f18e1e62ec5797e868fd6421`、CodingTask `task_8eb28bf1e327e3cbb2ac2a92`、thread `019ff6ef-94b9-7bc3-adbb-ced648a29472`，两个不同 turn，最终一次 integration commit；source HEAD/refs/index 及 staged/unstaged/untracked 状态保持精确不变。
+
+同一契约也通过了[真实 ordinary Chat](https://chatgpt.com/c/6a7cab4a-fa74-83ee-bb1c-5040c68524c0)。Goal `goal_d96c4d1de3d6382cc4ebcc86` 在 contract fingerprint `9851972a680218074a44e12e7830691c0353cf466b92752eb56ffba082ccb8a4` 下到达 revision 15、`waiting_review` / `semantic_review`。CodingTask `task_f1c84e9b39654c8aaebb2e6b` 的 thread 与 session 始终是 `019ff70a-ea6f-7a83-94d6-f81fe92527a2`，执行了 `run:1` / `run:2` 两个不同 turn。捕获 turn 2 正在运行的中间状态时，integration HEAD 仍等于 Goal base `ce4421d…`，且没有 integrated commit；最终私有 integration `124787d868b3d89a1191d394192831cd3fb5c46e` 只有一个 commit，且只包含精确两行的 `phase9-chat/multi-turn.md`，review fingerprint 为 `e36aa461a0ca684d9fe85efd253e0e3431255baf1951e471266d3eedba663c8b`。start→断线→重连期间 source path 始终不存在，source status/diff/index 按字节不变。外部无关 commit `cd0f3e18…` 在 Goal start 前已经进入 source；Goal 仍锚定 `ce4421d…`，没有创建或吸收该 commit。v16 卡片真实挂载并显示 2/2 turn、相同身份和 final-only integration；Chat host 重复的被动 get/review 调用无副作用且状态按字节相同。
+
+首次 Chat 尝试还发现 `start_goal` 被标成 destructive 时会被隐藏；Persistent start 只在私有 worktree 执行、没有 source effect，因此把该 hint 修正为 `false`。重新 build、restart 并刷新 plugin 后，canonical `start_goal` 实际调用成功；source projection/application 仍是单独确认的动作。
+
+Phase 10 的有界 retry 已通过完整 deterministic npm smoke 与 built production HTTP/MCP 入口，包括精确 1s/5s schedule、跨 semantic turn 的 aggregate budget、耗尽、restart-safe backoff、释放 concurrency slot、pause/cancel 优先、完整 non-retry matrix、最终一次私有 integration 与 source 不变。已安装真实 Codex 的 HTTP 流程也通过：Goal `goal_b134f2acc8a910aedd6d31d5` 首次被注入 initialize-transport failure，第二个 attempt 使用真实 `gpt-5.6-sol`/`high` 成功，生成一个私有 integration commit，source 保持不变。
+
+Canonical [ordinary-Chat retry 流程](https://chatgpt.com/c/6a7cc1a8-bd5c-83ee-9779-7e032776dadd)也通过。Goal `goal_855e97294fe7d3a8f25a06fe` 在 base `f77e993103a54d4c6f0573d429aaa5f78cd68136`、contract fingerprint `273019c6d5f124f87d6240be9997b1571c9f73445839b941d449e6ffa3759578` 下到达 revision 14、`waiting_review` / `semantic_review`。CodingTask `task_5fe51f8b7cf5b5911361e416` 保留了 attempt 0：`app_server_initialize_transport / infrastructure / app_server_initialize`、retryable、outcome known、turn not started、zero changed paths；1 秒后 attempt 1 在 thread/session `019ff759-a258-7480-9765-c075c6f867a3`、turn `019ff759-a318-7283-83d4-c0d2477a42eb` 上运行真实 Codex 并成功。私有 integration `b1fe3f18e44601ebbc7c9af42e144e95fa77c1f9` 只有一个 commit。Source HEAD/ref 保持 `f77e…`，write-tree 为 `2a1e80…`，file-byte hash 为 `f34848…`，status/diff 为空。最终 v17 get 卡片真实挂载，显示 1/1 semantic turn、两个 attempt、retry 1/1、一个 changed file。Chat 重复调用 passive get/review，但 state SHA-256 前后都是 `5fd32c…`，没有 launch/write。Live endpoint 切换期间最初 approve/start 卡片短暂出现 template fetch failure；fresh resources/read 与最终 v17 卡片正常渲染。
+
+每次 Live 投影都会取得 per-repository lock，检查批准的精确 HEAD 以及目标路径的文件/索引 CAS，并在写源工作区前保存持久 journal。既有但不相关的 tracked、staged、untracked 改动会保留；同 key 重试会从 journal 恢复。用户若修改 Goal 拥有的同一路径，系统不会覆盖，而会进入 `recovery_required`。symlink、submodule、冲突 index 或非普通文件会失败关闭。
+
+`cancel_goal` 不会自动回滚已经投影的源码。回滚必须单独确认 `revert_goal_projection`，并且只能按 latest-applied-first 的 LIFO 顺序执行；它复用相同的 lock、CAS、journal 和 no-overwrite 规则。完成最终判断后，若最终 Live checkpoint 已在源工作区，`apply_goal` 会 zero-write 地采用并封存它。任何 Goal source effect 都不会 stage、commit、merge、push 或创建 PR。worker 执行需要可信的 full bash；只操作源工作区的 project/revert/apply 只要求 workspace write，不需要 bash 或 Codex 可执行文件。
+
+## 安全边界
+
+CodexPro 是本地开发桥，不是操作系统级沙箱。
+
+默认安全行为：
+
+- 公网 tunnel 默认需要私有 CodexPro token。
+- 写入限制在配置的工作区 root 内。
+- 常见敏感路径会被拒绝：`.env`、私钥、`.git`、`node_modules`、生成目录、缓存目录。
+- symlink 逃逸会被阻止。
+- safe bash 只允许常见检查、搜索、git、lint、test、typecheck、build 等命令。
+- 持久后台任务复用同一 bash 策略、要求幂等键、把有上限的日志保存在仓库外，并且从不自动重试。
+- `codexpro start --no-bash` 会完全关闭 ChatGPT 可调用的 bash 工具。
+- `execute-handoff` 和 `watch-handoff` 是本地 CLI 命令，不是远程 MCP 工具。
+
+只有在你信任当前仓库和命令时，才考虑更宽的权限，例如 full bash、自定义执行器、额外 allow root。
+
+### Codex 会话边界
+
+CodexPro 不能绑定、读取或复用某一个 Codex App 会话 id。MCP 里的 session id 只是 ChatGPT 和 CodexPro HTTP 服务器之间的传输会话，不代表 Codex 里的某个聊天或终端会话。
+
+`bash` 工具属于你启动的 CodexPro 本地服务器进程，并在配置的 workspace root 下运行。想并行处理另一个任务时，请为另一个仓库、端口或 tunnel profile 启动单独的 CodexPro；不要把它理解成“远程控制当前 Codex 会话”。
+
+如果要减少误触发，可以给这个本地 CodexPro 进程设置 bash session guard：
+
+```bash
+codexpro start --bash-session main --require-bash-session
+```
+
+这不是 Codex App 聊天会话 id，而是 CodexPro 本地 bash 工具的显式匹配标签。
+
+bash 结果默认使用紧凑 transcript，避免 ChatGPT 对话里突然铺开大段 stdout/stderr。完整 stdout/stderr 仍在结构化工具数据里，CodexPro 卡片里的输出预览默认折叠。需要旧行为时可以显式打开：
+
+```bash
+codexpro start --bash-transcript full
+```
+
+CodexPro 也可以在 full tools 下显式开启只读的本地 Codex 会话列表：
+
+```bash
+codexpro start --tool-mode full --codex-sessions metadata
+codexpro start --tool-mode full --codex-sessions read
+```
+
+`metadata` 会增加 `codex_sessions` 工具，从 `~/.codex/sessions` 和 `~/.codex/archived_sessions` 读取本地 JSONL 历史，列出 session id、标题、cwd、来源文件和 `codex resume <session-id>` 命令。`read` 还会增加 `read_codex_session`，用于有限长度的 transcript 读取。它类似本地 session manager 扫描 Codex 历史文件，但仍然不会附加到正在运行的 Codex App 聊天，也不会在那个会话里执行命令或绕过产品限制。
+
+如果 Codex 历史不在默认位置，可以用 `--codex-dir <dir>`。
+
+如果只想让 ChatGPT 规划、由你本地决定是否执行：
+
+```bash
+codexpro start --mode handoff --no-bash
+```
+
+## 常用命令
 
 ```bash
 codexpro setup
@@ -124,28 +477,6 @@ codexpro start --headless
 ```bash
 CODEXPRO_TOOL_CARDS=1 codexpro start
 ```
-
-## 公网 HTTPS
-
-ChatGPT Web 需要 HTTPS：
-
-```bash
-codexpro start --tunnel cloudflare
-codexpro ngrok --hostname your.ngrok-free.dev
-codexpro stable --hostname codexpro.example.com --tunnel-name codexpro
-codexpro tailscale --hostname your-device.your-tailnet.ts.net
-codexpro start --tunnel none
-```
-
-稳定主机名请固定 token：
-
-```bash
-mkdir -p ~/.codexpro
-openssl rand -hex 32 > ~/.codexpro/http-token
-chmod 600 ~/.codexpro/http-token
-```
-
-客户端支持 header 时优先用 `Authorization: Bearer <token>`。`?codexpro_token=` 只是个人兼容回退。
 
 ## 安全默认
 

@@ -32,7 +32,7 @@ function commandExists(command: string): Promise<boolean> {
   return new Promise((resolve) => {
     const child = process.platform === "win32"
       ? spawn("where", [command], { stdio: "ignore", shell: false })
-      : spawn("/bin/sh", ["-lc", `command -v ${command} >/dev/null 2>&1`], { stdio: "ignore" });
+      : spawn("/bin/sh", ["-c", "command -v \"$1\" >/dev/null 2>&1", "codexpro", command], { stdio: "ignore" });
     child.on("close", (code) => resolve(code === 0));
     child.on("error", () => resolve(false));
   });
