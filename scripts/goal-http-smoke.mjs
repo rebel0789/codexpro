@@ -171,6 +171,31 @@ process.stdin.on('data', (chunk) => {
   assert.equal('source_root' in proposed.structuredContent, false); assert.equal('integration_worktree_root' in proposed.structuredContent, false);
   assert.equal(git(sourceRoot, ['status', '--porcelain=v1', '--untracked-files=all']), '');
 
+  const originalGoalStatePath = path.join(dataRoot, 'goals', goalId, 'state.json');
+  const originalGoalState = JSON.parse(await fs.readFile(originalGoalStatePath, 'utf8'));
+  const hiddenSourceRoot = path.join(fixture, 'not-allowed-source');
+  const hiddenGoalIds = [];
+  for (let index = 0; index < 25; index += 1) {
+    const hiddenGoalId = `goal_${(0xabc000 + index).toString(16).padStart(24, '0')}`;
+    hiddenGoalIds.push(hiddenGoalId);
+    const hiddenGoalDir = path.join(dataRoot, 'goals', hiddenGoalId);
+    await fs.mkdir(hiddenGoalDir, { mode: 0o700 });
+    const hiddenState = {
+      ...originalGoalState,
+      goalId: hiddenGoalId,
+      goalKey: `newer-hidden-goal-${index}`,
+      title: `Newer hidden Goal ${index}`,
+      sourceRoot: hiddenSourceRoot,
+      integrationWorktreeRoot: path.join(dataRoot, 'goal-worktrees', hiddenGoalId),
+      updatedAt: new Date(Date.now() + index + 1).toISOString()
+    };
+    await fs.writeFile(path.join(hiddenGoalDir, 'state.json'), `${JSON.stringify(hiddenState)}\n`, { encoding: 'utf8', mode: 0o600 });
+  }
+  const limitedAllowedGoals = await callTool(client, 'list_goals', { limit: 1 });
+  assert.equal(limitedAllowedGoals.structuredContent.goal_count, 1, 'newer disallowed Goals must not consume the requested list limit');
+  assert.equal(limitedAllowedGoals.structuredContent.goals[0]?.goalId, goalId, 'list_goals must filter allowed source roots before applying limit');
+  assert.equal(hiddenGoalIds.some((hiddenGoalId) => JSON.stringify(limitedAllowedGoals.structuredContent).includes(hiddenGoalId)), false);
+
   const approved = await callTool(client, 'approve_goal', {
     goal_id: goalId,
     expected_revision: proposed.structuredContent.revision,

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { inspectCodingTaskSource, type CodingTaskSourceWorkspace, type CodingTaskWorkspaceGuard } from "./codingTaskWorktree.js";
-import { GoalStore, type GoalStoreConfig } from "./goalStore.js";
+import { GoalStore, type GoalListOptions, type GoalStoreConfig } from "./goalStore.js";
 import { verifyGoalLiveProjection } from "./goalProjection.js";
 import { assertGoalContentPolicySnapshot } from "./goalPolicy.js";
 import { assertGoalPromptContractBudget, assertGoalWorkerPromptBudget, buildGoalWorkerPrompt } from "./goalPrompt.js";
@@ -296,7 +296,7 @@ export async function getGoal(config: GoalStoreConfig, goalId: string): Promise<
   return new GoalStore(config).get(validateGoalId(goalId));
 }
 
-export async function listGoals(config: GoalStoreConfig, options: { sourceRoot?: string; limit?: number } = {}): Promise<GoalState[]> {
+export async function listGoals(config: GoalStoreConfig, options: GoalListOptions = {}): Promise<GoalState[]> {
   return new GoalStore(config).list(options);
 }
 

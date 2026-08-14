@@ -14,7 +14,7 @@ import {
   type CodingTaskGitObservation,
   type CodingTaskState
 } from "./codingTaskState.js";
-import { CodingTaskStore, writeCodingTaskJsonAtomic, type CodingTaskStoreConfig } from "./codingTaskStore.js";
+import { CodingTaskStore, writeCodingTaskJsonAtomic, type CodingTaskListOptions, type CodingTaskStoreConfig } from "./codingTaskStore.js";
 import {
   createCodingTaskWorktree,
   inspectCodingTaskSource,
@@ -235,7 +235,7 @@ export async function getCodingTask(config: CodingTaskStoreConfig, taskId: strin
 
 export async function listCodingTasks(
   config: CodingTaskStoreConfig,
-  options: { sourceRoot?: string; limit?: number } = {}
+  options: CodingTaskListOptions = {}
 ): Promise<CodingTaskState[]> {
   return new CodingTaskStore(config).list(options);
 }

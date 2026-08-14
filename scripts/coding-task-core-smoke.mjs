@@ -24,6 +24,7 @@ import {
   transitionCodingTaskExecutor
 } from '../dist/codingTaskOps.js';
 import { parseCodingTaskState } from '../dist/codingTaskState.js';
+import { CodingTaskStore } from '../dist/codingTaskStore.js';
 
 function git(cwd, args) {
   const result = spawnSync('git', args, { cwd, encoding: 'utf8', windowsHide: true });
@@ -124,6 +125,26 @@ try {
     created.task.taskId,
     recoveredCreate.task.taskId
   ]));
+  const hiddenSourceRoot = path.join(fixture, 'not-allowed-source');
+  const store = new CodingTaskStore(config);
+  for (let index = 0; index < 25; index += 1) {
+    const hiddenTaskId = `task_${(0xcde000 + index).toString(16).padStart(24, '0')}`;
+    await store.withTaskLock(hiddenTaskId, async () => {
+      await store.writeLocked({
+        ...created.task,
+        taskId: hiddenTaskId,
+        taskKey: `newer-hidden-task-${index}`,
+        workspaceId: `taskws_${hiddenTaskId.slice(5)}`,
+        title: `Newer hidden CodingTask ${index}`,
+        sourceRoot: hiddenSourceRoot,
+        worktreeRoot: store.paths(hiddenTaskId).worktreeRoot,
+        updatedAt: new Date(Date.now() + index + 1).toISOString()
+      });
+    });
+  }
+  const allowedOnly = await listCodingTasks(config, { allowedSourceRoots: [sourceRoot], limit: 1 });
+  assert.equal(allowedOnly.length, 1, 'newer disallowed CodingTasks must not consume the requested list limit');
+  assert.equal(allowedOnly[0].sourceRoot, sourceRoot);
   const workspace = await resolveCodingTaskWorkspace({ dataRoot }, created.task.workspaceId, guard);
   assert.equal(workspace.provenanceVerified, true);
   assert.equal(workspace.worktreeRoot, created.task.worktreeRoot);

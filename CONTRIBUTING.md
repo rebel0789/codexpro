@@ -22,6 +22,13 @@ Run through a Cloudflare quick tunnel:
 npm run connect -- --root /path/to/test/repo --bash safe --write handoff
 ```
 
+## Test and Runtime Isolation
+
+- Do not build or run smoke tests from a checkout that is serving an active CodexPro plugin. A running server keeps its loaded modules, while newly spawned runners may read newly built files and create a mixed-version runtime.
+- Run development checks from a detached worktree or disposable copy. Point the live launcher at a separate, immutable built release directory.
+- Every test server must set dedicated temporary `CODEXPRO_TASK_DIR` and `CODEXPRO_JOB_DIR` values outside all allowed workspaces. Never let a test inherit the live `~/.codexpro/tasks` or `~/.codexpro/jobs` stores.
+- Treat retained Goal and CodingTask state as user data. Validate exact test provenance and move confirmed fixtures to a recoverable quarantine before deleting anything.
+
 ## Useful Areas
 
 - safer tool defaults

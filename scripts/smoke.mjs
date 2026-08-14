@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -84,6 +85,12 @@ assertCommand(['dist/http.js', '--help'], 'CodexPro MCP HTTP server');
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-'));
 const alternateWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-alternate-'));
+const smokeStateRoot = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-state-')));
+const smokeTaskRoot = path.join(smokeStateRoot, 'tasks');
+const smokeJobRoot = path.join(smokeStateRoot, 'jobs');
+process.env.CODEXPRO_TASK_DIR = smokeTaskRoot;
+process.env.CODEXPRO_JOB_DIR = smokeJobRoot;
+process.once('exit', () => rmSync(smokeStateRoot, { recursive: true, force: true }));
 await fs.writeFile(path.join(alternateWorkspace, 'selected.txt'), 'alternate workspace\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'other.txt'), 'keep\n', 'utf8');
@@ -674,6 +681,10 @@ if (goalOrchestrationSupported()) {
     { code: 'app_server_initialize_transport', category: 'infrastructure', phase: 'app_server_initialize', outcomeKnown: true, turnStarted: false }
   ])) {
     throw new Error(`persistent retry proposal did not return the authoritative retry policy: ${JSON.stringify(persistentRetryProposal.structuredContent)}`);
+  }
+  const isolatedGoalState = path.join(smokeTaskRoot, 'goals', persistentRetryProposal.structuredContent.goal_id, 'state.json');
+  if (!await fs.stat(isolatedGoalState).then((stat) => stat.isFile(), () => false)) {
+    throw new Error(`general smoke did not isolate durable Goal state under CODEXPRO_TASK_DIR: ${isolatedGoalState}`);
   }
   const goalsBeforeRejectedRetry = await client.request('tools/call', { name: 'list_goals', arguments: { limit: 100 } });
   await expectToolError('propose_goal', { ...retryProposalBase, goal_key: 'phase10-supervised-retry-rejected', execution_policy: 'supervised' }, /Supervised Goals support exactly one semantic turn, zero retries/i);

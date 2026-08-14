@@ -263,6 +263,25 @@ try {
   assert.equal(restarted.revision, 3);
   assert.equal(restarted.blackboard.length, 1);
   assert.equal((await listGoals(config)).at(0)?.goalId, proposed.goal.goalId);
+  const hiddenSourceRoot = path.join(fixture, 'not-allowed-source');
+  const store = new GoalStore(config);
+  for (let index = 0; index < 25; index += 1) {
+    const hiddenGoalId = `goal_${(0xdef000 + index).toString(16).padStart(24, '0')}`;
+    await store.withGoalLock(hiddenGoalId, async () => {
+      await store.writeLocked({
+        ...restarted,
+        goalId: hiddenGoalId,
+        goalKey: `newer-hidden-goal-${index}`,
+        title: `Newer hidden Goal ${index}`,
+        sourceRoot: hiddenSourceRoot,
+        integrationWorktreeRoot: store.paths(hiddenGoalId).integrationWorktreeRoot,
+        updatedAt: new Date(Date.now() + index + 1).toISOString()
+      });
+    });
+  }
+  const allowedOnly = await listGoals(config, { allowedSourceRoots: [sourceRoot], limit: 1 });
+  assert.equal(allowedOnly.length, 1, 'newer disallowed Goals must not consume the requested list limit');
+  assert.equal(allowedOnly[0].sourceRoot, sourceRoot);
   assert.equal(git(sourceRoot, ['rev-parse', 'HEAD']), baseSha);
   assert.equal(git(sourceRoot, ['status', '--porcelain=v1', '--untracked-files=all']), sourceStatus);
 

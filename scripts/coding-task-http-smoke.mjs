@@ -111,6 +111,32 @@ try {
   assert.equal((await fs.stat(taskDataRoot)).mode & 0o077, 0, 'task data root must remain private');
   assert.equal(git(worktreeRoot, ['rev-parse', 'HEAD']), baseSha);
 
+  const originalTaskStatePath = path.join(taskDataRoot, 'tasks', taskId, 'state.json');
+  const originalTaskState = JSON.parse(await fs.readFile(originalTaskStatePath, 'utf8'));
+  const hiddenSourceRoot = path.join(fixture, 'not-allowed-source');
+  const hiddenTaskIds = [];
+  for (let index = 0; index < 25; index += 1) {
+    const hiddenTaskId = `task_${(0xbcd000 + index).toString(16).padStart(24, '0')}`;
+    hiddenTaskIds.push(hiddenTaskId);
+    const hiddenTaskDir = path.join(taskDataRoot, 'tasks', hiddenTaskId);
+    await fs.mkdir(hiddenTaskDir, { mode: 0o700 });
+    const hiddenState = {
+      ...originalTaskState,
+      taskId: hiddenTaskId,
+      taskKey: `newer-hidden-task-${index}`,
+      workspaceId: `taskws_${hiddenTaskId.slice(5)}`,
+      title: `Newer hidden CodingTask ${index}`,
+      sourceRoot: hiddenSourceRoot,
+      worktreeRoot: path.join(taskDataRoot, 'worktrees', hiddenTaskId),
+      updatedAt: new Date(Date.now() + index + 1).toISOString()
+    };
+    await fs.writeFile(path.join(hiddenTaskDir, 'state.json'), `${JSON.stringify(hiddenState)}\n`, { encoding: 'utf8', mode: 0o600 });
+  }
+  const limitedAllowedTasks = await callTool(client, 'list_coding_tasks', { limit: 1 });
+  assert.equal(limitedAllowedTasks.structuredContent.task_count, 1, 'newer disallowed CodingTasks must not consume the requested list limit');
+  assert.equal(limitedAllowedTasks.structuredContent.tasks[0]?.taskId, taskId, 'list_coding_tasks must filter allowed source roots before applying limit');
+  assert.equal(hiddenTaskIds.some((hiddenTaskId) => JSON.stringify(limitedAllowedTasks.structuredContent).includes(hiddenTaskId)), false);
+
   const directWrite = await callTool(client, 'write', {
     workspace_id: taskWorkspaceId,
     path: 'shared.txt',

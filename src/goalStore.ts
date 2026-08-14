@@ -17,6 +17,12 @@ export interface GoalStoreConfig {
   staleLockMs?: number;
 }
 
+export interface GoalListOptions {
+  sourceRoot?: string;
+  allowedSourceRoots?: string[];
+  limit?: number;
+}
+
 export interface GoalPaths {
   goalDir: string;
   state: string;
@@ -212,10 +218,14 @@ export class GoalStore {
     }
   }
 
-  async list(options: { sourceRoot?: string; limit?: number } = {}): Promise<GoalState[]> {
+  async list(options: GoalListOptions = {}): Promise<GoalState[]> {
     await this.initialize();
     const entries = await fsp.readdir(path.join(this.dataRoot, "goals"), { withFileTypes: true });
     const requestedLimit = Math.max(1, Math.min(options.limit ?? 100, 500));
+    const allowedSourceRoots = options.allowedSourceRoots?.map((root) => {
+      if (!path.isAbsolute(root)) throw new Error("Allowed Goal source roots must be absolute paths.");
+      return path.resolve(root);
+    });
     const candidates = (await Promise.all(entries.slice(0, 2_000).flatMap(async (entry) => {
       if (!entry.isDirectory() || !GOAL_ID_PATTERN.test(entry.name)) return [];
       const stat = await fsp.lstat(this.paths(entry.name).state).catch(() => undefined);
@@ -229,7 +239,12 @@ export class GoalStore {
       readBytes += candidate.size;
       try {
         const goal = await this.get(candidate.goalId);
-        if (!options.sourceRoot || goal.sourceRoot === options.sourceRoot) goals.push(goal);
+        if (options.sourceRoot && goal.sourceRoot !== options.sourceRoot) continue;
+        if (allowedSourceRoots && !allowedSourceRoots.some((allowedRoot) => {
+          const relative = path.relative(allowedRoot, goal.sourceRoot);
+          return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+        })) continue;
+        goals.push(goal);
       } catch {
         // Direct get remains the corruption-reporting path; one malformed Goal cannot hide healthy Goals.
       }

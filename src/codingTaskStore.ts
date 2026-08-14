@@ -15,6 +15,12 @@ export interface CodingTaskStoreConfig {
   staleLockMs?: number;
 }
 
+export interface CodingTaskListOptions {
+  sourceRoot?: string;
+  allowedSourceRoots?: string[];
+  limit?: number;
+}
+
 export interface CodingTaskPaths {
   taskDir: string;
   state: string;
@@ -164,9 +170,13 @@ export class CodingTaskStore {
     }
   }
 
-  async list(options: { sourceRoot?: string; limit?: number } = {}): Promise<CodingTaskState[]> {
+  async list(options: CodingTaskListOptions = {}): Promise<CodingTaskState[]> {
     await this.initialize();
     const limit = Math.max(1, Math.min(options.limit ?? 100, 500));
+    const allowedSourceRoots = options.allowedSourceRoots?.map((root) => {
+      if (!path.isAbsolute(root)) throw new Error("Allowed CodingTask source roots must be absolute paths.");
+      return path.resolve(root);
+    });
     const entries = await fsp.readdir(path.join(this.dataRoot, "tasks"), { withFileTypes: true });
     const states: CodingTaskState[] = [];
     for (const entry of entries.slice(0, 2_000)) {
@@ -174,6 +184,10 @@ export class CodingTaskStore {
       try {
         const state = await this.get(entry.name);
         if (options.sourceRoot && state.sourceRoot !== options.sourceRoot) continue;
+        if (allowedSourceRoots && !allowedSourceRoots.some((allowedRoot) => {
+          const relative = path.relative(allowedRoot, state.sourceRoot);
+          return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+        })) continue;
         states.push(state);
       } catch {
         // A malformed directory must not make healthy tasks undiscoverable. Direct get reports the corruption.

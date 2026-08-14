@@ -4138,7 +4138,10 @@ ${result.prompt}
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Listing CodingTasks...", "openai/toolInvocation/invoked": "CodingTask list ready" }
     },
     async (args) => {
-      const all = await listCodingTasks(codingTaskStoreConfig(config), { limit: args.limit ?? 100 });
+      const all = await listCodingTasks(codingTaskStoreConfig(config), {
+        limit: args.limit ?? 100,
+        allowedSourceRoots: config.allowedRoots
+      });
       const tasks = all.filter((task) => {
         try { assertCodingTaskSourceAllowed(config, task); return true; } catch { return false; }
       });
@@ -4603,7 +4606,10 @@ ${result.prompt}
       _meta: { ...toolCardMeta(), "openai/toolInvocation/invoking": "Listing Goals...", "openai/toolInvocation/invoked": "Goal list ready" }
     },
     async (args) => {
-      const goals = (await listGoals(goalStoreConfig(config), { limit: args.limit ?? 20 })).filter((goal) => {
+      const goals = (await listGoals(goalStoreConfig(config), {
+        limit: args.limit ?? 20,
+        allowedSourceRoots: config.allowedRoots
+      })).filter((goal) => {
         try {
           assertGoalSourceAllowed(config, goal);
           return true;
