@@ -395,6 +395,41 @@ try {
     if (JSON.stringify(profileBeforeJson).includes(leaked)) throw new Error(`admin profile GET leaked runtime secret: ${leaked}`);
   }
 
+  const securityHeaders = profileBefore.headers;
+  for (const [header, expected] of [
+    ['cache-control', 'no-store'],
+    ['referrer-policy', 'no-referrer'],
+    ['x-content-type-options', 'nosniff'],
+    ['x-frame-options', 'DENY'],
+    ['permissions-policy', 'camera=(), microphone=(), geolocation=()']
+  ]) {
+    if (securityHeaders.get(header) !== expected) {
+      throw new Error(`missing or wrong ${header} header: ${securityHeaders.get(header)}`);
+    }
+  }
+  if (securityHeaders.get('access-control-allow-origin')) {
+    throw new Error('permissive CORS is still enabled on admin responses');
+  }
+
+  const crossOriginProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: 'https://attacker.example' },
+    body: JSON.stringify({ tunnel: 'none' })
+  });
+  const crossOriginJson = await crossOriginProfile.json().catch(() => ({}));
+  if (crossOriginProfile.status !== 403 || crossOriginJson.error?.code !== 'origin_denied') {
+    throw new Error(`cross-origin admin POST was not rejected: ${crossOriginProfile.status} ${JSON.stringify(crossOriginJson)}`);
+  }
+
+  const sameOriginProbe = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: baseUrl },
+    body: JSON.stringify({ tunnel: 'nonsense-value' })
+  });
+  if (sameOriginProbe.status === 403) {
+    throw new Error('same-origin admin POST was rejected by the origin guard');
+  }
+
   const invalidProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

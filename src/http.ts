@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
-import cors from "cors";
 import { z } from "zod";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -1493,6 +1492,33 @@ async function main(): Promise<void> {
     next();
   }
 
+  // The admin endpoint is reachable from any page the operator's browser visits, so a
+  // browser-issued cross-origin write is rejected outright. Requests without an Origin
+  // header (curl, the CLI, other non-browser clients) are still allowed; a browser cannot
+  // forge a JSON body through a simple form post, so those cannot reach the JSON parser.
+  function sameOriginAdminRequest(req: Request, res: Response, next: NextFunction): void {
+    const origin = req.headers.origin;
+    if (!origin) {
+      next();
+      return;
+    }
+    const host = req.get("host");
+    let originHost: string;
+    try {
+      originHost = new URL(origin).host;
+    } catch {
+      jsonError(res, 403, "origin_denied", "Cross-origin admin requests are not allowed.");
+      return;
+    }
+    // Compare hosts rather than full origins: behind a tunnel the request arrives over
+    // plain HTTP while the browser's Origin says https, but the Host header is forwarded.
+    if (!host || originHost !== host) {
+      jsonError(res, 403, "origin_denied", "Cross-origin admin requests are not allowed.");
+      return;
+    }
+    next();
+  }
+
   app.use((req, res, next) => {
     if (!logRequests) {
       next();
@@ -1505,7 +1531,6 @@ async function main(): Promise<void> {
     });
     next();
   });
-  app.use(cors({ exposedHeaders: ["Mcp-Session-Id"] }));
   app.get("/favicon.ico", (_req, res) => {
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.type("image/svg+xml").send(LOCAL_FAVICON);
@@ -1514,7 +1539,9 @@ async function main(): Promise<void> {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
     next();
   });
   app.use((req, res, next) => {
@@ -1647,7 +1674,7 @@ async function main(): Promise<void> {
     res.json(profileResponse(config));
   });
 
-  app.post("/admin/profile", adminRateLimit, adminBodyLimit, express.json({ limit: "32kb" }), (req, res) => {
+  app.post("/admin/profile", sameOriginAdminRequest, adminRateLimit, adminBodyLimit, express.json({ limit: "32kb" }), (req, res) => {
     const parsed = AdminProfilePatch.safeParse(req.body ?? {});
     if (!parsed.success) {
       jsonError(res, 400, "invalid_profile", "Invalid profile settings.", parsed.error.flatten());
