@@ -205,7 +205,9 @@ function postToolsListWithSession(baseUrl, token, sessionId) {
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
-const alternateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-alternate-'));
+const alternateParent = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-alternate-parent-'));
+const alternateRoot = path.join(alternateParent, 'descendant-workspace');
+await fs.mkdir(alternateRoot);
 await fs.writeFile(path.join(alternateRoot, 'selected.txt'), 'http alternate workspace\n', 'utf8');
 const profileHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-profile-home-'));
 await fs.mkdir(path.join(root, '.codex', 'skills', 'http-smoke-skill'), { recursive: true });
@@ -252,7 +254,7 @@ const child = spawn('node', ['dist/http.js'], {
     HOST: '0.0.0.0',
     PORT: String(genericPort),
     CODEXPRO_ROOT: root,
-    CODEXPRO_ALLOWED_ROOTS: [root, alternateRoot].join(path.delimiter),
+    CODEXPRO_ALLOWED_ROOTS: [root, alternateParent].join(path.delimiter),
     CODEXPRO_HOST: '127.0.0.1',
     CODEXPRO_PORT: String(port),
     CODEXPRO_HTTP_TOKEN: token,
@@ -684,6 +686,20 @@ try {
         || secondList.structuredContent.workspaces.some((workspace) => workspace.root === alternateRoot)
       ) {
         throw new Error(`HTTP workspace selection leaked between MCP sessions: ${JSON.stringify(secondList.structuredContent)}`);
+      }
+
+      const secondRead = await callTool(secondClient, 'read', {
+        workspace_id: alternate.structuredContent.workspace_id,
+        path: 'selected.txt'
+      });
+      const secondText = secondRead.content?.find?.((part) => part.type === 'text')?.text ?? '';
+      if (!secondText.includes('http alternate workspace')) {
+        throw new Error(`second HTTP session could not resolve the first session workspace id: ${secondText}`);
+      }
+
+      const secondListAfterExplicitAccess = await callTool(secondClient, 'list_workspaces');
+      if (secondListAfterExplicitAccess.structuredContent.selected_workspace_id === alternate.structuredContent.workspace_id) {
+        throw new Error(`explicit cross-session workspace id changed the second session selection: ${JSON.stringify(secondListAfterExplicitAccess.structuredContent)}`);
       }
     });
 

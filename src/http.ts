@@ -20,6 +20,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
+import { WorkspaceRegistry } from "./guard.js";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -1562,6 +1563,7 @@ async function main(): Promise<void> {
   };
 
   const transports = new Map<string, TransportRecord>();
+  const workspaceRegistry = new WorkspaceRegistry();
   const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   function requestSessionId(req: Request): string | undefined {
@@ -1699,7 +1701,7 @@ async function main(): Promise<void> {
           if (closedSessionId) transports.delete(closedSessionId);
         };
 
-        const server = createCodexProServer(config);
+        const server = createCodexProServer(config, { workspaceRegistry });
         await server.connect(transport);
       } else {
         sendSessionError(res, sessionId);
