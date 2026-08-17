@@ -45,7 +45,21 @@ function truncateLine(line: string, max = 400): string {
 
 async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: Workspace, options: SearchOptions): Promise<SearchResult> {
   const target = guard.resolve(workspace, options.root ?? ".");
-  const args = ["--json", "--line-number", "--with-filename", "--no-heading", "--color=never", "--max-columns", "500", "--max-count", "50", "--max-filesize", String(textScanByteLimit(config))];
+  const args = [
+    "--json",
+    "--line-number",
+    "--with-filename",
+    "--no-heading",
+    "--color=never",
+    "--max-columns",
+    "500",
+    // One more than the requested cap so the caller can still tell the result was truncated.
+    // A hardcoded value here silently drops matches whenever maxResults is larger.
+    "--max-count",
+    String(options.maxResults + 1),
+    "--max-filesize",
+    String(textScanByteLimit(config))
+  ];
   if (!options.regex) args.push("--fixed-strings");
   if (options.includeHidden) args.push("--hidden");
   for (const glob of config.blockedGlobs) args.push("-g", `!${glob}`);

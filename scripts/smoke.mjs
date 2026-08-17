@@ -496,6 +496,28 @@ const workspaceAnalysis = await client.request('tools/call', { name: 'inspect_wo
 if (!workspaceAnalysis.structuredContent.languages?.includes('typescript') || !workspaceAnalysis.structuredContent.coverage) {
   throw new Error(`inspect_workspace omitted analysis: ${JSON.stringify(workspaceAnalysis.structuredContent)}`);
 }
+// One file holding more than ripgrep's old hardcoded per-file cap of 50: a fixed --max-count
+// silently truncated here regardless of the requested max_results.
+await fs.writeFile(path.join(tmp, 'many-matches.txt'), Array.from({ length: 120 }, (_, i) => `needle-${i}`).join('\n') + '\n', 'utf8');
+const denseSearch = await client.request('tools/call', {
+  name: 'search',
+  arguments: { workspace_id: ws, query: 'needle-', path: 'many-matches.txt', max_results: 120 }
+});
+if (denseSearch.isError || denseSearch.structuredContent.matches?.length !== 120) {
+  throw new Error(`search capped matches below the requested max_results: ${JSON.stringify(denseSearch.structuredContent?.matches?.length)}`);
+}
+if (denseSearch.structuredContent.truncated !== false) {
+  throw new Error('search reported truncation despite returning every match');
+}
+const denseSearchCapped = await client.request('tools/call', {
+  name: 'search',
+  arguments: { workspace_id: ws, query: 'needle-', path: 'many-matches.txt', max_results: 10 }
+});
+if (denseSearchCapped.structuredContent.matches?.length !== 10 || denseSearchCapped.structuredContent.truncated !== true) {
+  throw new Error(`search did not report truncation at a lower max_results: ${JSON.stringify(denseSearchCapped.structuredContent)}`);
+}
+await fs.rm(path.join(tmp, 'many-matches.txt'));
+
 const legacySearch = await client.request('tools/call', { name: 'search', arguments: { workspace_id: ws, query: 'authenticate', path: 'src' } });
 for (const key of ['matches', 'truncated', 'used']) {
   if (!(key in legacySearch.structuredContent)) throw new Error(`legacy search lost ${key}`);
