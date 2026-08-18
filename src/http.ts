@@ -20,6 +20,7 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
+import { redactConfigPaths } from "./pathLabels.js";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -382,7 +383,10 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
 function profileResponse(config: CodexProConfig): Record<string, unknown> {
   const profile = readWorkspaceProfile(config.defaultRoot);
   const runtime = readRuntimeConnection(config.defaultRoot);
-  return redactStructured({
+  // redactStructured strips secrets; redactConfigPaths additionally replaces absolute
+  // local paths with labels. The onboarding form is rendered server-side from
+  // profileValues(), not from this endpoint, so labelling here cannot corrupt a save.
+  return redactConfigPaths(config, redactStructured({
     ok: true,
     profile_path: profile.profilePath ?? profilePathForRoot(config.defaultRoot),
     exists: Boolean(profile.profilePath),
@@ -401,7 +405,7 @@ function profileResponse(config: CodexProConfig): Record<string, unknown> {
       widgetDomain: config.widgetDomain,
       authEnabled: Boolean(config.authToken)
     }
-  });
+  }), { labelUnknownPaths: true });
 }
 
 function jsonError(res: Response, status: number, code: string, message: string, issues?: unknown): void {
@@ -1624,7 +1628,7 @@ async function main(): Promise<void> {
   });
 
   app.get("/healthz", (_req, res) => {
-    res.json({
+    res.json(redactConfigPaths(config, {
       ok: true,
       name: "CodexPro",
       defaultRoot: config.defaultRoot,
@@ -1640,7 +1644,7 @@ async function main(): Promise<void> {
       contextDir: config.contextDir,
       authEnabled: Boolean(config.authToken),
       authRequired: Boolean(config.authToken)
-    });
+    }, { labelUnknownPaths: true }));
   });
 
   app.get("/admin/profile", (_req, res) => {

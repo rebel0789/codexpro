@@ -5,6 +5,11 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+// These harnesses realpath and stat the paths CodexPro returns, so they need the raw
+// absolute form. Production defaults to redacted labels; see the redaction assertions
+// at the end of scripts/smoke.mjs for coverage of the default behaviour.
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
 const npmCli = process.env.npm_execpath;

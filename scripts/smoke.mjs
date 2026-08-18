@@ -3,6 +3,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+// These harnesses realpath and stat the paths CodexPro returns, so they need the raw
+// absolute form. Production defaults to redacted labels; see the redaction assertions
+// at the end of scripts/smoke.mjs for coverage of the default behaviour.
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 function encode(message) {
   return `${JSON.stringify(message)}\n`;
 }
@@ -1683,4 +1688,72 @@ if (!lowerContext.content?.[0]?.text?.includes('Lowercase instruction file loade
   throw new Error('codex_context did not include lowercase agents.md content');
 }
 lowerClient.close();
+// --- absolute path redaction (default behaviour) -------------------------------
+// Every other client in this file runs with CODEXPRO_EXPOSE_ABSOLUTE_PATHS=1. This one
+// deliberately does not, so it exercises what a real deployment sends to ChatGPT.
+const redactedClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_EXPOSE_ABSOLUTE_PATHS: '0' }
+});
+await redactedClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-redaction-smoke', version: '0.1.0' }
+});
+redactedClient.notify('notifications/initialized');
+
+const redactedOpen = await redactedClient.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: true } });
+const redactedWs = redactedOpen.structuredContent.workspace_id;
+const redactedRead = await redactedClient.request('tools/call', { name: 'read', arguments: { workspace_id: redactedWs, path: 'demo.txt' } });
+const redactedTree = await redactedClient.request('tools/call', { name: 'tree', arguments: { workspace_id: redactedWs, path: '.' } });
+const redactedConfig = await redactedClient.request('tools/call', { name: 'server_config', arguments: {} });
+const redactedStatus = await redactedClient.request('tools/call', { name: 'git_status', arguments: { workspace_id: redactedWs } });
+
+const redactionRealTmp = await fs.realpath(tmp);
+const redactionHome = os.homedir();
+for (const [label, payload] of [
+  ['open_current_workspace', redactedOpen],
+  ['read', redactedRead],
+  ['tree', redactedTree],
+  ['server_config', redactedConfig],
+  ['git_status', redactedStatus]
+]) {
+  const serialized = JSON.stringify(payload);
+  for (const leaked of [redactionRealTmp, tmp, redactionHome]) {
+    if (serialized.includes(leaked)) {
+      throw new Error(`${label} leaked an absolute local path (${leaked}) with redaction enabled`);
+    }
+  }
+}
+if (redactedOpen.structuredContent.root !== '[workspace:' + redactedWs + ']') {
+  throw new Error(`workspace root was not replaced with its label: ${redactedOpen.structuredContent.root}`);
+}
+if (redactedConfig.structuredContent.exposeAbsolutePaths !== false) {
+  throw new Error('server_config did not report redaction as active');
+}
+if (!redactedRead.structuredContent.text?.includes('alpha')) {
+  throw new Error('redaction damaged file content');
+}
+if (redactedRead.structuredContent.path !== 'demo.txt') {
+  throw new Error(`redaction altered a workspace-relative path: ${redactedRead.structuredContent.path}`);
+}
+redactedClient.close();
+
+// The escape hatch must still hand back real paths for local tooling.
+const exposedClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_EXPOSE_ABSOLUTE_PATHS: '1' }
+});
+await exposedClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-exposed-smoke', version: '0.1.0' }
+});
+exposedClient.notify('notifications/initialized');
+const exposedOpen = await exposedClient.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+if (await fs.realpath(exposedOpen.structuredContent.root) !== redactionRealTmp) {
+  throw new Error(`CODEXPRO_EXPOSE_ABSOLUTE_PATHS=1 did not return the real root: ${exposedOpen.structuredContent.root}`);
+}
+exposedClient.close();
+
 console.log('✓ smoke test passed');

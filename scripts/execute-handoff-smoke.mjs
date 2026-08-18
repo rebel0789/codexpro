@@ -3,6 +3,11 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+// These harnesses realpath and stat the paths CodexPro returns, so they need the raw
+// absolute form. Production defaults to redacted labels; see the redaction assertions
+// at the end of scripts/smoke.mjs for coverage of the default behaviour.
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 function run(args, options = {}) {
   const result = spawnSync(process.execPath, ['scripts/codexpro.mjs', ...args], {
     cwd: path.resolve('.'),

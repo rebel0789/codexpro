@@ -26,6 +26,7 @@ export interface CodexProConfig {
   codexDir: string;
   writeMode: WriteMode;
   toolMode: ToolMode;
+  exposeAbsolutePaths: boolean;
   inheritEnv: boolean;
   maxReadBytes: number;
   maxWriteBytes: number;
@@ -321,6 +322,7 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     codexDir: expandHome(codexDirArg || process.env.CODEXPRO_CODEX_DIR || path.join(os.homedir(), ".codex")),
     writeMode: writeModeFrom(writeArg ?? process.env.CODEXPRO_WRITE_MODE),
     toolMode: toolModeFrom(toolModeArg ?? process.env.CODEXPRO_TOOL_MODE),
+    exposeAbsolutePaths: boolFrom(process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS, false),
     inheritEnv: process.env.CODEXPRO_INHERIT_ENV === "1",
     maxReadBytes: numberFrom(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000),
     maxWriteBytes: numberFrom(process.env.CODEXPRO_MAX_WRITE_BYTES, 1_000_000, 1_000, 10_000_000),

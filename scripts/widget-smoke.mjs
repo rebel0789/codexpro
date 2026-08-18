@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { toolCardWidgetHtml } from "../dist/toolCardWidget.js";
 
+// These harnesses realpath and stat the paths CodexPro returns, so they need the raw
+// absolute form. Production defaults to redacted labels; see the redaction assertions
+// at the end of scripts/smoke.mjs for coverage of the default behaviour.
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 const scripts = [...toolCardWidgetHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 const widgetScript = scripts.at(-1)?.[1];
 if (!widgetScript) throw new Error("tool-card widget script missing");

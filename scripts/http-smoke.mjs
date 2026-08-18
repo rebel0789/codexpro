@@ -7,6 +7,11 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
+// These harnesses realpath and stat the paths CodexPro returns, so they need the raw
+// absolute form. Production defaults to redacted labels; see the redaction assertions
+// at the end of scripts/smoke.mjs for coverage of the default behaviour.
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 async function getFreePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -237,6 +242,7 @@ const runtimeCloudflareSecret = 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJodHRwLXNtb2
 const staleCloudflareToken = 'eyJhbGciOiJIUzI1NiJ9.eyJ0dW5uZWwiOiJzdGFsZS1odHRwLXNtb2tlIn0.signature1234567890';
 const runtimeId = createHash('sha256').update(root).digest('hex').slice(0, 24);
 const realAlternateRoot = await fs.realpath(alternateRoot);
+const realRoot = await fs.realpath(root);
 await fs.mkdir(path.join(profileHome, 'runtime'), { recursive: true });
 await fs.writeFile(path.join(profileHome, 'runtime', `${runtimeId}.json`), JSON.stringify({
   version: 1,
@@ -896,6 +902,122 @@ try {
 } finally {
   connectionTestChild.kill('SIGTERM');
   await waitForExit(connectionTestChild).catch(() => {});
+}
+
+// --- authenticated HTTP diagnostics honour path redaction --------------------
+// /healthz and GET /admin/profile are reachable with the same bearer token an MCP
+// client holds, so they must not echo absolute local paths when redaction is on.
+// This server deliberately runs without the file-level CODEXPRO_EXPOSE_ABSOLUTE_PATHS
+// opt-out that the rest of this harness uses.
+const redactionPort = await getFreePort();
+// Mirror the real deployment layout, where the Codex data dir (<h>/.codex) is a
+// string prefix of the CodexPro home (<h>/.codexpro). A non-boundary-aware
+// replacement mangles the profile path into "[codex-data]pro/profiles/...".
+const redactionHomeBase = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-redaction-home-'));
+const redactionCodexDir = path.join(redactionHomeBase, '.codex');
+const redactionProfileHome = path.join(redactionHomeBase, '.codexpro');
+await fs.mkdir(redactionCodexDir, { recursive: true });
+await fs.mkdir(redactionProfileHome, { recursive: true });
+const redactionChild = spawn('node', ['dist/http.js'], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_EXPOSE_ABSOLUTE_PATHS: '0',
+    CODEXPRO_ROOT: root,
+    CODEXPRO_ALLOWED_ROOTS: [root, alternateRoot].join(path.delimiter),
+    CODEXPRO_HOST: '127.0.0.1',
+    CODEXPRO_PORT: String(redactionPort),
+    CODEXPRO_HTTP_TOKEN: token,
+    CODEXPRO_BASH_MODE: 'safe',
+    CODEXPRO_WRITE_MODE: 'handoff',
+    CODEXPRO_TOOL_MODE: 'full',
+    CODEXPRO_CODEX_DIR: redactionCodexDir,
+    CODEXPRO_HOME: redactionProfileHome
+  },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+
+try {
+  await waitForListening(redactionChild);
+  const redactionBase = `http://127.0.0.1:${redactionPort}`;
+  const leakCandidates = [realRoot, root, realAlternateRoot, alternateRoot, profileHome, redactionHomeBase, os.homedir()];
+
+  for (const endpoint of ['/healthz', '/admin/profile']) {
+    const response = await fetch(`${redactionBase}${endpoint}`, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    if (response.status !== 200) {
+      throw new Error(`expected authenticated ${endpoint} to return 200, got ${response.status}`);
+    }
+    const body = await response.text();
+    for (const leaked of leakCandidates) {
+      if (!body.includes(leaked)) continue;
+      const offenders = [];
+      const findLeaks = (value, trail) => {
+        if (typeof value === 'string') {
+          if (value.includes(leaked)) offenders.push(`${trail} = ${value}`);
+        } else if (Array.isArray(value)) {
+          value.forEach((child, index) => findLeaks(child, `${trail}[${index}]`));
+        } else if (value && typeof value === 'object') {
+          for (const [key, child] of Object.entries(value)) findLeaks(child, `${trail}.${key}`);
+        }
+      };
+      findLeaks(JSON.parse(body), endpoint);
+      throw new Error(`${endpoint} leaked an absolute local path (${leaked}) with redaction enabled:\n  ${offenders.join('\n  ')}`);
+    }
+    // A label immediately followed by more path characters means a registered path
+    // matched mid-segment, e.g. /home/u/.codex rewriting /home/u/.codexpro into
+    // "[codex-data]pro". Not a leak, but misleading, so fail on it.
+    const malformed = body.match(/\[[a-z-]+(?::[^\]]+)?\][A-Za-z0-9_-]/);
+    if (malformed) {
+      throw new Error(`${endpoint} produced a label that swallowed part of a path segment: ${malformed[0]}`);
+    }
+  }
+
+  const redactedHealth = await (await fetch(`${redactionBase}/healthz`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })).json();
+  if (redactedHealth.ok !== true || redactedHealth.authRequired !== true) {
+    throw new Error(`redacted healthz lost its diagnostics: ${JSON.stringify(redactedHealth)}`);
+  }
+  if (!String(redactedHealth.defaultRoot).startsWith('[')) {
+    throw new Error(`redacted healthz did not label defaultRoot: ${redactedHealth.defaultRoot}`);
+  }
+  if (!Array.isArray(redactedHealth.allowedRoots) || !redactedHealth.allowedRoots.every((entry) => String(entry).startsWith('['))) {
+    throw new Error(`redacted healthz did not label allowedRoots: ${JSON.stringify(redactedHealth.allowedRoots)}`);
+  }
+} finally {
+  redactionChild.kill('SIGTERM');
+  await waitForExit(redactionChild).catch(() => {});
+}
+
+const exposedPort = await getFreePort();
+const exposedChild = spawn('node', ['dist/http.js'], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_EXPOSE_ABSOLUTE_PATHS: '1',
+    CODEXPRO_ROOT: root,
+    CODEXPRO_ALLOWED_ROOTS: root,
+    CODEXPRO_HOST: '127.0.0.1',
+    CODEXPRO_PORT: String(exposedPort),
+    CODEXPRO_HTTP_TOKEN: token,
+    CODEXPRO_HOME: profileHome
+  },
+  stdio: ['ignore', 'pipe', 'pipe']
+});
+
+try {
+  await waitForListening(exposedChild);
+  const exposedHealth = await (await fetch(`http://127.0.0.1:${exposedPort}/healthz`, {
+    headers: { Authorization: `Bearer ${token}` }
+  })).json();
+  if (await fs.realpath(exposedHealth.defaultRoot) !== realRoot) {
+    throw new Error(`CODEXPRO_EXPOSE_ABSOLUTE_PATHS=1 did not return the real healthz root: ${exposedHealth.defaultRoot}`);
+  }
+} finally {
+  exposedChild.kill('SIGTERM');
+  await waitForExit(exposedChild).catch(() => {});
 }
 
 console.log('✓ http smoke test passed');

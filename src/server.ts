@@ -19,6 +19,7 @@ import { listCodexSessions, readCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
+import { pathRedactions, redactPathsDeep, redactPathsInText } from "./pathLabels.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -103,7 +104,21 @@ function validateToolArgs(name: string, options: Record<string, unknown>, args: 
   throw new CodexProError(`Invalid arguments for ${name}: ${details}`);
 }
 
-function tagToolResult(result: any, name: string, options: Record<string, unknown>): any {
+function redactAbsolutePaths(result: any, config: CodexProConfig): void {
+  const structured = result.structuredContent;
+  const ordered = pathRedactions(config, structured && typeof structured === "object" ? structured : {});
+  if (!ordered.length) return;
+  if (structured && typeof structured === "object") result.structuredContent = redactPathsDeep(structured, ordered);
+  if (Array.isArray(result.content)) {
+    result.content = result.content.map((item: any) =>
+      item?.type === "text" && typeof item.text === "string"
+        ? { ...item, text: redactPathsInText(item.text, ordered) }
+        : item
+    );
+  }
+}
+
+function tagToolResult(result: any, name: string, options: Record<string, unknown>, config: CodexProConfig): any {
   if (!result || typeof result !== "object") return result;
   const structured = result.structuredContent;
   const base =
@@ -117,6 +132,7 @@ function tagToolResult(result: any, name: string, options: Record<string, unknow
   };
   const meta = (options._meta as Record<string, unknown> | undefined) ?? {};
   result.structuredContent = meta.ui || meta["openai/outputTemplate"] ? compactStructuredContent(tagged) : tagged;
+  if (!config.exposeAbsolutePaths) redactAbsolutePaths(result, config);
   return result;
 }
 
@@ -273,6 +289,7 @@ function assertWriteToolAllowed(config: CodexProConfig, relPath: string): void {
 }
 
 function registerToolCompat(
+  config: CodexProConfig,
   server: McpServer,
   name: string,
   options: Record<string, unknown>,
@@ -281,11 +298,11 @@ function registerToolCompat(
   const wrapped = async (args: any) => {
     const started = Date.now();
     try {
-      const result = tagToolResult(await handler(args ?? {}), name, options);
+      const result = tagToolResult(await handler(args ?? {}), name, options, config);
       logToolCall(name, result?.isError ? "error" : "ok", started);
       return result;
     } catch (error) {
-      const result = tagToolResult(errorResult(error), name, options);
+      const result = tagToolResult(errorResult(error), name, options, config);
       logToolCall(name, "error", started);
       return result;
     }
@@ -465,7 +482,7 @@ function registerCodexTool(
 ): void {
   if (!shouldRegisterTool(config, name)) return;
   const validatedHandler: CodexToolHandler = (args) => handler(validateToolArgs(name, options, args));
-  registerToolCompat(server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
+  registerToolCompat(config, server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
   rememberRegisteredTool(server, name);
   rememberRegisteredToolHandler(server, name, validatedHandler);
 }
@@ -1049,6 +1066,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         codexDir: config.codexDir,
         writeMode: config.writeMode,
         toolMode: config.toolMode,
+        exposeAbsolutePaths: config.exposeAbsolutePaths,
         toolCards: config.toolCards,
         connectionTest: config.connectionTest,
         analysisEnabled: config.analysisEnabled,

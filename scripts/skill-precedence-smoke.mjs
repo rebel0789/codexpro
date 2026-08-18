@@ -3,6 +3,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { discoverSkillInventory, loadSkill } from '../dist/capabilitiesOps.js';
 
+// These harnesses realpath and stat the paths CodexPro returns, so they need the raw
+// absolute form. Production defaults to redacted labels; see the redaction assertions
+// at the end of scripts/smoke.mjs for coverage of the default behaviour.
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 async function writeSkill(root, relativeDir, name, description, heading) {
   const dir = path.join(root, relativeDir);
   await fs.mkdir(dir, { recursive: true });
