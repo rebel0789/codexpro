@@ -40,6 +40,26 @@ function workspaceIdForRoot(realRoot: string): string {
   return `ws_${createHash("sha256").update(realRoot).digest("hex").slice(0, 24)}`;
 }
 
+export class WorkspaceRegistry {
+  private readonly workspaces = new Map<string, Workspace>();
+
+  get(id: string): Workspace | undefined {
+    return this.workspaces.get(id);
+  }
+
+  findByRoot(root: string): Workspace | undefined {
+    return [...this.workspaces.values()].find((workspace) => workspace.root === root);
+  }
+
+  set(workspace: Workspace): void {
+    this.workspaces.set(workspace.id, workspace);
+  }
+
+  values(): Workspace[] {
+    return [...this.workspaces.values()];
+  }
+}
+
 function maybeRealpath(existingPath: string): string | undefined {
   try {
     return fs.realpathSync.native(existingPath);
@@ -59,13 +79,15 @@ function closestExistingParent(absPath: string): string {
 }
 
 export class WorkspaceManager {
-  private readonly workspaces = new Map<string, Workspace>();
+  private readonly registry: WorkspaceRegistry;
   private selectedWorkspaceId?: string;
 
-  constructor(private readonly config: CodexProConfig) {}
+  constructor(private readonly config: CodexProConfig, options: { registry?: WorkspaceRegistry } = {}) {
+    this.registry = options.registry ?? new WorkspaceRegistry();
+  }
 
   defaultWorkspace(): Workspace {
-    const existing = [...this.workspaces.values()].find((workspace) => workspace.root === this.config.defaultRoot);
+    const existing = this.registry.findByRoot(this.config.defaultRoot);
     return existing ?? this.openWorkspace(this.config.defaultRoot, { select: false });
   }
 
@@ -93,7 +115,7 @@ export class WorkspaceManager {
       );
     }
 
-    const existing = [...this.workspaces.values()].find((workspace) => workspace.root === realRoot);
+    const existing = this.registry.findByRoot(realRoot);
     if (existing) {
       if (options.select !== false) this.selectedWorkspaceId = existing.id;
       return existing;
@@ -101,7 +123,7 @@ export class WorkspaceManager {
 
     const id = workspaceIdForRoot(realRoot);
     const workspace = { id, root: realRoot, openedAt: new Date().toISOString() };
-    this.workspaces.set(id, workspace);
+    this.registry.set(workspace);
     if (options.select !== false) this.selectedWorkspaceId = id;
     return workspace;
   }
@@ -109,24 +131,20 @@ export class WorkspaceManager {
   getWorkspace(id?: string): Workspace {
     if (!id) {
       if (this.selectedWorkspaceId) {
-        const selected = this.workspaces.get(this.selectedWorkspaceId);
+        const selected = this.registry.get(this.selectedWorkspaceId);
         if (selected) return selected;
       }
       return this.selectDefaultWorkspace();
     }
-    const workspace = this.workspaces.get(id);
-    if (!workspace) {
-      const configuredRoot = this.config.allowedRoots.find((allowedRoot) => workspaceIdForRoot(allowedRoot) === id);
-      if (configuredRoot) return this.openWorkspace(configuredRoot, { select: false });
-    }
-    if (!workspace) {
-      throw new CodexProError(`Unknown workspace_id: ${id}. Call open_workspace first.`);
-    }
-    return workspace;
+    const workspace = this.registry.get(id);
+    if (workspace) return workspace;
+    const configuredRoot = this.config.allowedRoots.find((allowedRoot) => workspaceIdForRoot(allowedRoot) === id);
+    if (configuredRoot) return this.openWorkspace(configuredRoot, { select: false });
+    throw new CodexProError(`Unknown workspace_id: ${id}. Call open_workspace first.`);
   }
 
   listWorkspaces(): Workspace[] {
-    return [...this.workspaces.values()];
+    return this.registry.values();
   }
 
   currentWorkspaceId(): string {

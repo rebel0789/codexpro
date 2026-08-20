@@ -81,7 +81,7 @@ codexpro settings show
 codexpro start
 ```
 
-Ask ChatGPT to `open_workspace` on an allowed project. `open_current_workspace` returns to the launch repo.
+Ask ChatGPT to `open_workspace` on an allowed project. Pass the returned `workspace_id` on later tool calls; it stays valid for the lifetime of this CodexPro process even if the client starts a new MCP session. `open_current_workspace` returns to the launch repo. Omitting `workspace_id` uses the session-local selection only.
 
 For two ChatGPT accounts or hard isolation, run two CodexPro processes on different ports and Server URLs.
 

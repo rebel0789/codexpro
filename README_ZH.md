@@ -91,7 +91,7 @@ codexpro settings show
 codexpro start
 ```
 
-让 ChatGPT 对已允许项目执行 `open_workspace`。`open_current_workspace` 切回启动仓库。
+让 ChatGPT 对已允许项目执行 `open_workspace`，并在后续工具调用中传入返回的 `workspace_id`；该 id 在整个 CodexPro 进程内保持有效。`open_current_workspace` 切回启动仓库。省略 `workspace_id` 时只使用当前 MCP session 的选择。
 
 两个 ChatGPT 账号或需要硬隔离时，用不同端口和 Server URL 跑两个 CodexPro 进程。
 

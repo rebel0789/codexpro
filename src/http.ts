@@ -19,6 +19,7 @@ import {
   type WorkspaceProfile
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
+import { WorkspaceRegistry } from "./guard.js";
 import { createCodexProServer } from "./server.js";
 
 function escapeHtml(value: unknown): string {
@@ -1454,6 +1455,7 @@ async function main(): Promise<void> {
   }
 
   const app = express();
+  const workspaceRegistry = new WorkspaceRegistry();
   const logRequests = process.env.CODEXPRO_LOG_REQUESTS === "1";
   const authFailureWindow = new Map<string, { count: number; resetAt: number }>();
   const authFailureLimit = 10;
@@ -1699,7 +1701,7 @@ async function main(): Promise<void> {
           if (closedSessionId) transports.delete(closedSessionId);
         };
 
-        const server = createCodexProServer(config);
+        const server = createCodexProServer(config, { workspaceRegistry });
         await server.connect(transport);
       } else {
         sendSessionError(res, sessionId);

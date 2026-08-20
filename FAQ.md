@@ -350,7 +350,7 @@ codexpro settings show
 codexpro start
 ```
 
-Confirm `Projects` lists the extra roots, then restart the connector so the admin page Allowed Roots list refreshes. Ask ChatGPT to open an allowed project. `open_workspace` makes it the selected project for that MCP session, and later tools can omit `workspace_id`. `open_current_workspace` switches back to the launch project.
+Confirm `Projects` lists the extra roots, then restart the connector so the admin page Allowed Roots list refreshes. Ask ChatGPT to open an allowed project. `open_workspace` returns a `workspace_id` that stays valid for later tool calls on this CodexPro process, including a later MCP session. It also becomes the selected project for the current MCP session, so tools in that same session may omit `workspace_id`. `open_current_workspace` switches the session selection back to the launch project without invalidating other ids. Unknown `workspace_id` values fail closed and never fall back to the launch project.
 
 `--clear-projects` removes the saved extra roots from that launch workspace profile:
 
@@ -358,7 +358,7 @@ Confirm `Projects` lists the extra roots, then restart the connector so the admi
 codexpro settings set --clear-projects
 ```
 
-Workspace selection is isolated between MCP sessions created by the client. A ChatGPT conversation is not guaranteed to map one-to-one to an MCP session, so use separate CodexPro processes when strict isolation matters.
+Workspace selection is isolated between MCP sessions created by the client. Registered `workspace_id` values are process-wide, so an explicit id from `open_workspace` still resolves after the client opens a new session. A ChatGPT conversation is not guaranteed to map one-to-one to an MCP session, so pass `workspace_id` on later tool calls. Use separate CodexPro processes when you need separate allowlists or public endpoints.
 
 For separate processes, two ChatGPT accounts, or two ngrok domains on one machine, run two CodexPro processes with different local ports and different public hostnames:
 
@@ -371,7 +371,7 @@ Run `codexpro setup` in each repo and save a profile per workspace. Do not reuse
 
 ## How do multiple ChatGPT sessions avoid overwriting each other?
 
-Workspace selection is session-local. For shared files, read the file first and pass its returned SHA-256 as `expected_sha256` to `write` or `edit`. CodexPro rejects the operation if the file changed after that read. New files use atomic replacement; existing files are updated in place to retain inode-bound metadata and hard links.
+Workspace selection is session-local. Explicit `workspace_id` values are not: they resolve from the process workspace registry and never fall back to another root. For shared files, read the file first and pass its returned SHA-256 as `expected_sha256` to `write` or `edit`. CodexPro rejects the operation if the file changed after that read. New files use atomic replacement; existing files are updated in place to retain inode-bound metadata and hard links.
 
 This protects against stale file content. It does not turn CodexPro into a collaborative merge server, so separate worktrees remain the stronger choice for large overlapping changes.
 

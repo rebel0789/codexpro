@@ -207,6 +207,22 @@ function postToolsListWithSession(baseUrl, token, sessionId) {
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
 const alternateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-alternate-'));
 await fs.writeFile(path.join(alternateRoot, 'selected.txt'), 'http alternate workspace\n', 'utf8');
+const nestedARoot = path.join(root, 'nested-worktree-a');
+const nestedBRoot = path.join(root, 'nested-worktree-b');
+await fs.mkdir(nestedARoot, { recursive: true });
+await fs.mkdir(nestedBRoot, { recursive: true });
+await fs.writeFile(path.join(nestedARoot, 'known-file.txt'), 'nested http workspace a\n', 'utf8');
+await fs.writeFile(path.join(nestedBRoot, 'known-file.txt'), 'nested http workspace b\n', 'utf8');
+for (const nestedRoot of [nestedARoot, nestedBRoot]) {
+  for (const args of [
+    ['init'],
+    ['add', 'known-file.txt'],
+    ['-c', 'user.email=smoke@example.com', '-c', 'user.name=Smoke Test', 'commit', '-m', 'nested worktree']
+  ]) {
+    const result = spawnSync('git', args, { cwd: nestedRoot, encoding: 'utf8' });
+    if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed in ${nestedRoot}: ${result.stderr || result.stdout}`);
+  }
+}
 const profileHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-profile-home-'));
 await fs.mkdir(path.join(root, '.codex', 'skills', 'http-smoke-skill'), { recursive: true });
 await fs.writeFile(path.join(root, '.codex', 'skills', 'http-smoke-skill', 'SKILL.md'), [
@@ -679,17 +695,99 @@ try {
 
     await withClient(mcpUrl, async (secondClient) => {
       const secondList = await callTool(secondClient, 'list_workspaces');
-      if (
-        secondList.structuredContent.selected_workspace_id === alternate.structuredContent.workspace_id
-        || secondList.structuredContent.workspaces.some((workspace) => workspace.root === alternateRoot)
-      ) {
+      if (secondList.structuredContent.selected_workspace_id === alternate.structuredContent.workspace_id) {
         throw new Error(`HTTP workspace selection leaked between MCP sessions: ${JSON.stringify(secondList.structuredContent)}`);
+      }
+      const secondExplicit = await callTool(secondClient, 'read', {
+        workspace_id: alternate.structuredContent.workspace_id,
+        path: 'selected.txt'
+      });
+      const secondExplicitText = secondExplicit.content?.find?.((part) => part.type === 'text')?.text ?? '';
+      if (!secondExplicitText.includes('http alternate workspace')) {
+        throw new Error(`explicit workspace_id from another MCP session did not resolve: ${secondExplicitText}`);
+      }
+      const secondDefault = await callTool(secondClient, 'read', { path: 'session-checkpoint.txt' });
+      const secondDefaultText = secondDefault.content?.find?.((part) => part.type === 'text')?.text ?? '';
+      if (!secondDefaultText.includes('checkpoint changed') || secondDefaultText.includes('http alternate workspace')) {
+        throw new Error(`second HTTP session omit-id did not stay on the launch workspace: ${secondDefaultText}`);
       }
     });
 
     const firstList = await callTool(firstClient, 'list_workspaces');
     if (firstList.structuredContent.selected_workspace_id !== alternate.structuredContent.workspace_id) {
       throw new Error(`first HTTP session lost its workspace selection: ${JSON.stringify(firstList.structuredContent)}`);
+    }
+  });
+
+  const nestedOpened = await withClient(mcpUrl, async (client) => {
+    const openedA = await callTool(client, 'open_workspace', { root: nestedARoot, include_tree: false });
+    const openedB = await callTool(client, 'open_workspace', { root: nestedBRoot, include_tree: false });
+    if (openedA.structuredContent.workspace_id === openedB.structuredContent.workspace_id) {
+      throw new Error('distinct nested worktrees received the same workspace_id');
+    }
+    await callTool(client, 'open_current_workspace', { include_tree: false });
+    return {
+      a: openedA.structuredContent,
+      b: openedB.structuredContent
+    };
+  });
+
+  await withClient(mcpUrl, async (client) => {
+    const readA = await callTool(client, 'read', {
+      workspace_id: nestedOpened.a.workspace_id,
+      path: 'known-file.txt'
+    });
+    const readAText = readA.content?.find?.((part) => part.type === 'text')?.text ?? '';
+    if (!readAText.includes('nested http workspace a') || readA.structuredContent.root !== nestedOpened.a.root) {
+      throw new Error(`dynamic nested workspace did not survive the next MCP session: ${JSON.stringify(readA.structuredContent)}`);
+    }
+
+    const bashA = await callTool(client, 'bash', {
+      workspace_id: nestedOpened.a.workspace_id,
+      command: 'git rev-parse --show-toplevel'
+    });
+    const bashAOut = `${bashA.structuredContent.stdout ?? ''}\n${bashA.structuredContent.cwd ?? ''}`;
+    if (!bashAOut.includes(nestedOpened.a.root) || bashA.structuredContent.root !== nestedOpened.a.root) {
+      throw new Error(`bash did not resolve dynamic nested workspace: ${JSON.stringify(bashA.structuredContent)}`);
+    }
+
+    const readB = await callTool(client, 'read', {
+      workspace_id: nestedOpened.b.workspace_id,
+      path: 'known-file.txt'
+    });
+    const readBText = readB.content?.find?.((part) => part.type === 'text')?.text ?? '';
+    if (!readBText.includes('nested http workspace b')) {
+      throw new Error(`second nested workspace was lost: ${readBText}`);
+    }
+
+    await callTool(client, 'open_workspace', { root: nestedBRoot, include_tree: false });
+    const readAWhileBSelected = await callTool(client, 'read', {
+      workspace_id: nestedOpened.a.workspace_id,
+      path: 'known-file.txt'
+    });
+    const readAWhileBText = readAWhileBSelected.content?.find?.((part) => part.type === 'text')?.text ?? '';
+    if (!readAWhileBText.includes('nested http workspace a')) {
+      throw new Error('explicit nested workspace_id lost to selected workspace');
+    }
+
+    const changes = await callTool(client, 'show_changes', {
+      workspace_id: nestedOpened.a.workspace_id,
+      include_diff: false
+    });
+    if (changes.structuredContent.workspace_id !== nestedOpened.a.workspace_id || changes.structuredContent.root !== nestedOpened.a.root) {
+      throw new Error(`show_changes did not stay on the dynamic nested workspace: ${JSON.stringify(changes.structuredContent)}`);
+    }
+
+    const unknown = await client.callTool({
+      name: 'read',
+      arguments: { workspace_id: 'ws_does_not_exist', path: 'session-checkpoint.txt' }
+    });
+    const unknownText = unknown.content?.find?.((part) => part.type === 'text')?.text ?? JSON.stringify(unknown.structuredContent);
+    if (!unknown.isError || !/Unknown workspace_id: ws_does_not_exist/.test(unknownText)) {
+      throw new Error(`unknown workspace_id must fail closed, got: ${unknownText}`);
+    }
+    if (unknownText.includes('checkpoint changed') || unknownText.includes('nested http workspace')) {
+      throw new Error(`unknown workspace_id must not read another workspace: ${unknownText}`);
     }
   });
 

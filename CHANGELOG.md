@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Kept HTTP `open_workspace` ids resolvable across independent MCP sessions by sharing a process-wide workspace registry while leaving selection session-local. Explicit unknown ids still fail closed and never fall back to the launch workspace. Nested allowed worktrees now survive the next ChatGPT tool call.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.

@@ -281,7 +281,7 @@ codexpro settings show
 codexpro start
 ```
 
-确认输出里的 `Projects` 列出了额外根目录，然后重启 connector，管理页 Allowed Roots 才会刷新。让 ChatGPT 打开已允许的项目。`open_workspace` 会把它设为当前 MCP session 的选择，之后其他工具可以省略 `workspace_id`。`open_current_workspace` 会切回启动时的主项目。
+确认输出里的 `Projects` 列出了额外根目录，然后重启 connector，管理页 Allowed Roots 才会刷新。让 ChatGPT 打开已允许的项目。`open_workspace` 返回的 `workspace_id` 在整个 CodexPro 进程内保持有效，即使客户端随后开启新的 MCP session。当前 MCP session 会把该项目设为选择，因此同一 session 里后续工具可以省略 `workspace_id`。`open_current_workspace` 只把 session 选择切回启动项目，不会让其他 id 失效。未知 `workspace_id` 会失败，绝不会静默回退到启动仓库。
 
 清除已保存的额外项目：
 
@@ -289,7 +289,7 @@ codexpro start
 codexpro settings set --clear-projects
 ```
 
-项目选择按 MCP session 隔离，但 ChatGPT conversation 不保证和 MCP session 一一对应。需要严格隔离、两个 ChatGPT 账号、或两个 ngrok 域名时，请跑两个 CodexPro 进程，并用不同本地端口和不同公网 hostname：
+项目选择按 MCP session 隔离，但已打开的 `workspace_id` 属于进程级注册表。ChatGPT conversation 不保证和 MCP session 一一对应，因此后续工具调用应带上 `workspace_id`。需要独立 allowlist 或独立公网入口时，请跑两个 CodexPro 进程，并用不同本地端口和不同公网 hostname：
 
 ```text
 repo A: port 8787, hostname A, ChatGPT plugin URL A
