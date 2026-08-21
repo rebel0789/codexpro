@@ -421,9 +421,9 @@ try {
     cloudflareTokenFile: path.join(root, 'stale-cloudflare-token')
   }, null, 2), 'utf8');
 
-  const profileSave = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+  const profileSave = await fetch(`${baseUrl}/admin/profile`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', Authorization: `Bearer ${token}` },
     body: JSON.stringify({
       tunnel: 'ngrok',
       hostname: 'https://codexpro-http-smoke.ngrok-free.app/mcp',
