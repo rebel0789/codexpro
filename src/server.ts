@@ -638,6 +638,30 @@ function patchTouchedPaths(patch: string): string[] {
   return [...paths];
 }
 
+function gitApplyWorkspaceContext(workspace: Workspace, maxOutputBytes: number): { cwd: string; directoryArgs: string[] } {
+  const options = {
+    cwd: workspace.root,
+    encoding: "utf8" as const,
+    maxBuffer: maxOutputBytes,
+    env: { ...process.env, NO_COLOR: "1" }
+  };
+  const topLevel = spawnSync("git", ["rev-parse", "--show-toplevel"], options);
+  const prefixResult = spawnSync("git", ["rev-parse", "--show-prefix"], options);
+  if (topLevel.error || topLevel.status !== 0 || prefixResult.error || prefixResult.status !== 0) {
+    return { cwd: workspace.root, directoryArgs: [] };
+  }
+  const cwd = topLevel.stdout.trim();
+  const prefix = prefixResult.stdout.trim().replace(/\/+$/, "");
+  if (!cwd || prefix.startsWith("../") || path.posix.isAbsolute(prefix)) {
+    return { cwd: workspace.root, directoryArgs: [] };
+  }
+  return { cwd, directoryArgs: prefix ? [`--directory=${prefix}`] : [] };
+}
+
+function gitApplyWasSkipped(result: ReturnType<typeof spawnSync>): boolean {
+  return /(?:^|[\r\n])Skipped patch ['"]/i.test(`${result.stdout ?? ""}\n${result.stderr ?? ""}`);
+}
+
 async function applyWorkspacePatch(
   config: CodexProConfig,
   guard: PathGuard,
@@ -669,26 +693,33 @@ async function applyWorkspacePatch(
       assertWriteToolAllowed(config, touchedPath);
     }
 
-    const check = spawnSync("git", ["apply", "--check", "--whitespace=nowarn"], {
-      cwd: workspace.root,
+    const gitApply = gitApplyWorkspaceContext(workspace, config.maxOutputBytes);
+    const check = spawnSync("git", ["apply", "--check", "--verbose", "--whitespace=nowarn", ...gitApply.directoryArgs], {
+      cwd: gitApply.cwd,
       input: patch,
       encoding: "utf8",
       maxBuffer: config.maxOutputBytes,
       env: { ...process.env, NO_COLOR: "1" }
     });
-    if (check.error || check.status !== 0) {
-      throw new CodexProError(redactSensitiveText(check.stderr?.trim() || check.stdout?.trim() || check.error?.message || "git apply --check failed"));
+    if (check.error || check.status !== 0 || gitApplyWasSkipped(check)) {
+      throw new CodexProError(
+        redactSensitiveText(
+          check.stderr?.trim() || check.stdout?.trim() || check.error?.message || "git apply --check failed or skipped a workspace path"
+        )
+      );
     }
 
-    const applied = spawnSync("git", ["apply", "--whitespace=nowarn"], {
-      cwd: workspace.root,
+    const applied = spawnSync("git", ["apply", "--verbose", "--whitespace=nowarn", ...gitApply.directoryArgs], {
+      cwd: gitApply.cwd,
       input: patch,
       encoding: "utf8",
       maxBuffer: config.maxOutputBytes,
       env: { ...process.env, NO_COLOR: "1" }
     });
-    if (applied.error || applied.status !== 0) {
-      throw new CodexProError(redactSensitiveText(applied.stderr?.trim() || applied.stdout?.trim() || applied.error?.message || "git apply failed"));
+    if (applied.error || applied.status !== 0 || gitApplyWasSkipped(applied)) {
+      throw new CodexProError(
+        redactSensitiveText(applied.stderr?.trim() || applied.stdout?.trim() || applied.error?.message || "git apply failed or skipped a workspace path")
+      );
     }
 
     const diff = redactSensitiveText(patch.trimEnd());
