@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed the local web profile editor to reuse the captured CodexPro token as a Bearer credential after browser history cleanup, so Save profile works on token-protected setups.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.
