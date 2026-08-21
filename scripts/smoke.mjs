@@ -451,6 +451,44 @@ if (JSON.stringify([...(selfTest.structuredContent.expected_tools ?? [])].sort()
 if (!selfTest.structuredContent.files_touched?.includes?.('.ai-bridge/codexpro-self-test.md')) {
   throw new Error('codexpro_self_test did not run the .ai-bridge write/edit probe');
 }
+try {
+  await fs.access(path.join(tmp, '.ai-bridge', 'codexpro-self-test.md'));
+  throw new Error('codexpro_self_test left its transient write probe behind');
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+const independentContextSelfTest = await client.request('tools/call', {
+  name: 'codexpro_self_test',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    write_probe: false,
+    bash_probe: false,
+    pro_context_probe: true,
+    include_global_skills: false,
+    max_skills: 4
+  }
+});
+const independentContextCheck = independentContextSelfTest.structuredContent.checks?.find?.((item) => item.name === 'selected-only pro context');
+if (independentContextCheck?.status !== 'pass' || /write probe/i.test(independentContextCheck.detail ?? '')) {
+  throw new Error(`codexpro_self_test pro_context_probe still depends on write_probe: ${JSON.stringify(independentContextCheck)}`);
+}
+await fs.mkdir(path.join(tmp, '.ai-bridge'), { recursive: true });
+const preExistingProbePath = path.join(tmp, '.ai-bridge', 'codexpro-self-test.md');
+await fs.writeFile(preExistingProbePath, 'pre-existing self-test content\n', 'utf8');
+await client.request('tools/call', {
+  name: 'codexpro_self_test',
+  arguments: {
+    workspace_id: current.structuredContent.workspace_id,
+    write_probe: true,
+    bash_probe: false,
+    pro_context_probe: false,
+    include_global_skills: false,
+    max_skills: 4
+  }
+});
+if (await fs.readFile(preExistingProbePath, 'utf8') !== 'pre-existing self-test content\n') {
+  throw new Error('codexpro_self_test did not restore a pre-existing probe file');
+}
 const snapshotAlias = await client.request('tools/call', {
   name: 'workspace_snapshot',
   arguments: {
