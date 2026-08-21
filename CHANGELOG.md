@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- On Windows, Bash now prefers Git for Windows instead of silently launching WSL, and server/self-test diagnostics report the resolved Bash, Git, and search runtimes including Node search fallback. Set `CODEXPRO_BASH_EXECUTABLE` to an absolute Bash path for an explicit override.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.

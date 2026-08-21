@@ -9,9 +9,9 @@ import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./gu
 import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, withFileWriteLocks } from "./fsOps.js";
 import { viewWorkspaceImage } from "./imageOps.js";
 import { importAttachmentFile } from "./importOps.js";
-import { searchWorkspace } from "./searchOps.js";
-import { runBash } from "./bashOps.js";
-import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
+import { searchWorkspace, searchBackendInfo } from "./searchOps.js";
+import { probeBashToolchain, resolveBashRuntime, runBash } from "./bashOps.js";
+import { gitDiff, gitDiffStatus, gitLog, gitRuntimeInfo, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
@@ -1034,6 +1034,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async () => {
+      const bashRuntime = resolveBashRuntime(config);
+      const gitRuntime = gitRuntimeInfo();
+      const searchBackend = searchBackendInfo();
       const safeConfig = {
         defaultRoot: config.defaultRoot,
         allowedRoots: config.allowedRoots,
@@ -1042,6 +1045,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         widgetDomain: config.widgetDomain,
         authEnabled: Boolean(config.authToken),
         bashMode: config.bashMode,
+        bashRuntime,
+        gitRuntime,
+        searchBackend,
         bashTranscript: config.bashTranscript,
         bashSessionId: config.bashSessionId ?? null,
         requireBashSession: config.requireBashSession,
@@ -1059,6 +1065,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         maxWriteBytes: config.maxWriteBytes,
         maxImportBytes: config.maxImportBytes,
         maxOutputBytes: config.maxOutputBytes,
+        maxBashTimeoutMs: config.maxBashTimeoutMs,
         maxSearchResults: config.maxSearchResults,
         blockedGlobs: config.blockedGlobs,
         registeredTools: registeredToolNames(server),
@@ -1097,6 +1104,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const checks: Array<{ name: string; status: "pass" | "warn" | "fail"; detail: string }> = [];
       const filesTouched: string[] = [];
       const probePath = `${config.contextDir}/codexpro-self-test.md`;
+      const bashRuntime = resolveBashRuntime(config);
+      const gitRuntime = gitRuntimeInfo();
+      const searchBackend = searchBackendInfo();
+      let bashToolchain: ReturnType<typeof probeBashToolchain> | undefined;
 
       const check = (name: string, status: "pass" | "warn" | "fail", detail: string) => {
         checks.push({ name, status, detail: cleanOneLine(detail, detail, 260) });
@@ -1106,6 +1117,31 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       check("tool mode", config.toolMode === "full" ? "pass" : "warn", `${config.toolMode}; expected tools: ${toolNamesForMode(config).length}`);
       check("write mode", config.writeMode === "off" ? "warn" : "pass", config.writeMode);
       check("bash mode", config.bashMode === "full" ? "warn" : "pass", config.bashMode);
+      check(
+        "bash runtime",
+        config.bashMode !== "off" && !bashRuntime.available
+          ? "fail"
+          : bashRuntime.runtime === "wsl"
+            ? "warn"
+            : "pass",
+        bashRuntime.available
+          ? `${bashRuntime.runtime} via ${bashRuntime.source}: ${bashRuntime.executable}`
+          : bashRuntime.error || "bash unavailable"
+      );
+      check(
+        "git runtime",
+        gitRuntime.available ? "pass" : "warn",
+        gitRuntime.available
+          ? `${gitRuntime.version || "unknown version"} via ${gitRuntime.executable || "PATH"}`
+          : gitRuntime.error || "git unavailable"
+      );
+      check(
+        "search backend",
+        searchBackend.backend === "ripgrep" ? "pass" : "warn",
+        searchBackend.backend === "ripgrep"
+          ? `${searchBackend.ripgrepVersion || "ripgrep"} via ${searchBackend.ripgrepPath || "PATH"}`
+          : searchBackend.reason
+      );
       check(
         "http auth",
         "pass",
@@ -1215,6 +1251,28 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           if (config.bashMode === "off") {
             check("bash policy", "warn", "bash disabled");
           } else {
+            bashToolchain = probeBashToolchain(config, workspace);
+            const toolSummary = (["node", "npm", "npx", "git", "rg"] as const)
+              .map((name) => {
+                const tool = bashToolchain?.tools[name];
+                return `${name}=${tool?.version || tool?.path || "unavailable"}`;
+              })
+              .join("; ");
+            const inconsistentNodeToolchain = !bashToolchain.tools.node.path && Boolean(bashToolchain.tools.npm.path || bashToolchain.tools.npx.path);
+            check(
+              "bash toolchain",
+              inconsistentNodeToolchain ? "warn" : "pass",
+              `${bashToolchain.cwd || "cwd unavailable"}; ${toolSummary}`
+            );
+            const shellGit = bashToolchain.tools.git;
+            if (gitRuntime.available) {
+              const aligned = Boolean(shellGit.version && gitRuntime.version && shellGit.version === gitRuntime.version);
+              check(
+                "git toolchain alignment",
+                aligned ? "pass" : "warn",
+                `dedicated=${gitRuntime.version || "unavailable"} (${gitRuntime.executable || "PATH"}); shell=${shellGit.version || "unavailable"} (${shellGit.path || "unavailable"})`
+              );
+            }
             const bashProbeOptions = { timeoutMs: 10_000, sessionId: config.bashSessionId };
             const pwd = await runBash(config, guard, workspace, "pwd", bashProbeOptions);
             if (config.bashMode === "safe") {
@@ -1277,6 +1335,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         registered_tools: actualTools,
         registered_tool_count: actualTools.length,
         bash_mode: config.bashMode,
+        bash_runtime: bashRuntime,
+        bash_toolchain: bashToolchain ?? null,
+        git_runtime: gitRuntime,
+        search_backend: searchBackend,
         bash_session_id: config.bashSessionId ?? null,
         require_bash_session: config.requireBashSession,
         write_mode: config.writeMode,
