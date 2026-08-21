@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Fixed `apply_patch` in workspaces that are subdirectories of a parent Git repository by applying workspace-relative patches under the Git prefix and rejecting Git's zero-exit `Skipped patch` result.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.

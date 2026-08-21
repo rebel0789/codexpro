@@ -82,6 +82,9 @@ await fs.writeFile(path.join(alternateWorkspace, 'selected.txt'), 'alternate wor
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'other.txt'), 'keep\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'patch-race.txt'), 'patch race initial\n', 'utf8');
+const nestedWorkspace = path.join(tmp, 'projects', 'nested');
+await fs.mkdir(nestedWorkspace, { recursive: true });
+await fs.writeFile(path.join(nestedWorkspace, 'delete-me.txt'), 'temporary', 'utf8');
 await fs.writeFile(path.join(tmp, 'config.txt'), 'OPENAI_API_KEY=sk-realSecretValue123\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'AGENTS.md'), '# Smoke Agents\n\n- Preserve demo.txt.\n', 'utf8');
 const codexHistoryDir = path.join(tmp, 'codex-history');
@@ -486,6 +489,32 @@ const inventory = await client.request('tools/call', { name: 'codexpro_inventory
 if (inventory.structuredContent.codexpro_tool !== 'codexpro_inventory') throw new Error('inventory result was not tagged for widget rendering');
 const opened = await client.request('tools/call', { name: 'open_workspace', arguments: { root: tmp, include_tree: true } });
 const ws = opened.structuredContent.workspace_id;
+const nestedOpened = await client.request('tools/call', { name: 'open_workspace', arguments: { root: nestedWorkspace, include_tree: false } });
+const nestedPatch = await client.request('tools/call', {
+  name: 'apply_patch',
+  arguments: {
+    workspace_id: nestedOpened.structuredContent.workspace_id,
+    patch: [
+      'diff --git a/delete-me.txt b/delete-me.txt',
+      'deleted file mode 100644',
+      '--- a/delete-me.txt',
+      '+++ /dev/null',
+      '@@ -1 +0,0 @@',
+      '-temporary',
+      '\\ No newline at end of file'
+    ].join('\n') + '\n'
+  }
+});
+if (!nestedPatch.structuredContent.changed) {
+  throw new Error(`apply_patch did not report a nested-workspace deletion: ${JSON.stringify(nestedPatch.structuredContent)}`);
+}
+try {
+  await fs.access(path.join(nestedWorkspace, 'delete-me.txt'));
+  throw new Error('apply_patch reported success but left the nested-workspace file on disk');
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+await client.request('tools/call', { name: 'open_workspace', arguments: { root: tmp, include_tree: false } });
 const viewedImage = await client.request('tools/call', { name: 'view_image', arguments: { workspace_id: ws, path: 'pixel.png' } });
 const imagePart = viewedImage.content?.find?.((part) => part.type === 'image');
 if (!imagePart?.data || imagePart.mimeType !== 'image/png' || viewedImage.structuredContent.width !== 1 || viewedImage.structuredContent.height !== 1) {
