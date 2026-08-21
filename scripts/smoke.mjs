@@ -1657,6 +1657,33 @@ if (!/not a git repository|git unavailable|fatal:/i.test(nonGitPayload)) {
 }
 nonGitClient.close();
 
+const wideRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-wide-root-'));
+const nestedRepo = path.join(wideRoot, 'project-b');
+await fs.mkdir(path.join(nestedRepo, 'src'), { recursive: true });
+await fs.writeFile(path.join(nestedRepo, 'src', 'file.cpp'), 'int value = 1;\n', 'utf8');
+for (const args of [['init'], ['add', 'src/file.cpp']]) {
+  const result = spawnSync('git', args, { cwd: nestedRepo, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`nested git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
+}
+const nestedCommit = spawnSync('git', ['-c', 'user.email=smoke@example.com', '-c', 'user.name=Smoke Test', 'commit', '-m', 'nested fixture'], { cwd: nestedRepo, encoding: 'utf8' });
+if (nestedCommit.status !== 0) throw new Error(`nested git commit failed: ${nestedCommit.stderr || nestedCommit.stdout}`);
+await fs.writeFile(path.join(nestedRepo, 'src', 'file.cpp'), 'int value = 2;\n', 'utf8');
+const wideClient = new McpStdioClient('node', ['dist/stdio.js', '--root', wideRoot, '--allow-root', wideRoot, '--tool-mode', 'full'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: wideRoot, CODEXPRO_ALLOWED_ROOTS: wideRoot }
+});
+await wideClient.request('initialize', { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'codexpro-wide-root-smoke', version: '0.1.0' } });
+wideClient.notify('notifications/initialized');
+const nestedStatus = await wideClient.request('tools/call', { name: 'git_status', arguments: { path: 'project-b/src/file.cpp' } });
+if (nestedStatus.isError || !JSON.stringify(nestedStatus).includes('src/file.cpp')) {
+  throw new Error(`path-scoped git_status did not resolve the nested repository: ${JSON.stringify(nestedStatus)}`);
+}
+const nestedDiff = await wideClient.request('tools/call', { name: 'git_diff', arguments: { path: 'project-b/src/file.cpp' } });
+if (nestedDiff.isError || !JSON.stringify(nestedDiff).includes('int value = 2;')) {
+  throw new Error(`path-scoped git_diff did not resolve the nested repository: ${JSON.stringify(nestedDiff)}`);
+}
+wideClient.close();
+
 const lowerAgentsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-lower-agents-'));
 await fs.writeFile(path.join(lowerAgentsRoot, 'agents.md'), '# Lowercase agents\n\n- Lowercase instruction file loaded.\n', 'utf8');
 await fs.mkdir(path.join(lowerAgentsRoot, 'src'));
