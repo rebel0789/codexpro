@@ -218,6 +218,19 @@ Use handoff mode if you want ChatGPT to write a plan only and let Codex execute 
 
 Use `CODEXPRO_WRITE_MODE=off` when you want direct `write` and `edit` tools removed from the advertised MCP tool list while still allowing bounded handoff/context files.
 
+## Which Bash does CodexPro use on Windows?
+
+For Windows-native workspaces, CodexPro prefers Git for Windows Bash when it is installed. It does not silently auto-select `C:\Windows\System32\bash.exe`, because that executable launches WSL and can expose a different Git, Node, npm, path model, and filesystem runtime from the native CodexPro process.
+
+To choose a Bash executable explicitly, set an absolute path before starting CodexPro:
+
+```powershell
+$env:CODEXPRO_BASH_EXECUTABLE = 'C:\Program Files\Git\bin\bash.exe'
+codexpro start
+```
+
+An explicit WSL launcher path is treated as an opt-in rather than an automatic fallback. `server_config` and `codexpro_self_test` report the selected Bash runtime, dedicated Git runtime, shell-visible toolchain, and whether search is using ripgrep or the Node fallback.
+
 ## Can CodexPro bind bash to a specific session id?
 
 CodexPro cannot attach to, read, or execute inside a specific Codex app conversation or terminal session.

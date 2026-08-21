@@ -239,6 +239,19 @@ const toolNames = tools.tools.map((tool) => tool.name);
 for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'import_file', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
+const diagnosticConfig = await client.request('tools/call', { name: 'server_config', arguments: {} });
+if (!diagnosticConfig.structuredContent.bashRuntime?.runtime || !diagnosticConfig.structuredContent.bashRuntime?.executable) {
+  throw new Error(`server_config omitted bash runtime diagnostics: ${JSON.stringify(diagnosticConfig.structuredContent)}`);
+}
+if (!diagnosticConfig.structuredContent.gitRuntime?.version) {
+  throw new Error(`server_config omitted dedicated Git diagnostics: ${JSON.stringify(diagnosticConfig.structuredContent)}`);
+}
+if (!diagnosticConfig.structuredContent.searchBackend?.backend) {
+  throw new Error(`server_config omitted search backend diagnostics: ${JSON.stringify(diagnosticConfig.structuredContent)}`);
+}
+if (process.platform === 'win32' && diagnosticConfig.structuredContent.bashRuntime.runtime === 'wsl' && diagnosticConfig.structuredContent.bashRuntime.source !== 'configured') {
+  throw new Error(`server_config silently auto-selected WSL: ${JSON.stringify(diagnosticConfig.structuredContent.bashRuntime)}`);
+}
 const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
 function hasWidgetMeta(name) {
@@ -450,6 +463,14 @@ if (JSON.stringify([...(selfTest.structuredContent.expected_tools ?? [])].sort()
 }
 if (!selfTest.structuredContent.files_touched?.includes?.('.ai-bridge/codexpro-self-test.md')) {
   throw new Error('codexpro_self_test did not run the .ai-bridge write/edit probe');
+}
+for (const diagnosticCheck of ['bash runtime', 'git runtime', 'search backend']) {
+  if (!selfTest.structuredContent.checks?.some?.((item) => item.name === diagnosticCheck)) {
+    throw new Error(`codexpro_self_test omitted ${diagnosticCheck} diagnostics: ${JSON.stringify(selfTest.structuredContent.checks)}`);
+  }
+}
+if (!selfTest.structuredContent.bash_runtime?.runtime || !selfTest.structuredContent.git_runtime?.version || !selfTest.structuredContent.search_backend?.backend) {
+  throw new Error(`codexpro_self_test omitted structured runtime diagnostics: ${JSON.stringify(selfTest.structuredContent)}`);
 }
 const snapshotAlias = await client.request('tools/call', {
   name: 'workspace_snapshot',

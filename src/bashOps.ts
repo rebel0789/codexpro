@@ -7,6 +7,27 @@ import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { redactSensitiveText } from "./redact.js";
 
+export type BashRuntimeKind = "native-bash" | "wsl" | "unix-bash" | "unavailable";
+
+export interface BashRuntimeInfo {
+  available: boolean;
+  executable: string | null;
+  runtime: BashRuntimeKind;
+  source: "configured" | "git-for-windows" | "path" | "system" | "unavailable";
+  error?: string;
+}
+
+export interface BashToolInfo {
+  path: string | null;
+  version: string | null;
+}
+
+export interface BashToolchainInfo {
+  runtime: BashRuntimeInfo;
+  cwd: string | null;
+  tools: Record<"node" | "npm" | "npx" | "git" | "rg", BashToolInfo>;
+}
+
 export interface BashResult {
   command: string;
   cwd: string;
@@ -16,6 +37,9 @@ export interface BashResult {
   stdout: string;
   stderr: string;
   truncated: boolean;
+  bashExecutable: string;
+  bashRuntime: BashRuntimeKind;
+  bashRuntimeSource: BashRuntimeInfo["source"];
   bashSessionId?: string;
 }
 
@@ -235,8 +259,130 @@ function makeEnv(config: CodexProConfig): NodeJS.ProcessEnv {
   return makeRestrictedBashEnv(config);
 }
 
-function bashExecutable(): string {
-  return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
+function usableExecutableFile(candidate: string | undefined): string | undefined {
+  if (!candidate) return undefined;
+  try {
+    const resolved = path.resolve(candidate);
+    if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) return undefined;
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return undefined;
+  }
+}
+
+function commandPaths(command: string): string[] {
+  const lookup = process.platform === "win32"
+    ? spawnSync("where.exe", [command], { encoding: "utf8", windowsHide: true })
+    : spawnSync("/bin/sh", ["-lc", `command -v ${command}`], { encoding: "utf8" });
+  if (lookup.error || lookup.status !== 0) return [];
+  return String(lookup.stdout ?? "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
+
+function isWindowsWslLauncher(executable: string, env: NodeJS.ProcessEnv): boolean {
+  const normalized = path.win32.normalize(executable).toLowerCase();
+  const systemRoot = path.win32.normalize(env.SystemRoot || env.WINDIR || "C:\\Windows").toLowerCase();
+  return (
+    normalized === path.win32.join(systemRoot, "System32", "bash.exe").toLowerCase() ||
+    normalized === path.win32.join(systemRoot, "Sysnative", "bash.exe").toLowerCase() ||
+    normalized.includes("\\windowsapps\\bash.exe")
+  );
+}
+
+function gitForWindowsBashCandidates(env: NodeJS.ProcessEnv): string[] {
+  const candidates: string[] = [];
+  for (const gitPath of commandPaths("git")) {
+    const parent = path.win32.dirname(gitPath);
+    const parentName = path.win32.basename(parent).toLowerCase();
+    if (parentName === "cmd" || parentName === "bin") {
+      candidates.push(path.win32.join(path.win32.dirname(parent), "bin", "bash.exe"));
+    }
+  }
+  for (const base of [env.ProgramW6432, env.ProgramFiles, env["ProgramFiles(x86)"]]) {
+    if (base) candidates.push(path.win32.join(base, "Git", "bin", "bash.exe"));
+  }
+  return [...new Set(candidates)];
+}
+
+export function resolveBashRuntime(config: CodexProConfig, env: NodeJS.ProcessEnv = process.env): BashRuntimeInfo {
+  if (config.bashExecutable) {
+    const executable = usableExecutableFile(config.bashExecutable);
+    if (!executable) {
+      return {
+        available: false,
+        executable: null,
+        runtime: "unavailable",
+        source: "configured",
+        error: `Configured Bash executable is unavailable: ${config.bashExecutable}`
+      };
+    }
+    return {
+      available: true,
+      executable,
+      runtime: process.platform === "win32" && isWindowsWslLauncher(executable, env) ? "wsl" : process.platform === "win32" ? "native-bash" : "unix-bash",
+      source: "configured"
+    };
+  }
+
+  if (process.platform === "win32") {
+    for (const candidate of gitForWindowsBashCandidates(env)) {
+      const executable = usableExecutableFile(candidate);
+      if (executable) return { available: true, executable, runtime: "native-bash", source: "git-for-windows" };
+    }
+    for (const candidate of commandPaths("bash")) {
+      const executable = usableExecutableFile(candidate);
+      if (!executable || isWindowsWslLauncher(executable, env)) continue;
+      return { available: true, executable, runtime: "native-bash", source: "path" };
+    }
+    const wslLauncher = commandPaths("bash")
+      .map((candidate) => usableExecutableFile(candidate))
+      .find((candidate): candidate is string => Boolean(candidate && isWindowsWslLauncher(candidate, env)));
+    return {
+      available: false,
+      executable: null,
+      runtime: "unavailable",
+      source: "unavailable",
+      error: wslLauncher
+        ? "Only the Windows WSL bash launcher was found. CodexPro does not auto-select WSL for a Windows-native workspace; install Git for Windows or set CODEXPRO_BASH_EXECUTABLE explicitly to opt in."
+        : "No Bash executable was found. Install Git for Windows or set CODEXPRO_BASH_EXECUTABLE to an absolute Bash path."
+    };
+  }
+
+  const systemBash = usableExecutableFile("/bin/bash");
+  if (systemBash) return { available: true, executable: systemBash, runtime: "unix-bash", source: "system" };
+  const pathBash = commandPaths("bash").map((candidate) => usableExecutableFile(candidate)).find(Boolean);
+  if (pathBash) return { available: true, executable: pathBash, runtime: "unix-bash", source: "path" };
+  return { available: false, executable: null, runtime: "unavailable", source: "unavailable", error: "No Bash executable was found." };
+}
+
+function probeThroughBash(runtime: BashRuntimeInfo, cwd: string, env: NodeJS.ProcessEnv, command: string): string | null {
+  if (!runtime.available || !runtime.executable) return null;
+  const result = spawnSync(runtime.executable, ["-lc", command], {
+    cwd,
+    env,
+    encoding: "utf8",
+    timeout: 2_000,
+    maxBuffer: 32_000,
+    windowsHide: true
+  });
+  if (result.error || result.status !== 0) return null;
+  return String(result.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+}
+
+export function probeBashToolchain(config: CodexProConfig, workspace: Workspace): BashToolchainInfo {
+  const runtime = resolveBashRuntime(config);
+  const env = makeEnv(config);
+  const tools = {} as BashToolchainInfo["tools"];
+  const cwd = probeThroughBash(runtime, workspace.root, env, "pwd");
+  for (const tool of ["node", "npm", "npx", "git", "rg"] as const) {
+    tools[tool] = {
+      path: probeThroughBash(runtime, workspace.root, env, `command -v ${tool}`),
+      version: probeThroughBash(runtime, workspace.root, env, `${tool} --version`)
+    };
+  }
+  return { runtime, cwd, tools };
 }
 
 function trimOutput(value: string, maxBytes: number): { value: string; truncated: boolean } {
@@ -278,9 +424,14 @@ export async function runBash(
   const cwd = cwdResolved.absPath;
   const timeoutMs = Math.max(1_000, Math.min(options.timeoutMs ?? 30_000, config.maxBashTimeoutMs));
   const start = Date.now();
+  const bashRuntime = resolveBashRuntime(config);
+  if (!bashRuntime.available || !bashRuntime.executable) {
+    throw new CodexProError(bashRuntime.error || "Bash is unavailable.");
+  }
+  const bashExecutable = bashRuntime.executable;
 
   return new Promise((resolve, reject) => {
-    const child = spawn(bashExecutable(), ["-lc", command], {
+    const child = spawn(bashExecutable, ["-lc", command], {
       cwd,
       env: makeEnv(config),
       stdio: ["ignore", "pipe", "pipe"],
@@ -349,6 +500,9 @@ export async function runBash(
         stdout: out.value,
         stderr: err.value,
         truncated: out.truncated || err.truncated,
+        bashExecutable,
+        bashRuntime: bashRuntime.runtime,
+        bashRuntimeSource: bashRuntime.source,
         ...(bashSessionId ? { bashSessionId } : {})
       });
     });

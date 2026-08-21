@@ -19,6 +19,7 @@ export interface CodexProConfig {
   authToken?: string;
   requireHttpToken: boolean;
   bashMode: BashMode;
+  bashExecutable?: string;
   bashTranscript: BashTranscriptMode;
   bashSessionId?: string;
   requireBashSession: boolean;
@@ -157,6 +158,20 @@ function numberFrom(value: string | undefined, fallback: number, min: number, ma
 function bashModeFrom(value: string | undefined): BashMode {
   if (value === "off" || value === "safe" || value === "full") return value;
   return "safe";
+}
+
+function bashExecutableFrom(value: string | undefined): string | undefined {
+  const raw = value?.trim();
+  if (!raw) return undefined;
+  const expanded = expandHome(raw);
+  if (!path.isAbsolute(expanded) && !path.win32.isAbsolute(expanded)) {
+    throw new Error("CODEXPRO_BASH_EXECUTABLE must be an absolute path to a Bash executable.");
+  }
+  const resolved = path.resolve(expanded);
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isFile()) {
+    throw new Error(`CODEXPRO_BASH_EXECUTABLE does not point to a file: ${resolved}`);
+  }
+  return fs.realpathSync.native(resolved);
 }
 
 function bashTranscriptFrom(value: string | undefined): BashTranscriptMode {
@@ -314,6 +329,7 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     authToken,
     requireHttpToken,
     bashMode: bashModeFrom(bashArg ?? process.env.CODEXPRO_BASH_MODE),
+    bashExecutable: bashExecutableFrom(process.env.CODEXPRO_BASH_EXECUTABLE),
     bashTranscript: bashTranscriptFrom(bashTranscriptArg ?? process.env.CODEXPRO_BASH_TRANSCRIPT),
     bashSessionId,
     requireBashSession,

@@ -1,6 +1,6 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
@@ -26,6 +26,46 @@ export interface SearchResult {
   truncated: boolean;
   used: "ripgrep" | "node";
   analysis?: StructuredSearchResult;
+}
+
+export interface SearchBackendInfo {
+  backend: "ripgrep" | "node";
+  ripgrepAvailable: boolean;
+  ripgrepPath: string | null;
+  ripgrepVersion: string | null;
+  reason: string;
+}
+
+function commandPath(command: string): string | null {
+  const lookup = process.platform === "win32"
+    ? spawnSync("where.exe", [command], { encoding: "utf8", windowsHide: true })
+    : spawnSync("/bin/sh", ["-lc", `command -v ${command}`], { encoding: "utf8" });
+  if (lookup.error || lookup.status !== 0) return null;
+  return String(lookup.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+}
+
+export function searchBackendInfo(): SearchBackendInfo {
+  const ripgrepPath = commandPath("rg");
+  if (!ripgrepPath) {
+    return {
+      backend: "node",
+      ripgrepAvailable: false,
+      ripgrepPath: null,
+      ripgrepVersion: null,
+      reason: "ripgrep unavailable; literal search uses the Node fallback"
+    };
+  }
+  const versionResult = spawnSync(ripgrepPath, ["--version"], { encoding: "utf8", windowsHide: true });
+  const ripgrepVersion = versionResult.error || versionResult.status !== 0
+    ? null
+    : String(versionResult.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+  return {
+    backend: "ripgrep",
+    ripgrepAvailable: true,
+    ripgrepPath,
+    ripgrepVersion,
+    reason: "ripgrep available"
+  };
 }
 
 function commandExists(command: string): Promise<boolean> {

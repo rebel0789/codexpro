@@ -4,6 +4,41 @@ import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { redactSensitiveText } from "./redact.js";
 
+export interface GitRuntimeInfo {
+  available: boolean;
+  executable: string | null;
+  version: string | null;
+  error?: string;
+}
+
+function resolveGitExecutable(): string | null {
+  const lookup = process.platform === "win32"
+    ? spawnSync("where.exe", ["git"], { encoding: "utf8", windowsHide: true })
+    : spawnSync("/bin/sh", ["-lc", "command -v git"], { encoding: "utf8" });
+  if (lookup.error || lookup.status !== 0) return null;
+  return String(lookup.stdout ?? "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? null;
+}
+
+export function gitRuntimeInfo(): GitRuntimeInfo {
+  const executable = resolveGitExecutable();
+  const versionResult = executable
+    ? spawnSync(executable, ["--version"], { encoding: "utf8", windowsHide: true })
+    : spawnSync("git", ["--version"], { encoding: "utf8", windowsHide: true });
+  if (versionResult.error || versionResult.status !== 0) {
+    return {
+      available: false,
+      executable,
+      version: null,
+      error: versionResult.error?.message || String(versionResult.stderr ?? "").trim() || `git exited with status ${versionResult.status}`
+    };
+  }
+  return {
+    available: true,
+    executable,
+    version: String(versionResult.stdout ?? "").trim() || null
+  };
+}
+
 function runGit(workspace: Workspace, args: string[], maxOutputBytes: number): string {
   const result = spawnSync("git", args, {
     cwd: workspace.root,
