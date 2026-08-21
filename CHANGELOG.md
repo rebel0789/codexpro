@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Made `codexpro_self_test` Pro-context probing independent of the write probe and restore or remove its temporary `.ai-bridge/codexpro-self-test.md` file after diagnostics.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.

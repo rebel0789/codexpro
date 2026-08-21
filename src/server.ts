@@ -1147,12 +1147,35 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         check("git status", "fail", errorText(error));
       }
 
+      let probeWasWritten = false;
+      let probeOriginal: Buffer | undefined;
+      let probeOriginalMode: number | undefined;
+      let probeDirExisted = true;
+      let probeAbsPath: string | undefined;
+
       if (parseBool(args.write_probe, true)) {
         if (config.writeMode === "off") {
           check("write/edit probe", "warn", "skipped because CODEXPRO_WRITE_MODE=off");
         } else {
           try {
             assertWriteToolAllowed(config, probePath);
+            const resolvedProbe = guard.resolve(workspace, probePath, { forWrite: true });
+            probeAbsPath = resolvedProbe.absPath;
+            try {
+              const originalStat = await fsp.stat(probeAbsPath);
+              if (!originalStat.isFile()) throw new CodexProError(`${probePath} exists but is not a regular file.`);
+              probeOriginal = await fsp.readFile(probeAbsPath);
+              probeOriginalMode = originalStat.mode;
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+            }
+            try {
+              await fsp.stat(path.dirname(probeAbsPath));
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+              probeDirExisted = false;
+            }
+
             const content = [
               "# CodexPro Self Test",
               "",
@@ -1162,6 +1185,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
               ""
             ].join("\n");
             await writeTextFile(config, guard, workspace, probePath, content, { createDirs: true, overwrite: true });
+            probeWasWritten = true;
             await editTextFile(config, guard, workspace, probePath, "marker: before", "marker: after", { expectedReplacements: 1 });
             const readBack = await readTextFile(config, guard, workspace, probePath, { maxBytes: 20_000 });
             if (!readBack.text.includes("marker: after")) throw new CodexProError("self-test edit marker was not found after edit.");
@@ -1183,31 +1207,68 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
 
       if (parseBool(args.pro_context_probe, true)) {
         try {
-          if (!filesTouched.includes(probePath)) {
-            check("selected-only pro context", "warn", "skipped because write probe did not create the selected file");
-          } else {
-            const context = await buildProContext(config, guard, workspace, {
-              title: "CodexPro Self Test Context",
-              selectedPaths: [probePath],
-              includeImportantFiles: false,
-              includeChangedFiles: false,
-              includeDiff: false,
-              includeAiBridge: false,
-              maxFiles: 4,
-              maxTotalBytes: 80_000
-            });
-            const exactOnly = context.filesIncluded.length === 1 && context.filesIncluded[0] === probePath;
-            check(
-              "selected-only pro context",
-              exactOnly ? "pass" : "fail",
-              exactOnly ? `included only ${probePath}` : `included ${context.filesIncluded.join(", ") || "no files"}`
-            );
+          let selectedPath = probeWasWritten ? probePath : undefined;
+          if (!selectedPath) {
+            for (const candidate of ["AGENTS.md", "README.md", "package.json", "pyproject.toml", "Cargo.toml", "go.mod"]) {
+              try {
+                await readTextFile(config, guard, workspace, candidate, { maxBytes: 4_000 });
+                selectedPath = candidate;
+                break;
+              } catch {
+                // Keep searching for a small existing text file; an empty selection is still a valid probe.
+              }
+            }
           }
+          const context = await buildProContext(config, guard, workspace, {
+            title: "CodexPro Self Test Context",
+            selectedPaths: selectedPath ? [selectedPath] : [],
+            includeImportantFiles: false,
+            includeChangedFiles: false,
+            includeDiff: false,
+            includeAiBridge: false,
+            maxFiles: 4,
+            maxTotalBytes: 80_000
+          });
+          const exactOnly = selectedPath
+            ? context.filesIncluded.length === 1 && context.filesIncluded[0] === selectedPath
+            : context.filesIncluded.length === 0;
+          check(
+            "selected-only pro context",
+            exactOnly ? "pass" : "fail",
+            exactOnly
+              ? selectedPath
+                ? `included only ${selectedPath}`
+                : "built an empty selected-only context without requiring a write probe"
+              : `included ${context.filesIncluded.join(", ") || "no files"}`
+          );
         } catch (error) {
           check("selected-only pro context", "fail", errorText(error));
         }
       } else {
         check("selected-only pro context", "warn", "skipped by request");
+      }
+
+      if (probeWasWritten && probeAbsPath) {
+        try {
+          if (probeOriginal !== undefined) {
+            await fsp.writeFile(probeAbsPath, probeOriginal);
+            if (probeOriginalMode !== undefined) await fsp.chmod(probeAbsPath, probeOriginalMode);
+            check("write/edit cleanup", "pass", `restored pre-existing ${probePath}`);
+          } else {
+            await fsp.unlink(probeAbsPath);
+            if (!probeDirExisted) {
+              try {
+                await fsp.rmdir(path.dirname(probeAbsPath));
+              } catch (error) {
+                const code = (error as NodeJS.ErrnoException).code;
+                if (code !== "ENOENT" && code !== "ENOTEMPTY") throw error;
+              }
+            }
+            check("write/edit cleanup", "pass", `removed transient ${probePath}`);
+          }
+        } catch (error) {
+          check("write/edit cleanup", "fail", errorText(error));
+        }
       }
 
       if (parseBool(args.bash_probe, true)) {
