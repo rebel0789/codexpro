@@ -371,6 +371,9 @@ try {
   if (!homeText.includes('history.replaceState') || !homeText.includes('initialUrl.searchParams.delete("codexpro_token")')) {
     throw new Error('onboarding page did not remove query credentials from browser history');
   }
+  if (!homeText.includes('Authorization: "Bearer " + connectorToken') || homeText.includes('fetch("/admin/profile" + window.location.search')) {
+    throw new Error('onboarding profile save did not reuse the captured token as a Bearer credential');
+  }
   for (const fieldName of ['tunnelName', 'ngrokConfig', 'cloudflareConfig', 'cloudflareTokenFile', 'toolCards', 'noInstallCloudflared']) {
     if (!homeText.includes(`name="${fieldName}"`)) {
       throw new Error(`onboarding page did not include profile field ${fieldName}`);

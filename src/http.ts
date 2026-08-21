@@ -1415,9 +1415,12 @@ function onboardingPage(config: CodexProConfig): string {
         };
         if (status) status.textContent = "Saving...";
         try {
-          const response = await fetch("/admin/profile" + window.location.search, {
+          const response = await fetch("/admin/profile", {
             method: "POST",
-            headers: { "content-type": "application/json" },
+            headers: {
+              "content-type": "application/json",
+              ...(connectorToken ? { Authorization: "Bearer " + connectorToken } : {})
+            },
             body: JSON.stringify(payload)
           });
           const result = await response.json().catch(() => ({}));
