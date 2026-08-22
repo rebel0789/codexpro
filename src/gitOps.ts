@@ -58,6 +58,32 @@ export function gitDiff(config: CodexProConfig, guard: PathGuard, workspace: Wor
   return runGit(workspace, args, config.maxOutputBytes);
 }
 
+export function gitDiffStats(
+  config: CodexProConfig,
+  guard: PathGuard,
+  workspace: Workspace,
+  filePath?: string,
+  staged = false
+): { additions: number; deletions: number; changed: boolean; error?: string } {
+  const args = ["diff", "--numstat", "--no-ext-diff", "--no-textconv"];
+  if (staged) args.push("--staged");
+  if (filePath?.trim()) {
+    const resolved = guard.resolve(workspace, filePath);
+    args.push("--", resolved.relPath);
+  }
+  const output = runGit(workspace, args, config.maxOutputBytes);
+  if (isGitFailure(output)) return { additions: 0, deletions: 0, changed: false, error: output };
+  const lines = outputLines(output);
+  let additions = 0;
+  let deletions = 0;
+  for (const line of lines) {
+    const [added, deleted] = line.split("\t", 2);
+    if (/^\d+$/.test(added)) additions += Number(added);
+    if (/^\d+$/.test(deleted)) deletions += Number(deleted);
+  }
+  return { additions, deletions, changed: lines.length > 0 };
+}
+
 export function gitDiffStatus(config: CodexProConfig, guard: PathGuard, workspace: Workspace, filePath?: string, staged = false): string {
   const args = ["diff", "--name-status"];
   if (staged) args.push("--staged");

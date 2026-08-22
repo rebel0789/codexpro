@@ -11,7 +11,7 @@ import { viewWorkspaceImage } from "./imageOps.js";
 import { importAttachmentFile } from "./importOps.js";
 import { searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
-import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
+import { gitDiff, gitDiffStats as readGitDiffStats, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
@@ -2124,10 +2124,20 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false)));
-      const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
-      const stats = diffError ? { additions: 0, deletions: 0, changed: false } : diffStats(rawDiff);
+      const staged = parseBool(args.staged, false);
       const includeDiff = parseBool(args.include_diff, true);
+      let rawDiff = "";
+      let diffError = "";
+      let stats: { additions: number; deletions: number; changed: boolean };
+      if (includeDiff) {
+        rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, args.path, staged));
+        diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
+        stats = diffError ? { additions: 0, deletions: 0, changed: false } : diffStats(rawDiff);
+      } else {
+        const statsOnly = readGitDiffStats(config, guard, workspace, args.path, staged);
+        diffError = statsOnly.error ?? "";
+        stats = { additions: statsOnly.additions, deletions: statsOnly.deletions, changed: statsOnly.changed };
+      }
       const text = diffError
         ? diffError
         : includeDiff
@@ -2137,7 +2147,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
             "",
             `Workspace: ${workspace.root}`,
             `Path: ${args.path ?? "workspace diff"}`,
-            `Staged: ${parseBool(args.staged, false)}`,
+            `Staged: ${staged}`,
             `Diff stats: +${stats.additions} -${stats.deletions}`,
             "",
             "Raw diff omitted by include_diff=false."
@@ -2146,13 +2156,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         workspace_id: workspace.id,
         root: workspace.root,
         path: args.path ?? "workspace diff",
-        staged: parseBool(args.staged, false),
+        staged,
         include_diff: includeDiff,
         diff_error: diffError || undefined,
         additions: stats.additions,
         deletions: stats.deletions,
         changed: !diffError && stats.changed,
-        diff: diffError || includeDiff ? rawDiff : ""
+        diff: diffError || (includeDiff ? rawDiff : "")
       });
     }
   );
