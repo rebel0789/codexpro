@@ -1657,6 +1657,51 @@ if (!/not a git repository|git unavailable|fatal:/i.test(nonGitPayload)) {
 }
 nonGitClient.close();
 
+const largeDiffRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-large-diff-'));
+for (const args of [
+  ['init'],
+  ['config', 'user.email', 'codexpro-smoke@example.com'],
+  ['config', 'user.name', 'CodexPro Smoke']
+]) {
+  const result = spawnSync('git', args, { cwd: largeDiffRoot, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`large-diff git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
+}
+const largeDiffPath = path.join(largeDiffRoot, 'large.txt');
+const largeDiffLines = 600;
+await fs.writeFile(largeDiffPath, Array.from({ length: largeDiffLines }, (_, i) => `before-${i}`).join('\n') + '\n', 'utf8');
+for (const args of [['add', 'large.txt'], ['commit', '-m', 'baseline']]) {
+  const result = spawnSync('git', args, { cwd: largeDiffRoot, encoding: 'utf8' });
+  if (result.status !== 0) throw new Error(`large-diff git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
+}
+await fs.writeFile(
+  largeDiffPath,
+  Array.from({ length: largeDiffLines }, (_, i) => `after-${i}-${'x'.repeat(32)}`).join('\n') + '\n',
+  'utf8'
+);
+const largeDiffClient = new McpStdioClient('node', ['dist/stdio.js', '--root', largeDiffRoot, '--allow-root', largeDiffRoot, '--tool-mode', 'full'], {
+  cwd: path.resolve('.'),
+  env: {
+    ...process.env,
+    CODEXPRO_ROOT: largeDiffRoot,
+    CODEXPRO_ALLOWED_ROOTS: largeDiffRoot,
+    CODEXPRO_MAX_OUTPUT_BYTES: '4000'
+  }
+});
+await largeDiffClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-large-diff-smoke', version: '0.1.0' }
+});
+largeDiffClient.notify('notifications/initialized');
+const largeStatsOnlyDiff = await largeDiffClient.request('tools/call', { name: 'git_diff', arguments: { include_diff: false } });
+if (largeStatsOnlyDiff.structuredContent.diff_error || !largeStatsOnlyDiff.structuredContent.changed || largeStatsOnlyDiff.structuredContent.diff !== '') {
+  throw new Error(`git_diff include_diff=false materialized an oversized raw diff: ${JSON.stringify(largeStatsOnlyDiff.structuredContent)}`);
+}
+if (largeStatsOnlyDiff.structuredContent.additions !== largeDiffLines || largeStatsOnlyDiff.structuredContent.deletions !== largeDiffLines) {
+  throw new Error(`git_diff include_diff=false returned wrong large-diff stats: ${JSON.stringify(largeStatsOnlyDiff.structuredContent)}`);
+}
+largeDiffClient.close();
+
 const lowerAgentsRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-lower-agents-'));
 await fs.writeFile(path.join(lowerAgentsRoot, 'agents.md'), '# Lowercase agents\n\n- Lowercase instruction file loaded.\n', 'utf8');
 await fs.mkdir(path.join(lowerAgentsRoot, 'src'));

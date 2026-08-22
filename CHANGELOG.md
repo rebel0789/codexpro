@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Avoid materializing the full unified diff when `git_diff(include_diff=false)` requests stats only, preventing large diffs from exhausting the Git child-process output buffer while preserving additions/deletions and error diagnostics.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.
