@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added bounded regex search to the Node fallback in an interruptible worker when ripgrep is unavailable, and made ripgrep JSON/stdout decoding safe across UTF-8 stream chunk boundaries.
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.

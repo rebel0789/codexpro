@@ -606,9 +606,19 @@ async function runNodeFallbackSearchLimitStress() {
     assert(overflow.structuredContent.matches.length === 2 && overflow.structuredContent.truncated === true, `node fallback overflow search did not report truncation: ${JSON.stringify(overflow.structuredContent)}`);
     const regex = await client.request('tools/call', {
       name: 'search',
-      arguments: { workspace_id: opened.structuredContent.workspace_id, query: '(a+)+$', regex: true, path: 'overflow.txt' }
+      arguments: { workspace_id: opened.structuredContent.workspace_id, query: 'needle (one|two)$', regex: true, path: 'overflow.txt', max_results: 10 }
     });
-    assert(String(regex.structuredContent.error).toLowerCase().includes('regex search requires ripgrep'), `node fallback accepted regex search: ${JSON.stringify(regex.structuredContent)}`);
+    assert(regex.isError !== true && regex.structuredContent.used === 'node', `node fallback regex search failed: ${JSON.stringify(regex.structuredContent)}`);
+    assert(regex.structuredContent.matches.length === 2, `node fallback regex search returned the wrong matches: ${JSON.stringify(regex.structuredContent.matches)}`);
+    const backend = await client.request('tools/call', { name: 'server_config', arguments: {} });
+    assert(backend.structuredContent.searchCapabilities?.regex === true && backend.structuredContent.searchCapabilities?.regexEngine === 'javascript-worker',
+      `node search backend did not advertise bounded regex capability: ${JSON.stringify(backend.structuredContent.searchCapabilities)}`);
+    const invalidRegex = await client.request('tools/call', {
+      name: 'search',
+      arguments: { workspace_id: opened.structuredContent.workspace_id, query: '(', regex: true, path: 'overflow.txt' }
+    });
+    assert(invalidRegex.isError === true && String(invalidRegex.structuredContent.error).toLowerCase().includes('invalid regex'),
+      `node fallback did not reject an invalid regex cleanly: ${JSON.stringify(invalidRegex.structuredContent)}`);
   } finally {
     client.close();
   }

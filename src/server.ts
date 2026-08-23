@@ -9,7 +9,7 @@ import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./gu
 import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, withFileWriteLocks } from "./fsOps.js";
 import { viewWorkspaceImage } from "./imageOps.js";
 import { importAttachmentFile } from "./importOps.js";
-import { searchWorkspace } from "./searchOps.js";
+import { searchBackendCapabilities, searchWorkspace } from "./searchOps.js";
 import { runBash } from "./bashOps.js";
 import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
@@ -1034,6 +1034,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async () => {
+      const searchCapabilities = await searchBackendCapabilities();
       const safeConfig = {
         defaultRoot: config.defaultRoot,
         allowedRoots: config.allowedRoots,
@@ -1060,6 +1061,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         maxImportBytes: config.maxImportBytes,
         maxOutputBytes: config.maxOutputBytes,
         maxSearchResults: config.maxSearchResults,
+        searchCapabilities,
         blockedGlobs: config.blockedGlobs,
         registeredTools: registeredToolNames(server),
         registeredToolCount: registeredToolNames(server).length

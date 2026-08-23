@@ -1,6 +1,8 @@
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
+import { Worker } from "node:worker_threads";
 import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
@@ -38,6 +40,11 @@ function commandExists(command: string): Promise<boolean> {
   });
 }
 
+export async function searchBackendCapabilities(): Promise<{ literal: true; regex: true; regexEngine: "ripgrep" | "javascript-worker" }> {
+  const ripgrepAvailable = await commandExists("rg");
+  return { literal: true, regex: true, regexEngine: ripgrepAvailable ? "ripgrep" : "javascript-worker" };
+}
+
 function truncateLine(line: string, max = 400): string {
   if (line.length <= max) return line;
   return `${line.slice(0, max)}…`;
@@ -58,19 +65,26 @@ async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: W
     const child = spawn("rg", args, { cwd: workspace.root, env: { ...process.env, NO_COLOR: "1" } });
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
     let outputLimited = false;
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
     child.stdout.on("data", (chunk) => {
-      stdout += String(chunk);
-      if (!outputLimited && Buffer.byteLength(stdout, "utf8") > config.maxOutputBytes) {
+      const bytes = Buffer.from(chunk);
+      stdoutBytes += bytes.byteLength;
+      stdout += stdoutDecoder.write(bytes);
+      if (!outputLimited && stdoutBytes > config.maxOutputBytes) {
         outputLimited = true;
         child.kill("SIGTERM");
       }
     });
     child.stderr.on("data", (chunk) => {
-      stderr += String(chunk);
+      stderr += stderrDecoder.write(Buffer.from(chunk));
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      stdout += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
       if (code && code > 1) {
         reject(new CodexProError(stderr.trim() || `ripgrep failed with exit code ${code}`));
         return;
@@ -103,12 +117,130 @@ async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: W
   });
 }
 
-async function runNodeSearch(config: CodexProConfig, guard: PathGuard, workspace: Workspace, options: SearchOptions): Promise<SearchResult> {
-  if (options.regex) {
-    throw new CodexProError(
-      "Regex search requires ripgrep. Install rg or retry with regex=false; the Node fallback only supports literal search."
-    );
+const NODE_REGEX_TIMEOUT_MS = 5_000;
+const NODE_REGEX_WORKER_SOURCE = `
+const { parentPort, workerData } = require("node:worker_threads");
+const fs = require("node:fs");
+try {
+  const regex = new RegExp(workerData.query);
+  const matches = [];
+  let visibleMatches = 0;
+  outer: for (const file of workerData.files) {
+    if (visibleMatches > workerData.maxResults) break;
+    try {
+      const stat = fs.statSync(file.absPath);
+      if (!stat.isFile() || stat.size > workerData.scanBytes) continue;
+      const buffer = fs.readFileSync(file.absPath);
+      if (buffer.includes(0)) continue;
+      const lines = buffer.toString("utf8").split("\\n");
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index].endsWith("\\r") ? lines[index].slice(0, -1) : lines[index];
+        regex.lastIndex = 0;
+        if (!regex.test(line)) continue;
+        visibleMatches += 1;
+        if (matches.length < workerData.maxResults) {
+          matches.push({
+            path: file.rel,
+            line: index + 1,
+            text: line.length <= 500 ? line : line.slice(0, 500)
+          });
+        }
+        if (visibleMatches > workerData.maxResults) break outer;
+      }
+    } catch {
+      // Match the literal fallback: unreadable files are skipped.
+    }
   }
+  parentPort.postMessage({ matches, visibleMatches });
+} catch (error) {
+  parentPort.postMessage({ error: error instanceof Error ? error.message : String(error) });
+}
+`;
+
+async function runNodeRegexSearch(
+  config: CodexProConfig,
+  guard: PathGuard,
+  workspace: Workspace,
+  options: SearchOptions
+): Promise<SearchResult> {
+  if (options.query.length > 2_000) {
+    throw new CodexProError("regex pattern is too long for the Node fallback; narrow the pattern or install ripgrep.");
+  }
+  try {
+    // Compile only; execution happens in an interruptible worker so pathological patterns cannot block the MCP server.
+    new RegExp(options.query);
+  } catch (error) {
+    throw new CodexProError(`invalid regex pattern: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  const files = await listFiles(guard, workspace, {
+    root: options.root,
+    glob: options.glob,
+    includeHidden: options.includeHidden,
+    maxFiles: 20_000
+  });
+  const workerFiles = files.map((rel) => {
+    const resolved = guard.resolve(workspace, rel);
+    return { rel, absPath: resolved.absPath };
+  });
+  const scanBytes = textScanByteLimit(config);
+
+  const result = await new Promise<{ matches: Array<{ path: string; line: number; text: string }>; visibleMatches: number }>((resolve, reject) => {
+    const worker = new Worker(NODE_REGEX_WORKER_SOURCE, {
+      eval: true,
+      workerData: {
+        query: options.query,
+        files: workerFiles,
+        scanBytes,
+        maxResults: options.maxResults
+      }
+    });
+    let settled = false;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      fn();
+    };
+    const timer = setTimeout(() => {
+      finish(() => {
+        void worker.terminate();
+        reject(new CodexProError(
+          `Node regex search exceeded ${NODE_REGEX_TIMEOUT_MS} ms; narrow the search scope/pattern or install ripgrep.`
+        ));
+      });
+    }, NODE_REGEX_TIMEOUT_MS);
+    timer.unref();
+
+    worker.once("message", (message: any) => {
+      finish(() => {
+        if (message?.error) {
+          reject(new CodexProError(`regex search failed: ${String(message.error)}`));
+          return;
+        }
+        resolve({
+          matches: Array.isArray(message?.matches) ? message.matches : [],
+          visibleMatches: Number(message?.visibleMatches ?? 0)
+        });
+      });
+    });
+    worker.once("error", (error) => finish(() => reject(error)));
+    worker.once("exit", (code) => {
+      if (!settled && code !== 0) finish(() => reject(new CodexProError(`Node regex worker exited with code ${code}.`)));
+    });
+  });
+
+  const matches = result.matches.map((match) => ({
+    path: match.path,
+    line: match.line,
+    text: redactSensitiveText(truncateLine(match.text))
+  }));
+  const text = matches.map((match) => `${match.path}:${match.line}: ${match.text}`).join("\n") || "No matches.";
+  return { text, matches, truncated: result.visibleMatches > matches.length, used: "node" };
+}
+
+async function runNodeSearch(config: CodexProConfig, guard: PathGuard, workspace: Workspace, options: SearchOptions): Promise<SearchResult> {
+  if (options.regex) return runNodeRegexSearch(config, guard, workspace, options);
   const files = await listFiles(guard, workspace, {
     root: options.root,
     glob: options.glob,
@@ -163,8 +295,6 @@ export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, 
   let lexical: SearchResult;
   if (await commandExists("rg")) {
     lexical = await runRipgrep(config, guard, workspace, options);
-  } else if (options.regex) {
-    throw new CodexProError("regex search requires ripgrep. Install rg or retry with regex=false.");
   } else {
     lexical = await runNodeSearch(config, guard, workspace, options);
   }
