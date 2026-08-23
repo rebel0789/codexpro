@@ -228,14 +228,25 @@ const client = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--al
   }
 });
 
-await client.request('initialize', {
+const safeInitialize = await client.request('initialize', {
   protocolVersion: '2024-11-05',
   capabilities: {},
   clientInfo: { name: 'codexpro-smoke', version: '0.1.0' }
 });
 client.notify('notifications/initialized');
+if (!safeInitialize.instructions?.includes('allowlisted verification commands') || safeInitialize.instructions?.includes('Full Bash access is enabled')) {
+  throw new Error(`safe Bash instructions were not mode-appropriate: ${safeInitialize.instructions}`);
+}
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
+const safeBashTool = tools.tools.find((tool) => tool.name === 'bash');
+if (!safeBashTool?.description?.includes('allowlisted verification command')) {
+  throw new Error(`safe Bash tool description was not restricted: ${safeBashTool?.description}`);
+}
+const supertool = tools.tools.find((tool) => tool.name === 'codexpro');
+if (supertool?.annotations?.destructiveHint === true || supertool?.annotations?.openWorldHint === true) {
+  throw new Error(`mixed-capability supertool advertised worst-case destructive/open-world annotations: ${JSON.stringify(supertool.annotations)}`);
+}
 for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'import_file', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
@@ -1316,6 +1327,31 @@ if (metadataSessions.structuredContent.total_found !== 0 || JSON.stringify(metad
   throw new Error(`metadata mode exposed transcript tail content: ${JSON.stringify(metadataSessions.structuredContent)}`);
 }
 standardCodexSessionsClient.close();
+
+const fullModeClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'full', '--tool-mode', 'full'], {
+  cwd: path.resolve('.'),
+  env: { ...process.env, CODEXPRO_ROOT: tmp, CODEXPRO_ALLOWED_ROOTS: tmp, CODEXPRO_TOOL_CARDS: '0' }
+});
+const fullInitialize = await fullModeClient.request('initialize', {
+  protocolVersion: '2024-11-05',
+  capabilities: {},
+  clientInfo: { name: 'codexpro-full-mode-semantics-smoke', version: '0.1.0' }
+});
+fullModeClient.notify('notifications/initialized');
+if (!fullInitialize.instructions?.includes('Full Bash access is enabled') || fullInitialize.instructions?.includes('Do not use bash for git')) {
+  throw new Error(`full Bash instructions remained artificially restricted: ${fullInitialize.instructions}`);
+}
+const fullTools = await fullModeClient.request('tools/list', {});
+const fullBashTool = fullTools.tools.find((tool) => tool.name === 'bash');
+if (!fullBashTool?.description?.includes('Full Bash access is enabled') || fullBashTool.description.includes('allowlisted verification command')) {
+  throw new Error(`full Bash tool description remained restricted: ${fullBashTool?.description}`);
+}
+const compactBash = await fullModeClient.request('tools/call', { name: 'bash', arguments: { command: 'pwd' } });
+const compactBashText = compactBash.content?.[0]?.text ?? '';
+if (!compactBashText.includes('structured tool result') || compactBashText.includes('structured CodexPro card')) {
+  throw new Error(`compact Bash transcript referenced the wrong output surface: ${compactBashText}`);
+}
+fullModeClient.close();
 
 const fullTranscriptClient = new McpStdioClient('node', ['dist/stdio.js', '--root', tmp, '--allow-root', tmp, '--bash', 'safe'], {
   cwd: path.resolve('.'),

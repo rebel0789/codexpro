@@ -73,7 +73,7 @@ function bashTextResult(config: CodexProConfig, result: Awaited<ReturnType<typeo
     `Duration: ${result.durationMs} ms`,
     `Output: stdout ${stdoutLines} line${stdoutLines === 1 ? "" : "s"}, stderr ${stderrLines} line${stderrLines === 1 ? "" : "s"}.`,
     "",
-    "Raw stdout/stderr are in the structured CodexPro card. Start with `--bash-transcript full` to print raw output in chat."
+    "Raw stdout/stderr are available in the structured tool result. Start with `--bash-transcript full` to print raw output in chat."
   ].join("\n");
 }
 
@@ -482,7 +482,13 @@ function serverInstructions(config: CodexProConfig): string {
   const bashInstruction =
     config.bashMode === "off"
       ? "5. Bash is disabled and the bash tool is unavailable. Do not attempt shell commands."
-      : "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
+      : config.bashMode === "full"
+        ? "5. Full Bash access is enabled for this explicitly trusted local workspace. CodexPro's safe-Bash allowlist and command-shape restrictions do not apply. Use shell commands needed for the user's request, including project scripts, Git operations, and local developer CLIs, while respecting user, project, and platform safety/authorization boundaries. Prefer dedicated CodexPro tools when they provide the same operation more precisely."
+        : "5. Bash is in safe mode. Use it only for meaningful allowlisted verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
+  const inspectionInstruction =
+    config.bashMode === "full"
+      ? "3. Inspect with tree, search, read, and dedicated Git tools when they are more precise. Full Bash may also be used for inspection when the user's task benefits from shell or local CLI behavior."
+      : "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.";
 
   return [
     "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
@@ -490,7 +496,7 @@ function serverInstructions(config: CodexProConfig): string {
     "Preferred workflow:",
     "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
     "2. Follow any AGENTS.md-style instructions returned by the workspace open call before editing files.",
-    "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
+    inspectionInstruction,
     editInstruction,
     bashInstruction,
     "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
@@ -941,12 +947,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     {
       title: "CodexPro Supertool",
       description:
-        "Stable wrapper for advanced ChatGPT connector setups. Pass action plus args to call an already-registered CodexPro tool without changing the visible schema; it cannot call tools disabled by the current mode.",
+        "Stable mixed-capability wrapper for advanced ChatGPT connector setups. Pass action plus args to call an already-registered CodexPro tool without changing the visible schema; it cannot call tools disabled by the current mode. Because the selected action determines whether a call is read-only, local-mutating, or open-world, this wrapper intentionally omits static safety annotations; prefer explicit tools when precise per-action annotations matter.",
       inputSchema: {
         action: z.string().optional().describe("Action or registered tool name. Use list_actions to see what this server mode allows."),
         args: z.record(z.any()).optional().describe("Arguments for the selected action. Same shape as the wrapped CodexPro tool.")
       },
-      annotations: BASH_ANNOTATIONS,
       _meta: {
         ...toolCardMeta(),
         "openai/toolInvocation/invoking": "Running CodexPro supertool action...",
@@ -2033,7 +2038,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     {
       title: "Bash",
       description:
-        "Run one allowlisted verification command in the workspace, such as tests, build, lint, typecheck, or a project script. Do not use for git status/diff or file inspection; use show_changes, tree, search, and read instead. Do not chain commands with &&, pipes, redirects, or shell file readers.",
+        config.bashMode === "full"
+          ? "Full Bash access is enabled for this explicitly trusted local workspace. Run shell commands needed to fulfill the user's request, including project scripts, Git operations, and local developer CLIs. CodexPro's safe-Bash allowlist and command-shape restrictions do not apply in full mode. Prefer dedicated CodexPro tools when they provide the same operation more precisely, and continue to respect user, project, and platform safety/authorization boundaries."
+          : "Run one allowlisted verification command in the workspace, such as tests, build, lint, typecheck, or a project script. Do not use for git status/diff or file inspection; use show_changes, tree, search, and read instead. Do not chain commands with &&, pipes, redirects, or shell file readers.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
         command: z.string().describe("Command to run."),
