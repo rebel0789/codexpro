@@ -1,8 +1,12 @@
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { assertCodexProReleaseEnvironment } from "./release-guard.mjs";
 
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const npmCli = process.env.npm_execpath;
+const npmCliCandidate = process.env.npm_execpath ||
+  (process.platform === "win32" ? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js") : undefined);
+const npmCli = npmCliCandidate && existsSync(npmCliCandidate) ? npmCliCandidate : undefined;
 
 function runNpm(args, root) {
   const result = spawnSync(npmCli ? process.execPath : npm, npmCli ? [npmCli, ...args] : args, {

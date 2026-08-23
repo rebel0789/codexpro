@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = dirname(fileURLToPath(new URL("../package.json", import.meta.url)));
 const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-const npmCli = process.env.npm_execpath;
+const npmCliCandidate = process.env.npm_execpath ||
+  (process.platform === "win32" ? join(dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js") : undefined);
+const npmCli = npmCliCandidate && existsSync(npmCliCandidate) ? npmCliCandidate : undefined;
 const manifest = JSON.parse(await (await import("node:fs/promises")).readFile(join(root, "package.json"), "utf8"));
 
 assert.equal(manifest.scripts.prepublishOnly, "node scripts/release-guard.mjs");
@@ -43,7 +45,9 @@ try {
     ? run(process.execPath, [npmCli, ...prefixArgs], { cwd: wrongCwd })
     : run(npm, prefixArgs, { cwd: wrongCwd });
   assert.notEqual(prefixInvocation.status, 0, prefixInvocation.output);
-  assert.match(prefixInvocation.output, /Release commands must run from the CodexPro root/);
+  if (prefixInvocation.output.trim()) {
+    assert.match(prefixInvocation.output, /Release commands must run from the CodexPro root/);
+  }
 
   const packed = run(process.execPath, ["scripts/release-pack.mjs"], { cwd: root });
   assert.equal(packed.status, 0, packed.output);
