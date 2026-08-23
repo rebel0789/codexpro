@@ -1075,10 +1075,10 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     {
       title: "CodexPro Self Test",
       description:
-        "Run one controlled, local-only CodexPro diagnostic. It checks modes, expected tools, workspace access, skills, git, safe bash policy, selected-only Pro context, and optional .ai-bridge write/edit probe without touching source files.",
+        "Run one controlled, local-only CodexPro diagnostic. It checks modes, expected tools, workspace access, skills, git, Bash policy, and selected-only Pro context. The default is read-only; the optional .ai-bridge write/edit probe requires write_probe=true.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
-        write_probe: z.boolean().optional().describe("Create/edit only .ai-bridge/codexpro-self-test.md. Default: true."),
+        write_probe: z.boolean().optional().describe("Create/edit only .ai-bridge/codexpro-self-test.md when explicitly requested. Default: false."),
         bash_probe: z.boolean().optional().describe("Check bash policy with safe local commands only. Default: true."),
         pro_context_probe: z.boolean().optional().describe("Build a selected-only Pro context bundle in memory without writing pro-context.md. Default: true."),
         include_global_skills: z.boolean().optional().describe("Include user/plugin skill discovery in the inventory check. Default: true."),
@@ -1094,18 +1094,20 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
       const started = Date.now();
-      const checks: Array<{ name: string; status: "pass" | "warn" | "fail"; detail: string }> = [];
+      type SelfTestStatus = "pass" | "warn" | "fail" | "skipped" | "info" | "degraded";
+      const checks: Array<{ name: string; status: SelfTestStatus; detail: string }> = [];
       const filesTouched: string[] = [];
       const probePath = `${config.contextDir}/codexpro-self-test.md`;
 
-      const check = (name: string, status: "pass" | "warn" | "fail", detail: string) => {
+      const check = (name: string, status: SelfTestStatus, detail: string) => {
         checks.push({ name, status, detail: cleanOneLine(detail, detail, 260) });
       };
 
+      const securityPosture = config.bashMode === "full" || config.writeMode === "workspace" ? "elevated" : "standard";
       check("workspace", "pass", workspace.root);
-      check("tool mode", config.toolMode === "full" ? "pass" : "warn", `${config.toolMode}; expected tools: ${toolNamesForMode(config).length}`);
-      check("write mode", config.writeMode === "off" ? "warn" : "pass", config.writeMode);
-      check("bash mode", config.bashMode === "full" ? "warn" : "pass", config.bashMode);
+      check("tool mode", "pass", `${config.toolMode}; expected tools: ${toolNamesForMode(config).length}`);
+      check("write mode", "pass", config.writeMode === "workspace" ? "workspace (elevated-risk local writes enabled)" : config.writeMode);
+      check("bash mode", "pass", config.bashMode === "full" ? "full (elevated-risk trusted-repo mode)" : config.bashMode);
       check(
         "http auth",
         "pass",
@@ -1147,9 +1149,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         check("git status", "fail", errorText(error));
       }
 
-      if (parseBool(args.write_probe, true)) {
+      if (parseBool(args.write_probe, false)) {
         if (config.writeMode === "off") {
-          check("write/edit probe", "warn", "skipped because CODEXPRO_WRITE_MODE=off");
+          check("write/edit probe", "skipped", "skipped because CODEXPRO_WRITE_MODE=off");
         } else {
           try {
             assertWriteToolAllowed(config, probePath);
@@ -1178,13 +1180,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           }
         }
       } else {
-        check("write/edit probe", "warn", "skipped by request");
+        check("write/edit probe", "skipped", "skipped unless write_probe=true is explicitly requested");
       }
 
       if (parseBool(args.pro_context_probe, true)) {
         try {
           if (!filesTouched.includes(probePath)) {
-            check("selected-only pro context", "warn", "skipped because write probe did not create the selected file");
+            check("selected-only pro context", "skipped", "skipped because no explicit write probe produced the selected file");
           } else {
             const context = await buildProContext(config, guard, workspace, {
               title: "CodexPro Self Test Context",
@@ -1207,13 +1209,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           check("selected-only pro context", "fail", errorText(error));
         }
       } else {
-        check("selected-only pro context", "warn", "skipped by request");
+        check("selected-only pro context", "skipped", "skipped by request");
       }
 
       if (parseBool(args.bash_probe, true)) {
         try {
           if (config.bashMode === "off") {
-            check("bash policy", "warn", "bash disabled");
+            check("bash policy", "skipped", "bash disabled");
           } else {
             const bashProbeOptions = { timeoutMs: 10_000, sessionId: config.bashSessionId };
             const pwd = await runBash(config, guard, workspace, "pwd", bashProbeOptions);
@@ -1225,14 +1227,14 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
                 check("bash policy", pwd.exitCode === 0 ? "pass" : "warn", "safe bash allowed pwd and blocked environment expansion");
               }
             } else {
-              check("bash policy", pwd.exitCode === 0 ? "warn" : "fail", "full bash is enabled; use only for trusted local repos");
+              check("bash policy", pwd.exitCode === 0 ? "pass" : "fail", "full bash active; CodexPro safe-command restrictions are disabled for this trusted local workspace");
             }
           }
         } catch (error) {
           check("bash policy", "fail", errorText(error));
         }
       } else {
-        check("bash policy", "warn", "skipped by request");
+        check("bash policy", "skipped", "skipped by request");
       }
 
       check(
@@ -1243,12 +1245,17 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
 
       const failed = checks.filter((item) => item.status === "fail").length;
       const warned = checks.filter((item) => item.status === "warn").length;
+      const degraded = checks.filter((item) => item.status === "degraded").length;
+      const skipped = checks.filter((item) => item.status === "skipped").length;
+      const info = checks.filter((item) => item.status === "info").length;
       const passed = checks.filter((item) => item.status === "pass").length;
-      const status = failed ? "fail" : warned ? "warn" : "pass";
+      const status = failed ? "fail" : warned || degraded ? "warn" : "pass";
       const text = [
         "# CodexPro Self Test",
         "",
         `Status: ${status}`,
+        `Health: ${status}`,
+        `Security posture: ${securityPosture}`,
         `Workspace: ${workspace.root}`,
         `Mode: tools=${config.toolMode}, write=${config.writeMode}, bash=${config.bashMode}${config.bashSessionId ? `, bash_session=${config.bashSessionId}${config.requireBashSession ? " required" : ""}` : ""}`,
         `Expected tools: ${expectedTools.length}`,
@@ -1268,8 +1275,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         workspace_id: workspace.id,
         root: workspace.root,
         status,
+        health: status,
+        security_posture: securityPosture,
         passed,
         warned,
+        degraded,
+        skipped,
+        info,
         failed,
         duration_ms: Date.now() - started,
         expected_tools: expectedTools,

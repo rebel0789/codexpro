@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Made `codexpro_self_test` read-only by default and separated operational health from intentional security posture, so skipped probes and trusted full/write modes do not create false warnings.
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.
