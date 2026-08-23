@@ -614,6 +614,35 @@ async function runNodeFallbackSearchLimitStress() {
   }
 }
 
+async function runAnalysisInventoryPriorityStress() {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-analysis-priority-'));
+  await fs.mkdir(path.join(root, 'generated'), { recursive: true });
+  for (let index = 0; index < 120; index += 1) {
+    await fs.writeFile(path.join(root, 'generated', `artifact-${String(index).padStart(3, '0')}.ts`), `export const artifact${index} = ${index};\n`, 'utf8');
+  }
+  await fs.writeFile(path.join(root, 'z-src.ts'), 'export const trackedSource = true;\n', 'utf8');
+  for (const args of [['init'], ['add', 'z-src.ts']]) {
+    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    assert(result.status === 0, `git ${args.join(' ')} failed in inventory fixture: ${result.stderr || result.stdout}`);
+  }
+  const commit = spawnSync('git', ['-c', 'user.email=stress@example.com', '-c', 'user.name=Stress Test', 'commit', '-m', 'track source'], { cwd: root, encoding: 'utf8' });
+  assert(commit.status === 0, `git commit failed in inventory fixture: ${commit.stderr || commit.stdout}`);
+  const client = await initClient(root, {
+    CODEXPRO_ANALYSIS_MAX_INVENTORY_FILES: '100',
+    CODEXPRO_ANALYSIS_MAX_ANALYZED_FILES: '100'
+  });
+  try {
+    const opened = await client.request('tools/call', { name: 'open_current_workspace', arguments: { include_tree: false } });
+    const inspected = await client.request('tools/call', { name: 'inspect_workspace', arguments: { workspace_id: opened.structuredContent.workspace_id, max_files: 100 } });
+    assert(inspected.isError !== true, `inventory priority inspection failed: ${JSON.stringify(inspected.structuredContent)}`);
+    assert(inspected.structuredContent.files?.some?.((file) => file.path === 'z-src.ts'),
+      `tracked source was displaced by untracked/generated artifacts: ${JSON.stringify(inspected.structuredContent.files?.slice?.(0, 8))}`);
+  } finally {
+    client.close();
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
+}
+
 async function runBashOutputTerminationStress() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-stress-bash-output-'));
   const client = await initClient(root, {
@@ -903,6 +932,7 @@ await runRedactionStress();
 await runMcpInventoryStress();
 await runMaxReadSearchStress();
 await runNodeFallbackSearchLimitStress();
+await runAnalysisInventoryPriorityStress();
 await runBashOutputTerminationStress();
 await runBashHomeEnvStress();
 await runGuardEdgeStress();

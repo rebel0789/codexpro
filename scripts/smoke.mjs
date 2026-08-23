@@ -173,6 +173,8 @@ await fs.mkdir(path.join(tmp, 'src'), { recursive: true });
 await fs.writeFile(path.join(tmp, 'src', 'auth.ts'), 'export function authenticate(user) { return Boolean(user); }\n', 'utf8');
 await fs.mkdir(path.join(tmp, 'test'), { recursive: true });
 await fs.writeFile(path.join(tmp, 'test', 'auth.test.ts'), "import { authenticate } from '../src/auth.js';\nvoid authenticate('test');\n", 'utf8');
+await fs.mkdir(path.join(tmp, 'docs'), { recursive: true });
+await fs.writeFile(path.join(tmp, 'docs', 'security-storage-model.md'), 'storage threat model before\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'é.ts'), 'export const accent = 1;\n', 'utf8');
 await fs.writeFile(path.join(tmp, '旧名.ts'), 'export const renamed = true;\n', 'utf8');
 await fs.writeFile(
@@ -206,7 +208,7 @@ try {
   symlinkEscapePath = 'secret-link-dir/secret.txt';
   await fs.symlink(outside, path.join(tmp, 'secret-link-dir'), 'junction');
 }
-for (const args of [['init'], ['config', 'core.quotePath', 'true'], ['add', 'demo.txt', 'other.txt', 'patch-race.txt', 'AGENTS.md', 'package.json', 'src/auth.ts', 'test/auth.test.ts', 'search-overflow.txt', 'é.ts', '旧名.ts']]) {
+for (const args of [['init'], ['config', 'core.quotePath', 'true'], ['add', 'demo.txt', 'other.txt', 'patch-race.txt', 'AGENTS.md', 'package.json', 'src/auth.ts', 'test/auth.test.ts', 'docs/security-storage-model.md', 'search-overflow.txt', 'é.ts', '旧名.ts']]) {
   const result = spawnSync('git', args, { cwd: tmp, encoding: 'utf8' });
   if (result.status !== 0) {
     throw new Error(`git ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
@@ -749,6 +751,12 @@ if (!changes.structuredContent.analysis?.related_tests?.some((file) => file.path
 if (!changes.structuredContent.analysis?.recommended_commands?.some((item) => item.command === 'npm test')) {
   throw new Error(`show_changes omitted existing npm test recommendation: ${JSON.stringify(changes.structuredContent.analysis)}`);
 }
+await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'docs/security-storage-model.md', old_text: 'storage threat model before', new_text: 'storage threat model after' } });
+const docsOnlyChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws, path: 'docs/security-storage-model.md', since: 'workspace', mark_reviewed: false } });
+if (docsOnlyChanges.structuredContent.analysis?.risk_signals?.some((risk) => risk.id === 'storage')) {
+  throw new Error(`documentation-only storage wording produced a runtime storage risk: ${JSON.stringify(docsOnlyChanges.structuredContent.analysis)}`);
+}
+await client.request('tools/call', { name: 'edit', arguments: { workspace_id: ws, path: 'docs/security-storage-model.md', old_text: 'storage threat model after', new_text: 'storage threat model before' } });
 const repeatedChanges = await client.request('tools/call', { name: 'show_changes', arguments: { workspace_id: ws } });
 if (repeatedChanges.structuredContent.changed || repeatedChanges.structuredContent.diff || repeatedChanges.structuredContent.review_checkpoint_hit !== true || repeatedChanges.structuredContent.additions !== 0 || repeatedChanges.structuredContent.deletions !== 0) {
   throw new Error(`show_changes repeated the same review instead of using the last-shown checkpoint: ${JSON.stringify(repeatedChanges.structuredContent)}`);

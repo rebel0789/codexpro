@@ -2,7 +2,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import type { CodexProConfig } from "../config.js";
 import type { PathGuard, Workspace } from "../guard.js";
-import { detectRiskSignals } from "./classify.js";
+import { classifyFileRole, detectRiskSignals } from "./classify.js";
 import { inspectWorkspace } from "./index.js";
 import type { ChangeAnalysis, AnalysisCommandRecommendation, AnalysisRiskSignal } from "./types.js";
 
@@ -132,7 +132,10 @@ export async function reviewWorkspaceChanges(
   }
 
   const risks = new Map<AnalysisRiskSignal["id"], Set<string>>();
+  const rolesByPath = new Map(analysis.files.map((file) => [file.path, file.role]));
   for (const changedPath of changedPaths) {
+    const role = rolesByPath.get(changedPath) ?? classifyFileRole(changedPath);
+    if (role === "docs" || role === "generated") continue;
     for (const risk of detectRiskSignals(changedPath) as AnalysisRiskSignal["id"][]) {
       const paths = risks.get(risk) ?? new Set<string>();
       paths.add(changedPath);

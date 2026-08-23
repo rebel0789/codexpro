@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Prioritized Git-changed files within bounded analysis inventories and suppressed docs-only path-risk noise so change review spends its budget on the touched execution path.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.
