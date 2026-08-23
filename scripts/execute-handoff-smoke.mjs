@@ -53,7 +53,8 @@ const dryRun = run([
   '--dry-run'
 ]);
 requireSuccess(dryRun, 'execute-handoff dry-run');
-if (!dryRun.stdout.includes('opencode run') || !dryRun.stdout.includes('provider/model')) {
+const normalizedDryRun = dryRun.stdout.replaceAll('\\', '/');
+if (!/opencode(?:\.cmd)?['"]?\s+run/.test(normalizedDryRun) || !dryRun.stdout.includes('provider/model')) {
   throw new Error(`dry-run output did not show adapter command\n${dryRun.stdout}`);
 }
 
