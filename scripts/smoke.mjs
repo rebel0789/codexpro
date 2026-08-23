@@ -463,6 +463,12 @@ const snapshotAlias = await client.request('tools/call', {
 if (!snapshotAlias.structuredContent.tree) {
   throw new Error('workspace_snapshot did not accept max_files alias or return a tree');
 }
+if (!Array.isArray(snapshotAlias.structuredContent.recent_commits) || !snapshotAlias.structuredContent.recent_commits.length || !snapshotAlias.structuredContent.recent_commits[0]?.sha || !snapshotAlias.structuredContent.recent_commits[0]?.subject) {
+  throw new Error(`workspace_snapshot omitted structured recent commits: ${JSON.stringify(snapshotAlias.structuredContent)}`);
+}
+if (!snapshotAlias.structuredContent.ai_context || typeof snapshotAlias.structuredContent.ai_context.text !== 'string' || !Array.isArray(snapshotAlias.structuredContent.ai_context.files)) {
+  throw new Error(`workspace_snapshot omitted structured AI context: ${JSON.stringify(snapshotAlias.structuredContent)}`);
+}
 const loadedSkill = await client.request('tools/call', {
   name: 'load_skill',
   arguments: { name: 'smoke-skill' }

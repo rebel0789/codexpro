@@ -6,7 +6,7 @@ import type { CodexProConfig } from "./config.js";
 import type { Workspace } from "./guard.js";
 import { PathGuard } from "./guard.js";
 import { readTextFile, repoTree, ensureAiBridge } from "./fsOps.js";
-import { gitDiff, gitLog, gitStatus } from "./gitOps.js";
+import { gitDiff, gitLog, gitRecentCommits, gitStatus, type GitCommitSummary } from "./gitOps.js";
 import { discoverSkillInventory } from "./capabilitiesOps.js";
 import type { SkillInventoryItem } from "./capabilitiesOps.js";
 
@@ -21,6 +21,7 @@ export interface WorkspaceSummary {
   skillCounts: Record<string, number>;
   tree?: string;
   gitStatus: string;
+  recentCommits: GitCommitSummary[];
 }
 
 export interface CodexContext {
@@ -178,6 +179,7 @@ export async function workspaceSummary(
 
   const status = gitStatus(config, workspace);
   const log = gitLog(config, workspace, 5);
+  const recentCommits = gitRecentCommits(config, workspace, 5);
   const skillText = options.includeSkills
     ? `Skills: ${counts.total} total (${counts.workspace ?? 0} workspace, ${counts.user ?? 0} user, ${counts.plugin ?? 0} plugin, ${counts.other ?? 0} other).`
     : "Skills: skipped. Pass include_skills=true if skill discovery is needed.";
@@ -193,7 +195,8 @@ export async function workspaceSummary(
     skillInventory,
     skillCounts: counts,
     tree: treeText,
-    gitStatus: status
+    gitStatus: status,
+    recentCommits
   };
 }
 
