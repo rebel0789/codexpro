@@ -30,6 +30,7 @@ export interface CodexProConfig {
   maxReadBytes: number;
   maxWriteBytes: number;
   maxOutputBytes: number;
+  maxBashObservedOutputBytes: number;
   maxBashTimeoutMs: number;
   maxImportBytes: number;
   maxSearchResults: number;
@@ -305,6 +306,12 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     throw new Error("CODEXPRO_REQUIRE_BASH_SESSION requires CODEXPRO_BASH_SESSION_ID or --bash-session.");
   }
 
+  const maxOutputBytes = numberFrom(process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000);
+  const maxBashObservedOutputBytes = Math.max(
+    maxOutputBytes + 1,
+    numberFrom(process.env.CODEXPRO_MAX_BASH_OBSERVED_OUTPUT_BYTES, 16_000_000, 64_000, 500_000_000)
+  );
+
   return {
     defaultRoot,
     allowedRoots,
@@ -324,7 +331,8 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     inheritEnv: process.env.CODEXPRO_INHERIT_ENV === "1",
     maxReadBytes: numberFrom(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000),
     maxWriteBytes: numberFrom(process.env.CODEXPRO_MAX_WRITE_BYTES, 1_000_000, 1_000, 10_000_000),
-    maxOutputBytes: numberFrom(process.env.CODEXPRO_MAX_OUTPUT_BYTES, 120_000, 4_000, 2_000_000),
+    maxOutputBytes,
+    maxBashObservedOutputBytes,
     // Default hard cap is 10 minutes. Operators can raise up to 15 minutes.
     maxBashTimeoutMs: numberFrom(process.env.CODEXPRO_MAX_BASH_TIMEOUT_MS, 600_000, 1_000, 900_000),
     maxImportBytes: numberFrom(process.env.CODEXPRO_MAX_IMPORT_BYTES, 5_000_000, 1_000, 50_000_000),

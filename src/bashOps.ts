@@ -7,6 +7,8 @@ import type { Workspace } from "./guard.js";
 import { CodexProError, PathGuard } from "./guard.js";
 import { redactSensitiveText } from "./redact.js";
 
+export type BashTerminationReason = "normal" | "timeout" | "output_limit" | "signal";
+
 export interface BashResult {
   command: string;
   cwd: string;
@@ -16,6 +18,12 @@ export interface BashResult {
   stdout: string;
   stderr: string;
   truncated: boolean;
+  terminationReason: BashTerminationReason;
+  observedStdoutBytes: number;
+  observedStderrBytes: number;
+  observedOutputBytes: number;
+  retainedStdoutBytes: number;
+  retainedStderrBytes: number;
   bashSessionId?: string;
 }
 
@@ -239,11 +247,23 @@ function bashExecutable(): string {
   return fs.existsSync("/bin/bash") ? "/bin/bash" : "bash";
 }
 
-function trimOutput(value: string, maxBytes: number): { value: string; truncated: boolean } {
-  const buffer = Buffer.from(value, "utf8");
-  if (buffer.byteLength <= maxBytes) return { value, truncated: false };
-  const sliced = buffer.subarray(0, maxBytes).toString("utf8");
-  return { value: `${sliced}\n...[output truncated to ${maxBytes} bytes]`, truncated: true };
+function utf8PrefixByBytes(value: string, maxBytes: number): string {
+  let bytes = 0;
+  let end = 0;
+  for (const char of value) {
+    const charBytes = Buffer.byteLength(char, "utf8");
+    if (bytes + charBytes > maxBytes) break;
+    bytes += charBytes;
+    end += char.length;
+  }
+  return value.slice(0, end);
+}
+
+function trimOutput(value: string, maxBytes: number, forceTruncated = false): { value: string; truncated: boolean } {
+  const byteLength = Buffer.byteLength(value, "utf8");
+  if (byteLength <= maxBytes && !forceTruncated) return { value, truncated: false };
+  const sliced = byteLength > maxBytes ? utf8PrefixByBytes(value, maxBytes) : value;
+  return { value: `${sliced}\n...[output truncated to ${maxBytes} retained bytes]`, truncated: true };
 }
 
 function terminateProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
@@ -291,11 +311,16 @@ export async function runBash(
     let stdout = "";
     let stderr = "";
     let killedByTimeout = false;
+    let killedByOutputLimit = false;
     let closed = false;
     let terminationStarted = false;
     let killTimer: NodeJS.Timeout | undefined;
-    let observedOutputBytes = 0;
+    let observedStdoutBytes = 0;
+    let observedStderrBytes = 0;
+    let retainedStdoutBytes = 0;
+    let retainedStderrBytes = 0;
     const retainedOutputBytes = config.maxOutputBytes + 1;
+    const observedOutputLimit = Math.max(retainedOutputBytes, config.maxBashObservedOutputBytes);
 
     const terminate = (signal: NodeJS.Signals) => {
       if (closed) return;
@@ -308,12 +333,23 @@ export async function runBash(
       killTimer = setTimeout(() => terminate("SIGKILL"), 1_500);
       killTimer.unref();
     };
-    const appendBounded = (current: string, chunk: unknown) => {
+    const appendBounded = (stream: "stdout" | "stderr", current: string, chunk: unknown) => {
       const bytes = Buffer.from(String(chunk), "utf8");
-      observedOutputBytes += bytes.byteLength;
-      const remaining = retainedOutputBytes - Buffer.byteLength(stdout, "utf8") - Buffer.byteLength(stderr, "utf8");
+      if (stream === "stdout") observedStdoutBytes += bytes.byteLength;
+      else observedStderrBytes += bytes.byteLength;
+      const retainedBytes = retainedStdoutBytes + retainedStderrBytes;
+      const remaining = retainedOutputBytes - retainedBytes;
       if (remaining <= 0) return current;
-      return current + bytes.subarray(0, remaining).toString("utf8");
+      const retained = bytes.subarray(0, remaining);
+      if (stream === "stdout") retainedStdoutBytes += retained.byteLength;
+      else retainedStderrBytes += retained.byteLength;
+      return current + retained.toString("utf8");
+    };
+    const enforceObservedOutputLimit = () => {
+      if (!killedByOutputLimit && observedStdoutBytes + observedStderrBytes > observedOutputLimit) {
+        killedByOutputLimit = true;
+        terminateWithEscalation();
+      }
     };
 
     const timer = setTimeout(() => {
@@ -323,23 +359,34 @@ export async function runBash(
     timer.unref();
 
     child.stdout.on("data", (chunk) => {
-      stdout = appendBounded(stdout, chunk);
-      if (observedOutputBytes > config.maxOutputBytes) terminateWithEscalation();
+      stdout = appendBounded("stdout", stdout, chunk);
+      enforceObservedOutputLimit();
     });
     child.stderr.on("data", (chunk) => {
-      stderr = appendBounded(stderr, chunk);
-      if (observedOutputBytes > config.maxOutputBytes) terminateWithEscalation();
+      stderr = appendBounded("stderr", stderr, chunk);
+      enforceObservedOutputLimit();
     });
     child.on("error", reject);
     child.on("close", (exitCode, signal) => {
       closed = true;
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
+      const observedOutputBytes = observedStdoutBytes + observedStderrBytes;
+      const captureTruncated = observedOutputBytes > retainedStdoutBytes + retainedStderrBytes;
       if (killedByTimeout) {
         stderr += `\n[codexpro] Command timed out after ${timeoutMs} ms.`;
+      } else if (killedByOutputLimit) {
+        stderr += `\n[codexpro] Command terminated after exceeding ${observedOutputLimit} observed output bytes.`;
       }
-      const out = trimOutput(redactSensitiveText(stdout), config.maxOutputBytes);
-      const err = trimOutput(redactSensitiveText(stderr), config.maxOutputBytes);
+      const out = trimOutput(redactSensitiveText(stdout), config.maxOutputBytes, observedStdoutBytes > retainedStdoutBytes);
+      const err = trimOutput(redactSensitiveText(stderr), config.maxOutputBytes, observedStderrBytes > retainedStderrBytes);
+      const terminationReason: BashTerminationReason = killedByOutputLimit
+        ? "output_limit"
+        : killedByTimeout
+          ? "timeout"
+          : signal
+            ? "signal"
+            : "normal";
       resolve({
         command,
         cwd: path.relative(workspace.root, cwd) || ".",
@@ -348,7 +395,13 @@ export async function runBash(
         durationMs: Date.now() - start,
         stdout: out.value,
         stderr: err.value,
-        truncated: out.truncated || err.truncated,
+        truncated: captureTruncated || out.truncated || err.truncated,
+        terminationReason,
+        observedStdoutBytes,
+        observedStderrBytes,
+        observedOutputBytes,
+        retainedStdoutBytes,
+        retainedStderrBytes,
         ...(bashSessionId ? { bashSessionId } : {})
       });
     });

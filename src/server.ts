@@ -1059,6 +1059,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         maxWriteBytes: config.maxWriteBytes,
         maxImportBytes: config.maxImportBytes,
         maxOutputBytes: config.maxOutputBytes,
+        maxBashObservedOutputBytes: config.maxBashObservedOutputBytes,
         maxSearchResults: config.maxSearchResults,
         blockedGlobs: config.blockedGlobs,
         registeredTools: registeredToolNames(server),

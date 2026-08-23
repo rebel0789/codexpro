@@ -48,7 +48,7 @@ Review changes against these failure modes before release:
 | Browser admin mutates live runtime unexpectedly | Admin profile changes apply on restart; active runtime policy stays stable for the current session. |
 | Repeated public token guesses consume unlimited attempts | HTTP authentication rejects tokens shorter than 24 bytes and rate-limits failed attempts per client address. |
 | URL-token credentials persist in browser history or referrers | Browser onboarding removes token parameters from the visible URL after capture and sends no-store/no-referrer response headers. Prefer an Authorization header when the MCP client supports one. |
-| Timed-out bash commands leave descendant processes running | POSIX commands run in a dedicated process group and Windows termination uses `taskkill /t`; timeout and output-limit termination target the process tree. |
+| Timed-out or runaway-output bash commands leave descendant processes running | POSIX commands run in a dedicated process group and Windows termination uses `taskkill /t`; timeout and the separate observed-output safety ceiling terminate the process tree. The smaller retained-output limit only truncates the returned transcript and does not kill a healthy command. |
 | Automatic `cloudflared` install trusts a mutable download | The installer uses a pinned release URL and verifies the platform asset SHA-256 before writing or extracting it. |
 | Remote MCP tool runs Codex/OpenCode/Pi directly | Agent execution remains a user-started CLI/watch process on the local machine. |
 | Autonomous loop drives ChatGPT Web or bypasses approvals | `loop-handoff` only runs local terminal commands over `.ai-bridge` files; it does not resume browser sessions, approve prompts, or expose a remote MCP executor. |
