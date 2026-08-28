@@ -140,9 +140,15 @@ export class PathGuard {
   isBlockedRelativePath(relPath: string): boolean {
     const rel = normalizeRelPath(relPath).replace(/^\.\//, "");
     if (!rel || rel === ".") return false;
+    const nocase = process.platform === "win32";
+    const matchPaths = nocase
+      ? [...new Set([rel, rel.split("/").map((segment) => segment.split(":", 1)[0]).join("/")])]
+      : [rel];
     return this.config.blockedGlobs.some((glob) =>
-      minimatch(rel, glob, { dot: true, nocase: false, matchBase: false }) ||
-      minimatch(path.basename(rel), glob, { dot: true, nocase: false, matchBase: true })
+      matchPaths.some((candidate) =>
+        minimatch(candidate, glob, { dot: true, nocase, matchBase: false }) ||
+        minimatch(path.basename(candidate), glob, { dot: true, nocase, matchBase: true })
+      )
     );
   }
 

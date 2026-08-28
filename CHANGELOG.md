@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Hardened Windows sensitive-path guards against case variants and NTFS alternate data streams, and aligned safe Bash blocking with the same case-insensitive Windows semantics.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.
