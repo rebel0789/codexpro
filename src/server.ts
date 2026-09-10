@@ -2345,7 +2345,25 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
 
       const stateRel = `${config.contextDir}/handoff-run-state.json`;
       const contextPrefix = `${config.contextDir.replace(/\/+$/, "")}/`;
-      const terminalStates = new Set(["completed", "failed", "timed_out"]);
+      const terminalStates = new Set(["completed", "failed", "timed_out", "interrupted", "orphaned"]);
+      const processAlive = (pid: unknown): boolean | undefined => {
+        if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return undefined;
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (error: any) {
+          return error?.code === "ESRCH" ? false : true;
+        }
+      };
+      const effectiveState = (state: Record<string, any> | undefined): string | undefined => {
+        if (!state) return undefined;
+        if (state.state === "running") {
+          const parentAlive = processAlive(state.pid);
+          const childAlive = processAlive(state.child_pid);
+          if (parentAlive === false && childAlive !== true) return "orphaned";
+        }
+        return typeof state.state === "string" ? state.state : undefined;
+      };
 
       const readState = async (): Promise<Record<string, any> | undefined> => {
         try {
@@ -2360,7 +2378,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const isAwaited = (state: Record<string, any> | undefined): boolean =>
         Boolean(
           state &&
-            terminalStates.has(state.state) &&
+            terminalStates.has(effectiveState(state) ?? "") &&
             (!expectedPlanHash || state.plan_hash === expectedPlanHash) &&
             (sinceIteration === undefined || (typeof state.iteration === "number" && state.iteration > sinceIteration))
         );
@@ -2372,11 +2390,14 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         state = await readState();
       }
 
+      const resolvedState = effectiveState(state);
+      const recordedPidAlive = state?.state === "running" ? processAlive(state.pid) : undefined;
+      const recordedChildPidAlive = state?.state === "running" ? processAlive(state.child_pid) : undefined;
       const awaitedTerminal = isAwaited(state);
-      const awaitedCompleted = awaitedTerminal && state?.state === "completed";
+      const awaitedCompleted = awaitedTerminal && resolvedState === "completed";
       const planHashMismatch = Boolean(expectedPlanHash && state && state.plan_hash !== expectedPlanHash);
       const reportedState = awaitedTerminal
-        ? String(state?.state)
+        ? String(resolvedState)
         : state
           ? state.state === "running" || planHashMismatch || sinceIteration !== undefined
             ? "running"
@@ -2401,6 +2422,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         return normalized.startsWith(contextPrefix) ? normalized : fallback;
       };
 
+      const reconcileRequired = resolvedState === "orphaned" || Boolean(state?.reconcile_required);
       const structured: Record<string, unknown> = {
         workspace_id: workspace.id,
         root: workspace.root,
@@ -2408,13 +2430,22 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         awaited_completed: awaitedCompleted,
         awaited_terminal: awaitedTerminal,
         succeeded: awaitedCompleted,
+        reconcile_required: reconcileRequired,
         state_file: stateRel,
         ...(state ? { run_state: state.state } : {}),
+        ...(resolvedState && resolvedState !== state?.state ? { effective_run_state: resolvedState } : {}),
         ...(typeof state?.iteration === "number" ? { iteration: state.iteration } : {}),
         ...(state?.plan_hash ? { plan_hash: state.plan_hash } : {}),
         ...(expectedPlanHash ? { expected_plan_hash: expectedPlanHash, plan_hash_mismatch: planHashMismatch } : {}),
         ...(state && "exit_code" in state ? { exit_code: state.exit_code } : {}),
         ...(state && "timed_out" in state ? { timed_out: state.timed_out } : {}),
+        ...(typeof state?.pid === "number" ? { pid: state.pid } : {}),
+        ...(typeof state?.child_pid === "number" ? { child_pid: state.child_pid } : {}),
+        ...(recordedPidAlive !== undefined ? { recorded_pid_alive: recordedPidAlive } : {}),
+        ...(recordedChildPidAlive !== undefined ? { recorded_child_pid_alive: recordedChildPidAlive } : {}),
+        ...(state?.interrupted_signal ? { interrupted_signal: state.interrupted_signal } : {}),
+        ...(state?.execution_outcome ? { execution_outcome: state.execution_outcome } : {}),
+        ...(state?.remote_mutations ? { remote_mutations: state.remote_mutations } : {}),
         ...(state?.started_at ? { started_at: state.started_at } : {}),
         ...(state?.finished_at ? { finished_at: state.finished_at } : {}),
         ...(state?.executor ? { executor: state.executor } : {}),
@@ -2423,24 +2454,26 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       };
 
       if (awaitedTerminal) {
-        const statusFile = bridgeArtifact(state?.status_file, `${config.contextDir}/agent-status.md`);
-        const diffFile = bridgeArtifact(state?.diff_file, `${config.contextDir}/implementation-diff.patch`);
-        const logFile = bridgeArtifact(state?.log_file, `${config.contextDir}/execution-log.jsonl`);
-        const testsFile = bridgeArtifact(state?.tests_file, `${config.contextDir}/loop-tests.txt`);
-        structured.status_file = statusFile;
-        structured.diff_file = diffFile;
-        structured.log_file = logFile;
-        const status = await excerpt(statusFile, 6_000);
-        if (status) structured.status_excerpt = status;
-        if (includeDiff) {
+        if (typeof state?.status_file === "string") {
+          const statusFile = bridgeArtifact(state.status_file, `${config.contextDir}/agent-status.md`);
+          structured.status_file = statusFile;
+          const status = await excerpt(statusFile, 6_000);
+          if (status) structured.status_excerpt = status;
+        }
+        if (includeDiff && typeof state?.diff_file === "string") {
+          const diffFile = bridgeArtifact(state.diff_file, `${config.contextDir}/implementation-diff.patch`);
+          structured.diff_file = diffFile;
           const diff = await excerpt(diffFile, 12_000);
           if (diff) structured.diff_excerpt = diff;
         }
-        if (includeLog) {
+        if (includeLog && typeof state?.log_file === "string") {
+          const logFile = bridgeArtifact(state.log_file, `${config.contextDir}/execution-log.jsonl`);
+          structured.log_file = logFile;
           const log = await excerpt(logFile, 6_000, 20);
           if (log) structured.log_excerpt = log;
         }
-        if (includeTests) {
+        if (includeTests && typeof state?.tests_file === "string") {
+          const testsFile = bridgeArtifact(state.tests_file, `${config.contextDir}/loop-tests.txt`);
           const tests = await excerpt(testsFile, 4_000);
           if (tests) {
             structured.tests_file = testsFile;
@@ -2451,11 +2484,15 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
 
       const summary = !state
         ? `No handoff run state found at ${stateRel}. Start a run with handoff_to_agent + local execute-handoff/watch-handoff, then call wait_for_handoff again.`
-        : awaitedTerminal
-          ? `Handoff run ${state.state} (iteration ${state.iteration ?? 1}, exit ${state.exit_code ?? "null"}).`
-          : planHashMismatch
-            ? `Executor has not completed the expected plan yet (last known run plan_hash=${state.plan_hash ?? "unknown"}). Still waiting.`
-            : `Handoff run is ${state.state}. Re-poll after ~${Math.max(1, Math.ceil(pollMs / 1000))}s.`;
+        : awaitedTerminal && resolvedState === "orphaned"
+          ? `Handoff run state is stale: recorded executor PID ${state.pid ?? "unknown"} no longer exists. The execution outcome may be ambiguous; reconcile Git and target state before retry.`
+          : awaitedTerminal && resolvedState === "interrupted"
+            ? `Handoff run was interrupted by ${state.interrupted_signal ?? "a parent signal"}. Reconcile Git and target state before retrying any material side effect.`
+            : awaitedTerminal
+              ? `Handoff run ${resolvedState} (iteration ${state.iteration ?? 1}, exit ${state.exit_code ?? "null"}).`
+              : planHashMismatch
+                ? `Executor has not completed the expected plan yet (last known run plan_hash=${state.plan_hash ?? "unknown"}). Still waiting.`
+                : `Handoff run is ${state.state}. Re-poll after ~${Math.max(1, Math.ceil(pollMs / 1000))}s.`;
 
       const lines = [
         "# Wait For Handoff",

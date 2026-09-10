@@ -142,6 +142,7 @@ Execute handoff options:
   --timeout-ms <ms>         Execution timeout. Default: 600000.
   --max-output-bytes <n>    Max stdout/stderr excerpt bytes per stream. Default: 120000.
   --context-dir <dir>       Handoff directory. Default: .ai-bridge.
+  --allow-remote-mutations  Let the local handoff executor use normal Git/GitHub remote mutation paths. Default: blocked.
   --yes                     Run without interactive confirmation.
 
 Watch handoff options:
@@ -340,6 +341,7 @@ function parseArgs(argv) {
     else if (key === 'stop-if-no-files-changed') out.stopIfNoFilesChanged = true;
     else if (key === 'stop-if-same-diff') out.stopIfSameDiff = true;
     else if (key === 'require-human-confirmation') out.requireHumanConfirmation = true;
+    else if (key === 'allow-remote-mutations') out.allowRemoteMutations = true;
     else if (key === 'allow-implicit-review-verdict') out.allowImplicitReviewVerdict = true;
     else if (key === 'allow-review-pass-on-failure') out.allowReviewPassOnFailure = true;
     else if (key === 'open-chatgpt') out.openChatgpt = true;
@@ -626,6 +628,70 @@ function commandAvailableFromRoot(command, root) {
   const expanded = expandHome(command);
   const resolved = path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(root, expanded);
   return executableFileExists(resolved);
+}
+
+function handoffRemoteMutationEnvironment(args) {
+  const env = { ...process.env, NO_COLOR: '1' };
+  if (args.allowRemoteMutations) {
+    env.CODEXPRO_REMOTE_MUTATIONS = 'allow';
+    return { env, mode: 'allowed', cleanup: () => {} };
+  }
+
+  const guardDir = fs.mkdtempSync(path.join(os.tmpdir(), 'codexpro-handoff-remote-guard-'));
+  const gitCommand = commandPaths('git')[0] || 'git';
+  const message = 'CodexPro blocked remote Git/GitHub mutation for this handoff. Re-run with --allow-remote-mutations only when that side effect is explicitly authorized.';
+  const gitGuardSource = `#!/usr/bin/env node
+import { spawnSync } from 'node:child_process';
+const argv = process.argv.slice(2);
+let index = 0;
+const optionsWithValues = new Set(['-C', '-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env']);
+while (index < argv.length && argv[index].startsWith('-')) {
+  const option = argv[index];
+  index += optionsWithValues.has(option) && !option.includes('=') ? 2 : 1;
+}
+const command = argv[index] || '';
+const next = argv[index + 1] || '';
+const blocked = command === 'push' || command === 'send-pack' ||
+  ((command === 'lfs' || command === 'subtree') && next === 'push');
+if (blocked) {
+  console.error(${JSON.stringify(message)});
+  process.exit(126);
+}
+const result = spawnSync(${JSON.stringify(gitCommand)}, argv, { stdio: 'inherit', shell: false });
+if (result.error) {
+  console.error(result.error.message);
+  process.exit(127);
+}
+process.exit(result.status ?? 1);
+`;
+  const ghGuardSource = `#!/usr/bin/env node
+console.error(${JSON.stringify(message)});
+process.exit(126);
+`;
+  const gitGuardPath = path.join(guardDir, process.platform === 'win32' ? 'git-guard.mjs' : 'git');
+  const ghGuardPath = path.join(guardDir, process.platform === 'win32' ? 'gh-guard.mjs' : 'gh');
+  fs.writeFileSync(gitGuardPath, gitGuardSource, { mode: 0o700 });
+  fs.writeFileSync(ghGuardPath, ghGuardSource, { mode: 0o700 });
+  if (process.platform === 'win32') {
+    fs.writeFileSync(path.join(guardDir, 'git.cmd'), `@"${process.execPath}" "${gitGuardPath}" %*\r\n`, { mode: 0o700 });
+    fs.writeFileSync(path.join(guardDir, 'gh.cmd'), `@"${process.execPath}" "${ghGuardPath}" %*\r\n`, { mode: 0o700 });
+  }
+  fs.mkdirSync(path.join(guardDir, 'gh-config'), { recursive: true, mode: 0o700 });
+
+  const inheritedPath = process.env.PATH ?? process.env.Path ?? '';
+  env.PATH = `${guardDir}${path.delimiter}${inheritedPath}`;
+  if (process.platform === 'win32') env.Path = env.PATH;
+  env.CODEXPRO_REMOTE_MUTATIONS = 'blocked_standard_cli';
+  env.GIT_TERMINAL_PROMPT = '0';
+  env.GCM_INTERACTIVE = 'Never';
+  env.GH_CONFIG_DIR = path.join(guardDir, 'gh-config');
+  for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN']) delete env[key];
+
+  return {
+    env,
+    mode: 'blocked_standard_cli',
+    cleanup: () => fs.rmSync(guardDir, { recursive: true, force: true })
+  };
 }
 
 function codexProHome() {
@@ -1641,11 +1707,12 @@ function runProcessCaptured(command, args, options) {
     const invocation = processInvocation(command, args);
     const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd,
-      env: { ...process.env, NO_COLOR: '1' },
+      env: options.env ?? { ...process.env, NO_COLOR: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
       shell: false,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments
     });
+    if (typeof options.onSpawn === 'function') options.onSpawn(child);
     let stdout = '';
     let stderr = '';
     let timedOut = false;
@@ -1860,50 +1927,116 @@ async function executeHandoffRequest(request, args, options = {}) {
   const iteration = Number.isFinite(options.iteration) ? options.iteration : 1;
   const runPlanHash = planHash(request.planText);
   const startedAt = new Date().toISOString();
+  const startedMs = Date.now();
+  const mutationGuard = handoffRemoteMutationEnvironment(args);
+  let activeChild = null;
+  let interruptedSignal = null;
+
+  const baseRunState = () => ({
+    iteration,
+    started_at: startedAt,
+    plan_hash: runPlanHash,
+    executor: request.commandInfo.agent,
+    model: request.commandInfo.model || undefined,
+    pid: process.pid,
+    child_pid: activeChild?.pid ?? null,
+    remote_mutations: mutationGuard.mode
+  });
+  const markInterrupted = (signal) => {
+    if (interruptedSignal) return;
+    interruptedSignal = signal;
+    try {
+      writeHandoffRunState(request.root, request.contextDir, {
+        state: 'interrupted',
+        ...baseRunState(),
+        finished_at: new Date().toISOString(),
+        exit_code: null,
+        timed_out: false,
+        interrupted_signal: signal,
+        duration_ms: Date.now() - startedMs,
+        reconcile_required: true,
+        execution_outcome: 'unknown'
+      });
+    } catch {}
+    if (activeChild) killProcess(activeChild);
+  };
+  const onSigint = () => markInterrupted('SIGINT');
+  const onSigterm = () => markInterrupted('SIGTERM');
+
   writeHandoffRunState(request.root, request.contextDir, {
     state: 'running',
-    iteration,
-    started_at: startedAt,
+    ...baseRunState(),
     finished_at: null,
-    plan_hash: runPlanHash,
-    executor: request.commandInfo.agent,
-    model: request.commandInfo.model || undefined,
-    pid: process.pid
+    reconcile_required: false
   });
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
 
-  statusLine('wait', `Running ${request.commandInfo.agent}: ${request.commandText}`);
-  const result = await runProcessCaptured(request.commandInfo.command, request.commandInfo.args, {
-    cwd: request.root,
-    timeoutMs: request.timeoutMs,
-    maxOutputBytes: request.maxOutputBytes
-  });
-  const diffText = readGitDiffExcludingContext(request.root, request.contextDir, request.maxOutputBytes);
-  const gitStatusText = readGitStatus(request.root, request.maxOutputBytes);
-  const outputs = writeExecutionOutputs(request.root, request.contextDir, request.commandInfo, result, diffText, gitStatusText);
+  try {
+    statusLine('wait', `Running ${request.commandInfo.agent}: ${request.commandText}`);
+    const result = await runProcessCaptured(request.commandInfo.command, request.commandInfo.args, {
+      cwd: request.root,
+      timeoutMs: request.timeoutMs,
+      maxOutputBytes: request.maxOutputBytes,
+      env: mutationGuard.env,
+      onSpawn: (child) => {
+        activeChild = child;
+        writeHandoffRunState(request.root, request.contextDir, {
+          state: 'running',
+          ...baseRunState(),
+          finished_at: null,
+          reconcile_required: false
+        });
+      }
+    });
+    const diffText = readGitDiffExcludingContext(request.root, request.contextDir, request.maxOutputBytes);
+    const gitStatusText = readGitStatus(request.root, request.maxOutputBytes);
+    const outputs = writeExecutionOutputs(request.root, request.contextDir, request.commandInfo, result, diffText, gitStatusText);
 
-  const runState = result.timedOut ? 'timed_out' : (result.exitCode === 0 ? 'completed' : 'failed');
-  const testsAbsPath = path.join(request.bridgeDir, 'loop-tests.txt');
-  writeHandoffRunState(request.root, request.contextDir, {
-    state: runState,
-    iteration,
-    started_at: startedAt,
-    finished_at: new Date().toISOString(),
-    plan_hash: runPlanHash,
-    executor: request.commandInfo.agent,
-    model: request.commandInfo.model || undefined,
-    exit_code: result.exitCode ?? null,
-    timed_out: Boolean(result.timedOut),
-    duration_ms: result.durationMs,
-    status_file: path.posix.join(request.contextDir, 'agent-status.md'),
-    diff_file: path.posix.join(request.contextDir, 'implementation-diff.patch'),
-    log_file: path.posix.join(request.contextDir, 'execution-log.jsonl'),
-    ...(fs.existsSync(testsAbsPath) ? { tests_file: path.posix.join(request.contextDir, 'loop-tests.txt') } : {})
-  });
-  statusLine(result.exitCode === 0 ? 'ok' : 'warn', `Agent exited with code ${result.exitCode ?? 'null'}${result.signal ? ` signal=${result.signal}` : ''}`);
-  console.log(`Status: ${path.relative(request.root, outputs.statusPath)}`);
-  console.log(`Diff:   ${path.relative(request.root, outputs.diffPath)}`);
-  console.log(`Log:    ${path.relative(request.root, outputs.logPath)}`);
-  return { cancelled: false, result, outputs };
+    const runState = interruptedSignal
+      ? 'interrupted'
+      : result.timedOut
+        ? 'timed_out'
+        : (result.exitCode === 0 ? 'completed' : 'failed');
+    const testsAbsPath = path.join(request.bridgeDir, 'loop-tests.txt');
+    writeHandoffRunState(request.root, request.contextDir, {
+      state: runState,
+      ...baseRunState(),
+      finished_at: new Date().toISOString(),
+      exit_code: result.exitCode ?? null,
+      timed_out: Boolean(result.timedOut),
+      duration_ms: result.durationMs,
+      ...(interruptedSignal ? { interrupted_signal: interruptedSignal } : {}),
+      execution_outcome: runState === 'completed' ? 'completed' : 'unknown',
+      reconcile_required: runState !== 'completed',
+      status_file: path.posix.join(request.contextDir, 'agent-status.md'),
+      diff_file: path.posix.join(request.contextDir, 'implementation-diff.patch'),
+      log_file: path.posix.join(request.contextDir, 'execution-log.jsonl'),
+      ...(fs.existsSync(testsAbsPath) ? { tests_file: path.posix.join(request.contextDir, 'loop-tests.txt') } : {})
+    });
+    statusLine(result.exitCode === 0 && !interruptedSignal ? 'ok' : 'warn', `Agent exited with code ${result.exitCode ?? 'null'}${result.signal ? ` signal=${result.signal}` : ''}${interruptedSignal ? ` parent_signal=${interruptedSignal}` : ''}`);
+    console.log(`Status: ${path.relative(request.root, outputs.statusPath)}`);
+    console.log(`Diff:   ${path.relative(request.root, outputs.diffPath)}`);
+    console.log(`Log:    ${path.relative(request.root, outputs.logPath)}`);
+    return { cancelled: false, result, outputs, interruptedSignal };
+  } catch (error) {
+    writeHandoffRunState(request.root, request.contextDir, {
+      state: interruptedSignal ? 'interrupted' : 'failed',
+      ...baseRunState(),
+      finished_at: new Date().toISOString(),
+      exit_code: null,
+      timed_out: false,
+      duration_ms: Date.now() - startedMs,
+      ...(interruptedSignal ? { interrupted_signal: interruptedSignal } : {}),
+      reconcile_required: true,
+      execution_outcome: 'unknown'
+    });
+    throw error;
+  } finally {
+    process.off('SIGINT', onSigint);
+    process.off('SIGTERM', onSigterm);
+    mutationGuard.cleanup();
+  }
 }
 
 async function runExecuteHandoff(argv) {
@@ -1920,7 +2053,9 @@ async function runExecuteHandoff(argv) {
   }
 
   const execution = await executeHandoffRequest(request, args);
-  if (execution.result && execution.result.exitCode !== 0) process.exitCode = execution.result.exitCode ?? 1;
+  if (execution.interruptedSignal === 'SIGINT') process.exitCode = 130;
+  else if (execution.interruptedSignal === 'SIGTERM') process.exitCode = 143;
+  else if (execution.result && execution.result.exitCode !== 0) process.exitCode = execution.result.exitCode ?? 1;
 }
 
 function planHash(planText) {

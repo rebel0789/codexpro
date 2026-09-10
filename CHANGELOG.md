@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Hardened handoff execution receipts: `execute-handoff` records `interrupted` with an unknown outcome/reconciliation requirement on SIGINT/SIGTERM, publishes parent/child PIDs, and `wait_for_handoff` treats stale `running` receipts as `orphaned` only after both recorded processes are gone.
+- Added a default local handoff remote-mutation guard: standard `git push`/send-pack push paths and `gh` are blocked inside the executor unless `--allow-remote-mutations` is explicitly supplied. This is a guard against accidental side effects, not a security sandbox against a malicious process.
+
 ## 0.30.0 (2026-08-08)
 
 - Published the multi-project allowlist that was already on `main`: `codexpro settings set --project`, `--clear-projects`, session-local `open_workspace` selection, and matching FAQ guidance. npm `0.29.0` did not include those commits, which caused empty Allowed Roots reports after following current docs.
