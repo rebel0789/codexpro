@@ -1227,7 +1227,7 @@ if (process.platform !== 'win32') {
   const interruptedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-handoff-interrupted-'));
   await fs.mkdir(path.join(interruptedRoot, '.ai-bridge'), { recursive: true });
   await fs.writeFile(path.join(interruptedRoot, '.ai-bridge', 'current-plan.md'), '# Interrupted plan\n\nStay alive until the parent is signalled.\n', 'utf8');
-  await fs.writeFile(path.join(interruptedRoot, 'slow-agent.mjs'), `setInterval(() => {}, 1000);\n`, 'utf8');
+  await fs.writeFile(path.join(interruptedRoot, 'slow-agent.mjs'), `import fs from 'node:fs';\nprocess.on('SIGTERM', () => {});\nfs.writeFileSync('agent-ready.txt', 'ready\\n');\nsetInterval(() => {}, 1000);\n`, 'utf8');
   const interruptedRun = spawn(process.execPath, [
     'scripts/codexpro.mjs', 'execute-handoff', '--root', interruptedRoot, '--agent', 'custom', '--command',
     `${quoteArg(process.execPath)} slow-agent.mjs --task-file {{plan_file}}`, '--yes'
@@ -1245,11 +1245,38 @@ if (process.platform !== 'win32') {
     interruptedRun.kill('SIGKILL');
     throw new Error(`execute-handoff did not publish child_pid before interruption: ${JSON.stringify(runningState)}`);
   }
+  let childReady = false;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      await fs.access(path.join(interruptedRoot, 'agent-ready.txt'));
+      childReady = true;
+      break;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!childReady) {
+    interruptedRun.kill('SIGKILL');
+    throw new Error('stubborn child did not publish readiness before interruption test');
+  }
+  const interruptionStarted = Date.now();
   interruptedRun.kill('SIGTERM');
+  let interruptingState;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      interruptingState = JSON.parse(await fs.readFile(path.join(interruptedRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8'));
+      if (interruptingState.state === 'interrupting') break;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!interruptingState || interruptingState.state !== 'interrupting' || interruptingState.finished_at !== null || interruptingState.reconcile_required !== true || interruptingState.execution_outcome !== 'unknown') {
+    interruptedRun.kill('SIGKILL');
+    throw new Error(`execute-handoff exposed a terminal receipt before the child exited: ${JSON.stringify(interruptingState)}`);
+  }
   const interruptedExit = await new Promise((resolve) => interruptedRun.once('exit', (code, signal) => resolve({ code, signal })));
+  const interruptionDuration = Date.now() - interruptionStarted;
   const interruptedState = JSON.parse(await fs.readFile(path.join(interruptedRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8'));
-  if (interruptedExit.code !== 143 || interruptedState.state !== 'interrupted' || interruptedState.interrupted_signal !== 'SIGTERM' || interruptedState.reconcile_required !== true || interruptedState.execution_outcome !== 'unknown' || !interruptedState.finished_at) {
-    throw new Error(`execute-handoff interruption receipt was incomplete\nexit=${JSON.stringify(interruptedExit)}\nstate=${JSON.stringify(interruptedState)}`);
+  if (interruptedExit.code !== 143 || interruptedState.state !== 'interrupted' || interruptedState.interrupted_signal !== 'SIGTERM' || interruptedState.reconcile_required !== true || interruptedState.execution_outcome !== 'unknown' || !interruptedState.finished_at || interruptionDuration > 5000) {
+    throw new Error(`execute-handoff interruption receipt was incomplete\nexit=${JSON.stringify(interruptedExit)}\nduration=${interruptionDuration}\nstate=${JSON.stringify(interruptedState)}`);
   }
 }
 

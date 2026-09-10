@@ -2357,7 +2357,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       };
       const effectiveState = (state: Record<string, any> | undefined): string | undefined => {
         if (!state) return undefined;
-        if (state.state === "running") {
+        if (state.state === "running" || state.state === "interrupting") {
           const parentAlive = processAlive(state.pid);
           const childAlive = processAlive(state.child_pid);
           if (parentAlive === false && childAlive !== true) return "orphaned";
@@ -2391,8 +2391,9 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
 
       const resolvedState = effectiveState(state);
-      const recordedPidAlive = state?.state === "running" ? processAlive(state.pid) : undefined;
-      const recordedChildPidAlive = state?.state === "running" ? processAlive(state.child_pid) : undefined;
+      const inFlightState = state?.state === "running" || state?.state === "interrupting";
+      const recordedPidAlive = inFlightState ? processAlive(state?.pid) : undefined;
+      const recordedChildPidAlive = inFlightState ? processAlive(state?.child_pid) : undefined;
       const awaitedTerminal = isAwaited(state);
       const awaitedCompleted = awaitedTerminal && resolvedState === "completed";
       const planHashMismatch = Boolean(expectedPlanHash && state && state.plan_hash !== expectedPlanHash);
@@ -2444,6 +2445,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         ...(recordedPidAlive !== undefined ? { recorded_pid_alive: recordedPidAlive } : {}),
         ...(recordedChildPidAlive !== undefined ? { recorded_child_pid_alive: recordedChildPidAlive } : {}),
         ...(state?.interrupted_signal ? { interrupted_signal: state.interrupted_signal } : {}),
+        ...(state?.interrupted_at ? { interrupted_at: state.interrupted_at } : {}),
         ...(state?.execution_outcome ? { execution_outcome: state.execution_outcome } : {}),
         ...(state?.remote_mutations ? { remote_mutations: state.remote_mutations } : {}),
         ...(state?.started_at ? { started_at: state.started_at } : {}),

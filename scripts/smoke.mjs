@@ -1127,8 +1127,30 @@ if (waitDetachedRunning.structuredContent.awaited_terminal !== false || waitDeta
 }
 await fs.writeFile(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify({
   version: 1,
-  state: 'running',
+  state: 'interrupting',
   iteration: 5,
+  plan_hash: 'interrupting-plan',
+  executor: 'codex',
+  pid: 999999,
+  child_pid: process.pid,
+  interrupted_signal: 'SIGTERM',
+  interrupted_at: new Date().toISOString(),
+  started_at: new Date(Date.now() - 60_000).toISOString(),
+  finished_at: null,
+  reconcile_required: true,
+  execution_outcome: 'unknown'
+}, null, 2)}\n`, 'utf8');
+const waitInterrupting = await client.request('tools/call', {
+  name: 'wait_for_handoff',
+  arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'interrupting-plan' }
+});
+if (waitInterrupting.structuredContent.awaited_terminal !== false || waitInterrupting.structuredContent.state !== 'interrupting' || waitInterrupting.structuredContent.recorded_child_pid_alive !== true || waitInterrupting.structuredContent.reconcile_required !== true || !waitInterrupting.structuredContent.interrupted_at) {
+  throw new Error(`wait_for_handoff treated interrupting live child as terminal: ${JSON.stringify(waitInterrupting.structuredContent)}`);
+}
+await fs.writeFile(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify({
+  version: 1,
+  state: 'running',
+  iteration: 6,
   plan_hash: 'orphaned-plan',
   executor: 'codex',
   pid: 999999,

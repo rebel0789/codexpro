@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Hardened handoff execution receipts: `execute-handoff` records `interrupted` with an unknown outcome/reconciliation requirement on SIGINT/SIGTERM, publishes parent/child PIDs, and `wait_for_handoff` treats stale `running` receipts as `orphaned` only after both recorded processes are gone.
+- Hardened handoff execution receipts: `execute-handoff` records non-terminal `interrupting` while SIGINT/SIGTERM child termination is in progress, then records terminal `interrupted` only after the child exits; receipts publish parent/child PIDs and unknown-outcome/reconciliation semantics, and `wait_for_handoff` treats stale in-flight receipts as `orphaned` only after both recorded processes are gone.
 - Added a default local handoff remote-mutation guard: standard `git push`/send-pack push paths and `gh` are blocked inside the executor unless `--allow-remote-mutations` is explicitly supplied. This is a guard against accidental side effects, not a security sandbox against a malicious process.
 
 ## 0.30.0 (2026-08-08)

@@ -1314,7 +1314,7 @@ function writeQuickTunnelCredentials(tunnel) {
 }
 
 function killProcess(child) {
-  if (!child || child.killed) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
   if (child.codexproKillTree && child.pid) {
     const result = spawnSync('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], {
       stdio: 'ignore',
@@ -1324,7 +1324,7 @@ function killProcess(child) {
   }
   try { child.kill('SIGTERM'); } catch {}
   setTimeout(() => {
-    if (!child.killed) {
+    if (child.exitCode === null && child.signalCode === null) {
       try { child.kill('SIGKILL'); } catch {}
     }
   }, 1500).unref();
@@ -1712,6 +1712,7 @@ function runProcessCaptured(command, args, options) {
       shell: false,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments
     });
+    child.codexproKillTree = Boolean(invocation.killTree);
     if (typeof options.onSpawn === 'function') options.onSpawn(child);
     let stdout = '';
     let stderr = '';
@@ -1947,9 +1948,10 @@ async function executeHandoffRequest(request, args, options = {}) {
     interruptedSignal = signal;
     try {
       writeHandoffRunState(request.root, request.contextDir, {
-        state: 'interrupted',
+        state: 'interrupting',
         ...baseRunState(),
-        finished_at: new Date().toISOString(),
+        interrupted_at: new Date().toISOString(),
+        finished_at: null,
         exit_code: null,
         timed_out: false,
         interrupted_signal: signal,
