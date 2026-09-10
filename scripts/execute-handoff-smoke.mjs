@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -192,7 +192,7 @@ const runState = JSON.parse(runStateRaw);
 if (runState.state !== 'completed') {
   throw new Error(`handoff-run-state did not record completion\n${runStateRaw}`);
 }
-if (runState.exit_code !== 0 || runState.timed_out !== false || runState.executor !== 'custom') {
+if (runState.exit_code !== 0 || runState.timed_out !== false || runState.executor !== 'custom' || runState.execution_outcome !== 'completed' || runState.reconcile_required !== false || runState.remote_mutations !== 'blocked_standard_cli') {
   throw new Error(`handoff-run-state missing expected run fields\n${runStateRaw}`);
 }
 if (!runState.plan_hash || !runState.started_at || !runState.finished_at || runState.status_file !== '.ai-bridge/agent-status.md') {
@@ -329,7 +329,7 @@ if (timeoutRun.status === 0) {
   throw new Error(`execute-handoff timeout exited successfully\nstdout:\n${timeoutRun.stdout}\nstderr:\n${timeoutRun.stderr}`);
 }
 const timeoutState = await fs.readFile(path.join(timeoutRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8');
-if (!timeoutState.includes('"state": "timed_out"') || !timeoutState.includes('"exit_code": null')) {
+if (!timeoutState.includes('"state": "timed_out"') || !timeoutState.includes('"exit_code": null') || !timeoutState.includes('"execution_outcome": "unknown"') || !timeoutState.includes('"reconcile_required": true')) {
   throw new Error(`execute-handoff timeout state was wrong\n${timeoutState}`);
 }
 
@@ -1172,6 +1172,112 @@ const implicitDeletedPlanState = await fs.readFile(path.join(implicitDeletedPlan
 const implicitDeletedPlanLog = await fs.readFile(path.join(implicitDeletedPlanRoot, '.ai-bridge', 'execution-log.jsonl'), 'utf8');
 if (!implicitDeletedPlanState.includes('"nextPlanChanged": true') || !implicitDeletedPlanState.includes('"followupPlanExists": false') || !implicitDeletedPlanLog.includes('"stop_reason":"no_followup_plan"')) {
   throw new Error(`loop did not fail closed after implicit reviewer deleted the plan\nstate:\n${implicitDeletedPlanState}\nlog:\n${implicitDeletedPlanLog}`);
+}
+
+const remoteGuardRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-handoff-remote-guard-'));
+const remoteBareRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-handoff-remote-bare-'));
+await fs.mkdir(path.join(remoteGuardRoot, '.ai-bridge'), { recursive: true });
+await fs.writeFile(path.join(remoteGuardRoot, '.ai-bridge', 'current-plan.md'), '# Remote mutation guard plan\n\nTry one local-repository push.\n', 'utf8');
+await fs.writeFile(path.join(remoteGuardRoot, 'app.txt'), 'base\n', 'utf8');
+await fs.writeFile(path.join(remoteGuardRoot, 'push-agent.mjs'), `
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+const result = spawnSync('git push origin HEAD:refs/heads/guarded', { encoding: 'utf8', shell: true });
+fs.writeFileSync('push-status.json', JSON.stringify({
+  status: result.status,
+  stderr: result.stderr,
+  mode: process.env.CODEXPRO_REMOTE_MUTATIONS || '',
+  inheritedGithubToken: Boolean(process.env.GH_TOKEN || process.env.GITHUB_TOKEN)
+}));
+`, 'utf8');
+requireSuccess(spawnSync('git', ['init', '--bare', remoteBareRoot], { encoding: 'utf8' }), 'remote mutation bare git init');
+requireSuccess(spawnSync('git', ['init'], { cwd: remoteGuardRoot, encoding: 'utf8' }), 'remote mutation worktree git init');
+requireSuccess(spawnSync('git', ['config', 'user.email', 'codexpro@example.invalid'], { cwd: remoteGuardRoot, encoding: 'utf8' }), 'remote mutation git email');
+requireSuccess(spawnSync('git', ['config', 'user.name', 'CodexPro Smoke'], { cwd: remoteGuardRoot, encoding: 'utf8' }), 'remote mutation git name');
+requireSuccess(spawnSync('git', ['add', 'app.txt'], { cwd: remoteGuardRoot, encoding: 'utf8' }), 'remote mutation git add');
+requireSuccess(spawnSync('git', ['commit', '-m', 'base'], { cwd: remoteGuardRoot, encoding: 'utf8' }), 'remote mutation git commit');
+requireSuccess(spawnSync('git', ['remote', 'add', 'origin', remoteBareRoot], { cwd: remoteGuardRoot, encoding: 'utf8' }), 'remote mutation git remote');
+
+const remoteBlocked = run([
+  'execute-handoff', '--root', remoteGuardRoot, '--agent', 'custom', '--command',
+  `${quoteArg(process.execPath)} push-agent.mjs --task-file {{plan_file}}`, '--yes'
+]);
+requireSuccess(remoteBlocked, 'execute-handoff remote mutation blocked run');
+const blockedPush = JSON.parse(await fs.readFile(path.join(remoteGuardRoot, 'push-status.json'), 'utf8'));
+if (blockedPush.status !== 126 || blockedPush.mode !== 'blocked_standard_cli' || blockedPush.inheritedGithubToken !== false) {
+  throw new Error(`remote mutation guard did not fail closed: ${JSON.stringify(blockedPush)}`);
+}
+const blockedRemoteRef = spawnSync('git', ['--git-dir', remoteBareRoot, 'rev-parse', '--verify', 'refs/heads/guarded'], { encoding: 'utf8' });
+if (blockedRemoteRef.status === 0) {
+  throw new Error('default handoff unexpectedly created the guarded remote ref');
+}
+
+const remoteAllowed = run([
+  'execute-handoff', '--root', remoteGuardRoot, '--agent', 'custom', '--command',
+  `${quoteArg(process.execPath)} push-agent.mjs --task-file {{plan_file}}`, '--allow-remote-mutations', '--yes'
+]);
+requireSuccess(remoteAllowed, 'execute-handoff remote mutation allowed run');
+const allowedPush = JSON.parse(await fs.readFile(path.join(remoteGuardRoot, 'push-status.json'), 'utf8'));
+if (allowedPush.status !== 0 || allowedPush.mode !== 'allow') {
+  throw new Error(`explicit remote mutation opt-in did not restore push: ${JSON.stringify(allowedPush)}`);
+}
+requireSuccess(spawnSync('git', ['--git-dir', remoteBareRoot, 'rev-parse', '--verify', 'refs/heads/guarded'], { encoding: 'utf8' }), 'allowed remote ref exists');
+
+if (process.platform !== 'win32') {
+  const interruptedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-handoff-interrupted-'));
+  await fs.mkdir(path.join(interruptedRoot, '.ai-bridge'), { recursive: true });
+  await fs.writeFile(path.join(interruptedRoot, '.ai-bridge', 'current-plan.md'), '# Interrupted plan\n\nStay alive until the parent is signalled.\n', 'utf8');
+  await fs.writeFile(path.join(interruptedRoot, 'slow-agent.mjs'), `import fs from 'node:fs';\nprocess.on('SIGTERM', () => {});\nfs.writeFileSync('agent-ready.txt', 'ready\\n');\nsetInterval(() => {}, 1000);\n`, 'utf8');
+  const interruptedRun = spawn(process.execPath, [
+    'scripts/codexpro.mjs', 'execute-handoff', '--root', interruptedRoot, '--agent', 'custom', '--command',
+    `${quoteArg(process.execPath)} slow-agent.mjs --task-file {{plan_file}}`, '--yes'
+  ], { cwd: path.resolve('.'), env: { ...process.env, NO_COLOR: '1' }, stdio: ['ignore', 'pipe', 'pipe'] });
+
+  let runningState;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      runningState = JSON.parse(await fs.readFile(path.join(interruptedRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8'));
+      if (Number.isInteger(runningState.child_pid) && runningState.child_pid > 0) break;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!runningState || !Number.isInteger(runningState.child_pid) || runningState.child_pid <= 0) {
+    interruptedRun.kill('SIGKILL');
+    throw new Error(`execute-handoff did not publish child_pid before interruption: ${JSON.stringify(runningState)}`);
+  }
+  let childReady = false;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    try {
+      await fs.access(path.join(interruptedRoot, 'agent-ready.txt'));
+      childReady = true;
+      break;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!childReady) {
+    interruptedRun.kill('SIGKILL');
+    throw new Error('stubborn child did not publish readiness before interruption test');
+  }
+  const interruptionStarted = Date.now();
+  interruptedRun.kill('SIGTERM');
+  let interruptingState;
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    try {
+      interruptingState = JSON.parse(await fs.readFile(path.join(interruptedRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8'));
+      if (interruptingState.state === 'interrupting') break;
+    } catch {}
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  if (!interruptingState || interruptingState.state !== 'interrupting' || interruptingState.finished_at !== null || interruptingState.reconcile_required !== true || interruptingState.execution_outcome !== 'unknown') {
+    interruptedRun.kill('SIGKILL');
+    throw new Error(`execute-handoff exposed a terminal receipt before the child exited: ${JSON.stringify(interruptingState)}`);
+  }
+  const interruptedExit = await new Promise((resolve) => interruptedRun.once('exit', (code, signal) => resolve({ code, signal })));
+  const interruptionDuration = Date.now() - interruptionStarted;
+  const interruptedState = JSON.parse(await fs.readFile(path.join(interruptedRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8'));
+  if (interruptedExit.code !== 143 || interruptedState.state !== 'interrupted' || interruptedState.interrupted_signal !== 'SIGTERM' || interruptedState.reconcile_required !== true || interruptedState.execution_outcome !== 'unknown' || !interruptedState.finished_at || interruptionDuration > 5000) {
+    throw new Error(`execute-handoff interruption receipt was incomplete\nexit=${JSON.stringify(interruptedExit)}\nduration=${interruptionDuration}\nstate=${JSON.stringify(interruptedState)}`);
+  }
 }
 
 console.log('✓ execute-handoff, watch-handoff, and loop-handoff smoke test passed');

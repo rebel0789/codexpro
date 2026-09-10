@@ -1106,6 +1106,69 @@ const waitTimedOut = await client.request('tools/call', {
 if (waitTimedOut.structuredContent.awaited_terminal !== true || waitTimedOut.structuredContent.awaited_completed !== false || waitTimedOut.structuredContent.succeeded !== false || waitTimedOut.structuredContent.state !== 'timed_out') {
   throw new Error(`wait_for_handoff did not report timed-out terminal state: ${JSON.stringify(waitTimedOut.structuredContent)}`);
 }
+await fs.writeFile(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify({
+  version: 1,
+  state: 'running',
+  iteration: 4,
+  plan_hash: 'detached-running-plan',
+  executor: 'codex',
+  pid: 999999,
+  child_pid: process.pid,
+  started_at: new Date(Date.now() - 60_000).toISOString(),
+  finished_at: null,
+  reconcile_required: false
+}, null, 2)}\n`, 'utf8');
+const waitDetachedRunning = await client.request('tools/call', {
+  name: 'wait_for_handoff',
+  arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'detached-running-plan' }
+});
+if (waitDetachedRunning.structuredContent.awaited_terminal !== false || waitDetachedRunning.structuredContent.state !== 'running' || waitDetachedRunning.structuredContent.recorded_pid_alive !== false || waitDetachedRunning.structuredContent.recorded_child_pid_alive !== true || waitDetachedRunning.structuredContent.reconcile_required !== false) {
+  throw new Error(`wait_for_handoff incorrectly orphaned a still-live child executor: ${JSON.stringify(waitDetachedRunning.structuredContent)}`);
+}
+await fs.writeFile(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify({
+  version: 1,
+  state: 'interrupting',
+  iteration: 5,
+  plan_hash: 'interrupting-plan',
+  executor: 'codex',
+  pid: 999999,
+  child_pid: process.pid,
+  interrupted_signal: 'SIGTERM',
+  interrupted_at: new Date().toISOString(),
+  started_at: new Date(Date.now() - 60_000).toISOString(),
+  finished_at: null,
+  reconcile_required: true,
+  execution_outcome: 'unknown'
+}, null, 2)}\n`, 'utf8');
+const waitInterrupting = await client.request('tools/call', {
+  name: 'wait_for_handoff',
+  arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'interrupting-plan' }
+});
+if (waitInterrupting.structuredContent.awaited_terminal !== false || waitInterrupting.structuredContent.state !== 'interrupting' || waitInterrupting.structuredContent.recorded_child_pid_alive !== true || waitInterrupting.structuredContent.reconcile_required !== true || !waitInterrupting.structuredContent.interrupted_at) {
+  throw new Error(`wait_for_handoff treated interrupting live child as terminal: ${JSON.stringify(waitInterrupting.structuredContent)}`);
+}
+await fs.writeFile(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), `${JSON.stringify({
+  version: 1,
+  state: 'running',
+  iteration: 6,
+  plan_hash: 'orphaned-plan',
+  executor: 'codex',
+  pid: 999999,
+  child_pid: 999998,
+  started_at: new Date(Date.now() - 60_000).toISOString(),
+  finished_at: null,
+  reconcile_required: false
+}, null, 2)}\n`, 'utf8');
+const waitOrphaned = await client.request('tools/call', {
+  name: 'wait_for_handoff',
+  arguments: { workspace_id: ws, max_wait_seconds: 1, poll_ms: 250, plan_hash: 'orphaned-plan' }
+});
+if (waitOrphaned.structuredContent.awaited_terminal !== true || waitOrphaned.structuredContent.awaited_completed !== false || waitOrphaned.structuredContent.succeeded !== false || waitOrphaned.structuredContent.state !== 'orphaned' || waitOrphaned.structuredContent.run_state !== 'running' || waitOrphaned.structuredContent.effective_run_state !== 'orphaned' || waitOrphaned.structuredContent.reconcile_required !== true || waitOrphaned.structuredContent.recorded_pid_alive !== false) {
+  throw new Error(`wait_for_handoff did not reconcile dead-PID running state: ${JSON.stringify(waitOrphaned.structuredContent)}`);
+}
+if (waitOrphaned.structuredContent.status_excerpt !== undefined || waitOrphaned.structuredContent.diff_excerpt !== undefined || waitOrphaned.structuredContent.log_excerpt !== undefined) {
+  throw new Error(`wait_for_handoff exposed stale artifacts for an orphaned running receipt: ${JSON.stringify(waitOrphaned.structuredContent)}`);
+}
 await fs.rm(path.join(tmp, '.ai-bridge', 'handoff-run-state.json'), { force: true });
 await client.request('tools/call', { name: 'handoff_to_codex', arguments: { workspace_id: ws, title: 'Smoke Codex plan', plan: '- Verify demo.txt contains write.', append: true } });
 await fs.writeFile(path.join(tmp, '.ai-bridge', 'current-plan.md'), 'x'.repeat(190000), 'utf8');
