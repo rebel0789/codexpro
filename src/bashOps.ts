@@ -405,6 +405,22 @@ function trimOutput(value: string, maxBytes: number): { value: string; truncated
 export type BashEncodingCandidate = { name: string; confidence: number };
 export type BashEncodingDetector = (input: Buffer) => BashEncodingCandidate[];
 
+function likelyWindowsGbk(bytes: Buffer): boolean {
+  let doubleBytePairs = 0;
+  for (let i = 0; i + 1 < bytes.length; i += 1) {
+    const lead = bytes[i];
+    const trail = bytes[i + 1];
+    if (lead >= 0x81 && lead <= 0xfe && trail >= 0x40 && trail <= 0xfe && trail !== 0x7f) {
+      doubleBytePairs += 1;
+      i += 1;
+    }
+  }
+  if (!doubleBytePairs) return false;
+  const decoded = iconv.decode(bytes, "gb18030");
+  const cjkCharacters = (decoded.match(/[\u3400-\u9fff]/g) ?? []).length;
+  return cjkCharacters >= doubleBytePairs && !decoded.includes("�");
+}
+
 export function decodeBashOutput(
   bytes: Buffer,
   platform: NodeJS.Platform = process.platform,
@@ -445,8 +461,13 @@ export function decodeBashOutput(
 
   try {
     const candidate = detect(bytes)[0];
-    if (!candidate || candidate.confidence < 80 || !iconv.encodingExists(candidate.name)) return utf8Fallback();
-    return iconv.decode(bytes, candidate.name);
+    if (candidate && candidate.confidence >= 80 && iconv.encodingExists(candidate.name)) {
+      return iconv.decode(bytes, candidate.name);
+    }
+    // Short Windows console output is often GBK/CP936 but does not contain enough
+    // language data for chardet to reach a useful confidence score.
+    if (likelyWindowsGbk(bytes)) return iconv.decode(bytes, "gb18030");
+    return utf8Fallback();
   } catch {
     return utf8Fallback();
   }

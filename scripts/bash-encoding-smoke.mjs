@@ -21,6 +21,8 @@ assert.equal(decodeBashOutput(gb18030, 'win32'), gb18030Text, 'real chardet GB18
 const gbkText = 'Windows GBK 中文编码检测，重复内容用于提高置信度。'.repeat(8);
 const gbk = iconv.encode(gbkText, 'gbk');
 assert.equal(decodeBashOutput(gbk, 'win32'), gbkText, 'real chardet GBK decode failed');
+const shortGbk = iconv.encode('GBK stdout 中文', 'gbk');
+assert.equal(decodeBashOutput(shortGbk, 'win32'), 'GBK stdout 中文', 'short Windows GBK output was not decoded');
 
 const legacy = Buffer.from([0x80]);
 assert.equal(decodeBashOutput(Buffer.from([0xff, 0xfe, 0x65, 0x00, 0x72, 0x00, 0x72, 0x00, 0x6f, 0x00, 0x72, 0x00]), 'win32'), 'error', 'UTF-16LE BOM output was not decoded');
