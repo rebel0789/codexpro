@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, realpath } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import iconv from 'iconv-lite';
@@ -85,7 +85,7 @@ assert.equal(wslInvocation.runtime, 'wsl');
 assert.deepEqual(wslInvocation.args('printf ok'), ['--exec', 'bash', '-lc', 'printf ok']);
 
 if (process.platform === 'win32') {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'codexpro-bash-encoding-'));
+  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'codexpro-bash-encoding-')));
   const config = { bashMode: 'full', maxBashTimeoutMs: 10_000, maxOutputBytes: 100_000, inheritEnv: true, blockedGlobs: [] };
   const workspace = { id: 'encoding-smoke', root, openedAt: new Date().toISOString() };
   const gbkPayload = iconv.encode('GBK stdout 中文', 'gbk').toString('base64');
