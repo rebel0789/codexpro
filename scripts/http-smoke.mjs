@@ -7,6 +7,8 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 async function getFreePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -205,7 +207,9 @@ function postToolsListWithSession(baseUrl, token, sessionId) {
 }
 
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-smoke-'));
-const alternateRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-alternate-'));
+const alternateParent = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-alternate-parent-'));
+const alternateRoot = path.join(alternateParent, 'descendant-workspace');
+await fs.mkdir(alternateRoot);
 await fs.writeFile(path.join(alternateRoot, 'selected.txt'), 'http alternate workspace\n', 'utf8');
 const profileHome = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-http-profile-home-'));
 await fs.mkdir(path.join(root, '.codex', 'skills', 'http-smoke-skill'), { recursive: true });
@@ -252,7 +256,7 @@ const child = spawn('node', ['dist/http.js'], {
     HOST: '0.0.0.0',
     PORT: String(genericPort),
     CODEXPRO_ROOT: root,
-    CODEXPRO_ALLOWED_ROOTS: [root, alternateRoot].join(path.delimiter),
+    CODEXPRO_ALLOWED_ROOTS: [root, alternateParent].join(path.delimiter),
     CODEXPRO_HOST: '127.0.0.1',
     CODEXPRO_PORT: String(port),
     CODEXPRO_HTTP_TOKEN: token,
@@ -284,6 +288,9 @@ try {
   const authorizedJson = await authorized.json();
   if (authorizedJson.authRequired !== true) {
     throw new Error(`expected authenticated healthz to report authRequired=true, got ${JSON.stringify(authorizedJson)}`);
+  }
+  if (!authorized.headers.get('x-codexpro-request-id') || authorizedJson.connection_diagnostics?.requests_received < 2 || authorizedJson.connection_diagnostics?.auth_failures < 1) {
+    throw new Error(`healthz did not expose bounded connector diagnostics: ${JSON.stringify(authorizedJson.connection_diagnostics)}`);
   }
 
   for (const header of [`bearer ${token}`, `Bearer    ${token}`]) {
@@ -371,6 +378,9 @@ try {
   if (!homeText.includes('history.replaceState') || !homeText.includes('initialUrl.searchParams.delete("codexpro_token")')) {
     throw new Error('onboarding page did not remove query credentials from browser history');
   }
+  if (!homeText.includes('const adminProfileUrl = "/admin/profile"') || !homeText.includes('fetch(adminProfileUrl')) {
+    throw new Error('onboarding page did not preserve the connector token for profile saves after URL cleanup');
+  }
   for (const fieldName of ['tunnelName', 'ngrokConfig', 'cloudflareConfig', 'cloudflareTokenFile', 'toolCards', 'noInstallCloudflared']) {
     if (!homeText.includes(`name="${fieldName}"`)) {
       throw new Error(`onboarding page did not include profile field ${fieldName}`);
@@ -393,6 +403,31 @@ try {
   }
   for (const leaked of [runtimeQuerySecret, runtimeAccessSecret, runtimeCloudflareSecret]) {
     if (JSON.stringify(profileBeforeJson).includes(leaked)) throw new Error(`admin profile GET leaked runtime secret: ${leaked}`);
+  }
+
+  const crossOriginProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', origin: 'https://attacker.example' },
+    body: JSON.stringify({ tunnel: 'none' })
+  });
+  const crossOriginJson = await crossOriginProfile.json().catch(() => ({}));
+  if (crossOriginProfile.status !== 403 || crossOriginJson.error?.code !== 'origin_denied') {
+    throw new Error(`cross-origin admin POST was not rejected: ${crossOriginProfile.status} ${JSON.stringify(crossOriginJson)}`);
+  }
+
+  for (const [header, expected] of [
+    ['cache-control', 'no-store'],
+    ['referrer-policy', 'no-referrer'],
+    ['x-content-type-options', 'nosniff'],
+    ['x-frame-options', 'DENY'],
+    ['permissions-policy', 'camera=(), microphone=(), geolocation=()']
+  ]) {
+    if (profileBefore.headers.get(header) !== expected) {
+      throw new Error(`missing or wrong ${header} header: ${profileBefore.headers.get(header)}`);
+    }
+  }
+  if (profileBefore.headers.get('access-control-allow-origin')) {
+    throw new Error('permissive CORS is still enabled on admin responses');
   }
 
   const invalidProfile = await fetch(`${baseUrl}/admin/profile?codexpro_token=${encodeURIComponent(token)}`, {
@@ -684,6 +719,20 @@ try {
         || secondList.structuredContent.workspaces.some((workspace) => workspace.root === alternateRoot)
       ) {
         throw new Error(`HTTP workspace selection leaked between MCP sessions: ${JSON.stringify(secondList.structuredContent)}`);
+      }
+
+      const secondRead = await callTool(secondClient, 'read', {
+        workspace_id: alternate.structuredContent.workspace_id,
+        path: 'selected.txt'
+      });
+      const secondText = secondRead.content?.find?.((part) => part.type === 'text')?.text ?? '';
+      if (!secondText.includes('http alternate workspace')) {
+        throw new Error(`second HTTP session could not resolve the first session workspace id: ${secondText}`);
+      }
+
+      const secondListAfterExplicitAccess = await callTool(secondClient, 'list_workspaces');
+      if (secondListAfterExplicitAccess.structuredContent.selected_workspace_id === alternate.structuredContent.workspace_id) {
+        throw new Error(`explicit cross-session workspace id changed the second session selection: ${JSON.stringify(secondListAfterExplicitAccess.structuredContent)}`);
       }
     });
 

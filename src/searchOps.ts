@@ -28,6 +28,14 @@ export interface SearchResult {
   analysis?: StructuredSearchResult;
 }
 
+export interface SearchBackendStatus {
+  backend: "ripgrep" | "node";
+  ripgrep_available: boolean;
+  ripgrep_path?: string;
+  ripgrep_version?: string;
+  reason?: string;
+}
+
 function commandExists(command: string): Promise<boolean> {
   return new Promise((resolve) => {
     const child = process.platform === "win32"
@@ -38,6 +46,47 @@ function commandExists(command: string): Promise<boolean> {
   });
 }
 
+function commandPath(command: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const child = process.platform === "win32"
+      ? spawn("where", [command], { stdio: ["ignore", "pipe", "ignore"], shell: false })
+      : spawn("/bin/sh", ["-lc", `command -v ${command}`], { stdio: ["ignore", "pipe", "ignore"] });
+    let output = "";
+    child.stdout?.on("data", (chunk) => { output += String(chunk); });
+    child.on("close", (code) => resolve(code === 0 ? output.split(/\r?\n/).find(Boolean)?.trim() : undefined));
+    child.on("error", () => resolve(undefined));
+  });
+}
+
+function commandVersion(command: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    const child = spawn(command, ["--version"], { stdio: ["ignore", "pipe", "ignore"], shell: false });
+    let output = "";
+    child.stdout?.on("data", (chunk) => { output += String(chunk); });
+    child.on("close", (code) => resolve(code === 0 ? output.split(/\r?\n/).find(Boolean)?.trim() : undefined));
+    child.on("error", () => resolve(undefined));
+  });
+}
+
+export async function searchBackendStatus(): Promise<SearchBackendStatus> {
+  const available = await commandExists("rg");
+  if (!available) {
+    return {
+      backend: "node",
+      ripgrep_available: false,
+      reason: "ripgrep is unavailable; using the bounded Node fallback."
+    };
+  }
+  const ripgrepPath = await commandPath("rg");
+  const ripgrepVersion = await commandVersion(ripgrepPath ?? "rg");
+  return {
+    backend: "ripgrep",
+    ripgrep_available: true,
+    ...(ripgrepPath ? { ripgrep_path: ripgrepPath } : {}),
+    ...(ripgrepVersion ? { ripgrep_version: ripgrepVersion } : {})
+  };
+}
+
 function truncateLine(line: string, max = 400): string {
   if (line.length <= max) return line;
   return `${line.slice(0, max)}…`;
@@ -45,7 +94,20 @@ function truncateLine(line: string, max = 400): string {
 
 async function runRipgrep(config: CodexProConfig, guard: PathGuard, workspace: Workspace, options: SearchOptions): Promise<SearchResult> {
   const target = guard.resolve(workspace, options.root ?? ".");
-  const args = ["--json", "--line-number", "--with-filename", "--no-heading", "--color=never", "--max-columns", "500", "--max-count", "50", "--max-filesize", String(textScanByteLimit(config))];
+  const args = [
+    "--json",
+    "--line-number",
+    "--with-filename",
+    "--no-heading",
+    "--color=never",
+    "--max-columns",
+    "500",
+    // Keep one extra match so the caller can detect truncation at its requested limit.
+    "--max-count",
+    String(options.maxResults + 1),
+    "--max-filesize",
+    String(textScanByteLimit(config))
+  ];
   if (!options.regex) args.push("--fixed-strings");
   if (options.includeHidden) args.push("--hidden");
   for (const glob of config.blockedGlobs) args.push("-g", `!${glob}`);
@@ -161,7 +223,8 @@ export async function searchWorkspace(config: CodexProConfig, guard: PathGuard, 
     includeTests: rawOptions.includeTests
   };
   let lexical: SearchResult;
-  if (await commandExists("rg")) {
+  const backend = await searchBackendStatus();
+  if (backend.ripgrep_available) {
     lexical = await runRipgrep(config, guard, workspace, options);
   } else if (options.regex) {
     throw new CodexProError("regex search requires ripgrep. Install rg or retry with regex=false.");

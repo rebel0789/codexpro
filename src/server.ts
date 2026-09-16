@@ -4,21 +4,22 @@ import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { CodexProConfig } from "./config.js";
-import { WorkspaceManager, PathGuard, CodexProError, type Workspace } from "./guard.js";
-import { repoTree, readTextFile, writeTextFile, editTextFile, ensureAiBridge, withFileWriteLocks } from "./fsOps.js";
+import { MAX_BASH_TIMEOUT_MS, type CodexProConfig } from "./config.js";
+import { WorkspaceManager, PathGuard, CodexProError, type Workspace, type WorkspaceRegistry } from "./guard.js";
+import { repoTree, listFiles, readTextFile, writeTextFile, editTextFile, ensureAiBridge, withFileWriteLocks } from "./fsOps.js";
 import { viewWorkspaceImage } from "./imageOps.js";
 import { importAttachmentFile } from "./importOps.js";
-import { searchWorkspace } from "./searchOps.js";
-import { runBash } from "./bashOps.js";
-import { gitDiff, gitDiffStatus, gitLog, gitStatus } from "./gitOps.js";
+import { searchBackendStatus, searchWorkspace } from "./searchOps.js";
+import { bashRuntimeStatus, runBash } from "./bashOps.js";
+import { gitDiff, gitDiffStats as readGitDiffStats, gitDiffStatus, gitLog, gitRuntimeStatus, gitStatus } from "./gitOps.js";
 import { readAiBridgeContext, readCodexContext, workspaceSummary } from "./workspaceOps.js";
 import { buildProContext, exportProContext } from "./proContext.js";
 import { codexproInventory, loadSkill } from "./capabilitiesOps.js";
-import { listCodexSessions, readCodexSession } from "./codexSessions.js";
+import { listCodexSessions, readCodexSession, readCodexSessionAround, searchCodexSession } from "./codexSessions.js";
 import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidgetHtml } from "./toolCardWidget.js";
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
+import { pathRedactions, redactPathsDeep, redactPathsInText } from "./pathLabels.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -103,7 +104,21 @@ function validateToolArgs(name: string, options: Record<string, unknown>, args: 
   throw new CodexProError(`Invalid arguments for ${name}: ${details}`);
 }
 
-function tagToolResult(result: any, name: string, options: Record<string, unknown>): any {
+function redactAbsolutePaths(result: any, config: CodexProConfig): void {
+  const structured = result.structuredContent;
+  const ordered = pathRedactions(config, structured && typeof structured === "object" ? structured : {});
+  if (!ordered.length) return;
+  if (structured && typeof structured === "object") result.structuredContent = redactPathsDeep(structured, ordered);
+  if (Array.isArray(result.content)) {
+    result.content = result.content.map((item: any) =>
+      item?.type === "text" && typeof item.text === "string"
+        ? { ...item, text: redactPathsInText(item.text, ordered) }
+        : item
+    );
+  }
+}
+
+function tagToolResult(result: any, name: string, options: Record<string, unknown>, config: CodexProConfig): any {
   if (!result || typeof result !== "object") return result;
   const structured = result.structuredContent;
   const base =
@@ -117,6 +132,7 @@ function tagToolResult(result: any, name: string, options: Record<string, unknow
   };
   const meta = (options._meta as Record<string, unknown> | undefined) ?? {};
   result.structuredContent = meta.ui || meta["openai/outputTemplate"] ? compactStructuredContent(tagged) : tagged;
+  if (!config.exposeAbsolutePaths) redactAbsolutePaths(result, config);
   return result;
 }
 
@@ -273,6 +289,7 @@ function assertWriteToolAllowed(config: CodexProConfig, relPath: string): void {
 }
 
 function registerToolCompat(
+  config: CodexProConfig,
   server: McpServer,
   name: string,
   options: Record<string, unknown>,
@@ -281,11 +298,11 @@ function registerToolCompat(
   const wrapped = async (args: any) => {
     const started = Date.now();
     try {
-      const result = tagToolResult(await handler(args ?? {}), name, options);
+      const result = tagToolResult(await handler(args ?? {}), name, options, config);
       logToolCall(name, result?.isError ? "error" : "ok", started);
       return result;
     } catch (error) {
-      const result = tagToolResult(errorResult(error), name, options);
+      const result = tagToolResult(errorResult(error), name, options, config);
       logToolCall(name, "error", started);
       return result;
     }
@@ -390,7 +407,7 @@ const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
 function codexSessionToolNames(config: CodexProConfig): string[] {
   if (config.codexSessions === "off") return [];
   return config.codexSessions === "read"
-    ? ["codex_sessions", "read_codex_session"]
+    ? ["codex_sessions", "read_codex_session", "search_codex_session", "read_codex_session_around"]
     : ["codex_sessions"];
 }
 
@@ -465,7 +482,7 @@ function registerCodexTool(
 ): void {
   if (!shouldRegisterTool(config, name)) return;
   const validatedHandler: CodexToolHandler = (args) => handler(validateToolArgs(name, options, args));
-  registerToolCompat(server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
+  registerToolCompat(config, server, name, descriptorOptionsForConfig(config, name, options), validatedHandler);
   rememberRegisteredTool(server, name);
   rememberRegisteredToolHandler(server, name, validatedHandler);
 }
@@ -669,26 +686,28 @@ async function applyWorkspacePatch(
       assertWriteToolAllowed(config, touchedPath);
     }
 
-    const check = spawnSync("git", ["apply", "--check", "--whitespace=nowarn"], {
+    const check = spawnSync("git", ["apply", "--check", "--verbose", "--whitespace=nowarn"], {
       cwd: workspace.root,
       input: patch,
       encoding: "utf8",
       maxBuffer: config.maxOutputBytes,
       env: { ...process.env, NO_COLOR: "1" }
     });
-    if (check.error || check.status !== 0) {
-      throw new CodexProError(redactSensitiveText(check.stderr?.trim() || check.stdout?.trim() || check.error?.message || "git apply --check failed"));
+    const checkOutput = [check.stdout?.trim(), check.stderr?.trim()].filter(Boolean).join("\n");
+    if (check.error || check.status !== 0 || /(?:^|\n)Skipped patch\b/i.test(checkOutput)) {
+      throw new CodexProError(redactSensitiveText(checkOutput || check.error?.message || "git apply --check failed"));
     }
 
-    const applied = spawnSync("git", ["apply", "--whitespace=nowarn"], {
+    const applied = spawnSync("git", ["apply", "--verbose", "--whitespace=nowarn"], {
       cwd: workspace.root,
       input: patch,
       encoding: "utf8",
       maxBuffer: config.maxOutputBytes,
       env: { ...process.env, NO_COLOR: "1" }
     });
-    if (applied.error || applied.status !== 0) {
-      throw new CodexProError(redactSensitiveText(applied.stderr?.trim() || applied.stdout?.trim() || applied.error?.message || "git apply failed"));
+    const appliedOutput = [applied.stdout?.trim(), applied.stderr?.trim()].filter(Boolean).join("\n");
+    if (applied.error || applied.status !== 0 || /(?:^|\n)Skipped patch\b/i.test(appliedOutput)) {
+      throw new CodexProError(redactSensitiveText(appliedOutput || applied.error?.message || "git apply failed"));
     }
 
     const diff = redactSensitiveText(patch.trimEnd());
@@ -926,8 +945,11 @@ const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, des
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
 const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 
-export function createCodexProServer(config: CodexProConfig): McpServer {
-  const workspaces = new WorkspaceManager(config);
+export function createCodexProServer(
+  config: CodexProConfig,
+  options: { workspaceRegistry?: WorkspaceRegistry } = {}
+): McpServer {
+  const workspaces = new WorkspaceManager(config, options.workspaceRegistry);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
   const server = new McpServer({ name: "CodexPro", version: "0.30.0" }, { instructions: serverInstructions(config) });
@@ -1034,6 +1056,12 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
     },
     async () => {
+      const searchBackend = await searchBackendStatus();
+      const bashRuntime = bashRuntimeStatus(config);
+      const gitRuntime = { ...gitRuntimeStatus(config), bash_runtime: bashRuntime.selected_runtime ?? config.bashRuntime };
+      const safeSearchBackend = config.exposeAbsolutePaths || !searchBackend.ripgrep_path
+        ? searchBackend
+        : { ...searchBackend, ripgrep_path: "[redacted]" };
       const safeConfig = {
         defaultRoot: config.defaultRoot,
         allowedRoots: config.allowedRoots,
@@ -1043,12 +1071,16 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         authEnabled: Boolean(config.authToken),
         bashMode: config.bashMode,
         bashTranscript: config.bashTranscript,
+        bashRuntime: config.bashRuntime,
+        bashExecutable: config.bashExecutable ?? null,
+        gitExecutable: config.gitExecutable ?? null,
         bashSessionId: config.bashSessionId ?? null,
         requireBashSession: config.requireBashSession,
         codexSessions: config.codexSessions,
         codexDir: config.codexDir,
         writeMode: config.writeMode,
         toolMode: config.toolMode,
+        exposeAbsolutePaths: config.exposeAbsolutePaths,
         toolCards: config.toolCards,
         connectionTest: config.connectionTest,
         analysisEnabled: config.analysisEnabled,
@@ -1060,6 +1092,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         maxImportBytes: config.maxImportBytes,
         maxOutputBytes: config.maxOutputBytes,
         maxSearchResults: config.maxSearchResults,
+        schema_timeout_max_ms: MAX_BASH_TIMEOUT_MS,
+        configured_timeout_max_ms: config.maxBashTimeoutMs,
+        bash_runtime: bashRuntime,
+        git_runtime: gitRuntime,
+        search_backend: safeSearchBackend,
         blockedGlobs: config.blockedGlobs,
         registeredTools: registeredToolNames(server),
         registeredToolCount: registeredToolNames(server).length
@@ -1097,6 +1134,8 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const checks: Array<{ name: string; status: "pass" | "warn" | "fail"; detail: string }> = [];
       const filesTouched: string[] = [];
       const probePath = `${config.contextDir}/codexpro-self-test.md`;
+      const contextProbeCandidates = ["AGENTS.md", "agents.md", "README.md", "README.MD", "CONTRIBUTING.md", "package.json"];
+      let contextProbePath: string | undefined;
 
       const check = (name: string, status: "pass" | "warn" | "fail", detail: string) => {
         checks.push({ name, status, detail: cleanOneLine(detail, detail, 260) });
@@ -1106,6 +1145,24 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       check("tool mode", config.toolMode === "full" ? "pass" : "warn", `${config.toolMode}; expected tools: ${toolNamesForMode(config).length}`);
       check("write mode", config.writeMode === "off" ? "warn" : "pass", config.writeMode);
       check("bash mode", config.bashMode === "full" ? "warn" : "pass", config.bashMode);
+      const bashRuntime = bashRuntimeStatus(config);
+      const gitRuntime = gitRuntimeStatus(config);
+      check("bash runtime", config.bashMode === "off" ? "warn" : bashRuntime.available ? "pass" : "fail", JSON.stringify(bashRuntime));
+      check("git runtime", gitRuntime.available ? "pass" : "fail", JSON.stringify(gitRuntime));
+      const mixedWindowsToolchain = process.platform === "win32" && bashRuntime.selected_runtime === "wsl";
+      const alignedWindowsToolchain = !mixedWindowsToolchain && (
+        process.platform !== "win32" ||
+        (bashRuntime.source === "git-for-windows" && gitRuntime.source === "git-for-windows")
+      );
+      check(
+        "bash/git toolchain",
+        config.bashMode === "off" ? "warn" : mixedWindowsToolchain ? "warn" : alignedWindowsToolchain ? "pass" : "warn",
+        mixedWindowsToolchain
+          ? "Bash is running through explicit WSL while Git tools use the Windows process; set a matching Git executable or use native-bash."
+          : alignedWindowsToolchain
+            ? "Bash and Git use the same native toolchain."
+            : "Bash and Git executables could not be proven to share a toolchain; inspect server_config and set CODEXPRO_GIT_EXECUTABLE if needed."
+      );
       check(
         "http auth",
         "pass",
@@ -1147,12 +1204,78 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         check("git status", "fail", errorText(error));
       }
 
+      try {
+        const searchBackend = await searchBackendStatus();
+        if (searchBackend.ripgrep_available) {
+          const version = searchBackend.ripgrep_version ? ` (${searchBackend.ripgrep_version})` : "";
+          const location = config.exposeAbsolutePaths && searchBackend.ripgrep_path ? ` at ${searchBackend.ripgrep_path}` : "";
+          check("search backend", "pass", `ripgrep${version}${location}`);
+        } else {
+          check("search backend", "warn", searchBackend.reason ?? "ripgrep unavailable; Node fallback active");
+        }
+      } catch (error) {
+        check("search backend", "warn", `search backend detection unavailable: ${errorText(error)}`);
+      }
+
+      for (const candidate of contextProbeCandidates) {
+        try {
+          const resolved = guard.resolve(workspace, candidate);
+          const stat = await fsp.stat(resolved.absPath);
+          if (!stat.isFile()) continue;
+          await guard.assertTextFile(resolved.absPath, config.maxReadBytes);
+          contextProbePath = resolved.relPath;
+          break;
+        } catch {
+          // Keep looking for a small existing safe text file.
+        }
+      }
+      if (!contextProbePath) {
+        try {
+          const candidates = await listFiles(guard, workspace, { maxFiles: 200 });
+          for (const candidate of candidates) {
+            const resolved = guard.resolve(workspace, candidate);
+            const stat = await fsp.stat(resolved.absPath);
+            if (!stat.isFile() || stat.size > config.maxReadBytes) continue;
+            await guard.assertTextFile(resolved.absPath, config.maxReadBytes);
+            contextProbePath = resolved.relPath;
+            break;
+          }
+        } catch {
+          // Report no usable candidate below.
+        }
+      }
+
       if (parseBool(args.write_probe, true)) {
         if (config.writeMode === "off") {
           check("write/edit probe", "warn", "skipped because CODEXPRO_WRITE_MODE=off");
         } else {
+          const probeResolved = guard.resolve(workspace, probePath, { forWrite: true });
+          const probeParent = path.dirname(probeResolved.absPath);
+          const probeParentExisted = await fsp.stat(probeParent).then((stat) => stat.isDirectory()).catch(() => false);
+          let originalProbe:
+            | { bytes: Buffer; mode: number; atimeMs: number; mtimeMs: number }
+            | { nonFile: true }
+            | undefined;
+          try {
+            const stat = await fsp.lstat(probeResolved.absPath);
+            if (stat.isFile()) {
+              originalProbe = {
+                bytes: await fsp.readFile(probeResolved.absPath),
+                mode: stat.mode & 0o7777,
+                atimeMs: stat.atimeMs,
+                mtimeMs: stat.mtimeMs
+              };
+            } else {
+              originalProbe = { nonFile: true };
+            }
+          } catch (error) {
+            const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+            if (code !== "ENOENT") throw error;
+          }
+          let probeAttempted = false;
           try {
             assertWriteToolAllowed(config, probePath);
+            probeAttempted = true;
             const content = [
               "# CodexPro Self Test",
               "",
@@ -1175,6 +1298,24 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
             );
           } catch (error) {
             check("write/edit probe", "fail", errorText(error));
+          } finally {
+            if (probeAttempted) {
+              try {
+                if (originalProbe && "nonFile" in originalProbe) {
+                  // The probe must never replace a pre-existing non-file path.
+                } else if (originalProbe) {
+                  await fsp.writeFile(probeResolved.absPath, originalProbe.bytes);
+                  await fsp.chmod(probeResolved.absPath, originalProbe.mode);
+                  await fsp.utimes(probeResolved.absPath, originalProbe.atimeMs / 1000, originalProbe.mtimeMs / 1000);
+                } else {
+                  await fsp.rm(probeResolved.absPath, { force: true });
+                  if (!probeParentExisted) await fsp.rmdir(probeParent).catch(() => {});
+                }
+                check("write probe cleanup", "pass", `restored ${probePath}`);
+              } catch (error) {
+                check("write probe cleanup", "fail", errorText(error));
+              }
+            }
           }
         }
       } else {
@@ -1183,12 +1324,12 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
 
       if (parseBool(args.pro_context_probe, true)) {
         try {
-          if (!filesTouched.includes(probePath)) {
-            check("selected-only pro context", "warn", "skipped because write probe did not create the selected file");
+          if (!contextProbePath) {
+            check("selected-only pro context", "warn", "no existing safe text file was available for the in-memory probe");
           } else {
             const context = await buildProContext(config, guard, workspace, {
               title: "CodexPro Self Test Context",
-              selectedPaths: [probePath],
+              selectedPaths: [contextProbePath],
               includeImportantFiles: false,
               includeChangedFiles: false,
               includeDiff: false,
@@ -1196,11 +1337,11 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
               maxFiles: 4,
               maxTotalBytes: 80_000
             });
-            const exactOnly = context.filesIncluded.length === 1 && context.filesIncluded[0] === probePath;
+            const exactOnly = context.filesIncluded.length === 1 && context.filesIncluded[0] === contextProbePath;
             check(
               "selected-only pro context",
               exactOnly ? "pass" : "fail",
-              exactOnly ? `included only ${probePath}` : `included ${context.filesIncluded.join(", ") || "no files"}`
+              exactOnly ? `included only ${contextProbePath}` : `included ${context.filesIncluded.join(", ") || "no files"}`
             );
           }
         } catch (error) {
@@ -1217,15 +1358,41 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           } else {
             const bashProbeOptions = { timeoutMs: 10_000, sessionId: config.bashSessionId };
             const pwd = await runBash(config, guard, workspace, "pwd", bashProbeOptions);
+            const shellTools = ["node", "npm", "npx", "git", "rg"];
+            const shellToolDetails: string[] = [];
+            const shellToolVersions = new Map<string, string>();
+            const missingShellTools: string[] = [];
+            for (const tool of shellTools) {
+              const location = await runBash(config, guard, workspace, `command -v ${tool}`, bashProbeOptions);
+              const version = await runBash(config, guard, workspace, `${tool} --version`, bashProbeOptions);
+              const locationText = location.exitCode === 0 ? location.stdout.trim().split(/\r?\n/)[0] : "unavailable";
+              const versionText = version.exitCode === 0 ? version.stdout.trim().split(/\r?\n/)[0] : "unavailable";
+              if (version.exitCode === 0) shellToolVersions.set(tool, versionText);
+              if (location.exitCode !== 0 || version.exitCode !== 0) missingShellTools.push(tool);
+              shellToolDetails.push(`${tool}: ${locationText} ${versionText}`);
+            }
+            check("bash cwd", pwd.exitCode === 0 ? "pass" : "warn", pwd.stdout.trim() || "unavailable");
+            check(
+              "bash toolchain",
+              missingShellTools.length ? "warn" : "pass",
+              `${shellToolDetails.join("; ")}${missingShellTools.length ? `; missing: ${missingShellTools.join(", ")}` : ""}`
+            );
+            const shellGit = shellToolVersions.get("git");
+            const dedicatedGit = gitRuntime.version;
+            if (shellGit && dedicatedGit && shellGit !== dedicatedGit) {
+              check("git version alignment", "warn", `bash=${shellGit}; dedicated=${dedicatedGit}`);
+            } else {
+              check("git version alignment", "pass", shellGit && dedicatedGit ? `both report ${dedicatedGit}` : "version comparison unavailable");
+            }
             if (config.bashMode === "safe") {
               try {
                 await runBash(config, guard, workspace, "ls $HOME", bashProbeOptions);
                 check("bash policy", "fail", "safe bash allowed environment expansion unexpectedly");
               } catch {
-                check("bash policy", pwd.exitCode === 0 ? "pass" : "warn", "safe bash allowed pwd and blocked environment expansion");
+              check("bash policy", pwd.exitCode === 0 ? "pass" : "warn", `safe bash allowed pwd and blocked environment expansion (${pwd.bashRuntime})`);
               }
             } else {
-              check("bash policy", pwd.exitCode === 0 ? "warn" : "fail", "full bash is enabled; use only for trusted local repos");
+              check("bash policy", pwd.exitCode === 0 ? "warn" : "fail", `full bash is enabled; use only for trusted local repos (${pwd.bashRuntime})`);
             }
           }
         } catch (error) {
@@ -2043,7 +2210,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
           .number()
           .int()
           .min(1000)
-          .max(config.maxBashTimeoutMs)
+          .max(MAX_BASH_TIMEOUT_MS)
           .optional()
           .describe(`Timeout in milliseconds. Default: 30000. Max: ${config.maxBashTimeoutMs}.`)
       },
@@ -2124,10 +2291,20 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     },
     async (args) => {
       const workspace = workspaces.getWorkspace(args.workspace_id);
-      const rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, args.path, parseBool(args.staged, false)));
-      const diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
-      const stats = diffError ? { additions: 0, deletions: 0, changed: false } : diffStats(rawDiff);
+      const staged = parseBool(args.staged, false);
       const includeDiff = parseBool(args.include_diff, true);
+      let rawDiff = "";
+      let diffError = "";
+      let stats: { additions: number; deletions: number; changed: boolean };
+      if (includeDiff) {
+        rawDiff = normalizeGitOutput(gitDiff(config, guard, workspace, args.path, staged));
+        diffError = rawDiff && looksLikeGitError(rawDiff) ? rawDiff : "";
+        stats = diffError ? { additions: 0, deletions: 0, changed: false } : diffStats(rawDiff);
+      } else {
+        const statsOnly = readGitDiffStats(config, guard, workspace, args.path, staged);
+        diffError = statsOnly.error ?? "";
+        stats = { additions: statsOnly.additions, deletions: statsOnly.deletions, changed: statsOnly.changed };
+      }
       const text = diffError
         ? diffError
         : includeDiff
@@ -2137,7 +2314,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
             "",
             `Workspace: ${workspace.root}`,
             `Path: ${args.path ?? "workspace diff"}`,
-            `Staged: ${parseBool(args.staged, false)}`,
+            `Staged: ${staged}`,
             `Diff stats: +${stats.additions} -${stats.deletions}`,
             "",
             "Raw diff omitted by include_diff=false."
@@ -2146,13 +2323,13 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         workspace_id: workspace.id,
         root: workspace.root,
         path: args.path ?? "workspace diff",
-        staged: parseBool(args.staged, false),
+        staged,
         include_diff: includeDiff,
         diff_error: diffError || undefined,
         additions: stats.additions,
         deletions: stats.deletions,
         changed: !diffError && stats.changed,
-        diff: diffError || includeDiff ? rawDiff : ""
+        diff: diffError || (includeDiff ? rawDiff : "")
       });
     }
   );
@@ -2345,7 +2522,25 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
 
       const stateRel = `${config.contextDir}/handoff-run-state.json`;
       const contextPrefix = `${config.contextDir.replace(/\/+$/, "")}/`;
-      const terminalStates = new Set(["completed", "failed", "timed_out"]);
+      const terminalStates = new Set(["completed", "failed", "timed_out", "interrupted", "orphaned"]);
+      const processAlive = (pid: unknown): boolean | undefined => {
+        if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return undefined;
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (error: any) {
+          return error?.code === "ESRCH" ? false : true;
+        }
+      };
+      const effectiveState = (state: Record<string, any> | undefined): string | undefined => {
+        if (!state) return undefined;
+        if (state.state === "running" || state.state === "interrupting") {
+          const parentAlive = processAlive(state.pid);
+          const childAlive = processAlive(state.child_pid);
+          if (parentAlive === false && childAlive !== true) return "orphaned";
+        }
+        return typeof state.state === "string" ? state.state : undefined;
+      };
 
       const readState = async (): Promise<Record<string, any> | undefined> => {
         try {
@@ -2360,7 +2555,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       const isAwaited = (state: Record<string, any> | undefined): boolean =>
         Boolean(
           state &&
-            terminalStates.has(state.state) &&
+            terminalStates.has(effectiveState(state) ?? "") &&
             (!expectedPlanHash || state.plan_hash === expectedPlanHash) &&
             (sinceIteration === undefined || (typeof state.iteration === "number" && state.iteration > sinceIteration))
         );
@@ -2373,10 +2568,14 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       }
 
       const awaitedTerminal = isAwaited(state);
-      const awaitedCompleted = awaitedTerminal && state?.state === "completed";
+      const resolvedState = effectiveState(state);
+      const inFlightState = state?.state === "running" || state?.state === "interrupting";
+      const recordedPidAlive = inFlightState ? processAlive(state?.pid) : undefined;
+      const recordedChildPidAlive = inFlightState ? processAlive(state?.child_pid) : undefined;
+      const awaitedCompleted = awaitedTerminal && resolvedState === "completed";
       const planHashMismatch = Boolean(expectedPlanHash && state && state.plan_hash !== expectedPlanHash);
       const reportedState = awaitedTerminal
-        ? String(state?.state)
+        ? String(resolvedState)
         : state
           ? state.state === "running" || planHashMismatch || sinceIteration !== undefined
             ? "running"
@@ -2408,13 +2607,23 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
         awaited_completed: awaitedCompleted,
         awaited_terminal: awaitedTerminal,
         succeeded: awaitedCompleted,
+        reconcile_required: resolvedState === "orphaned" || Boolean(state?.reconcile_required),
         state_file: stateRel,
         ...(state ? { run_state: state.state } : {}),
+        ...(resolvedState && resolvedState !== state?.state ? { effective_run_state: resolvedState } : {}),
         ...(typeof state?.iteration === "number" ? { iteration: state.iteration } : {}),
         ...(state?.plan_hash ? { plan_hash: state.plan_hash } : {}),
         ...(expectedPlanHash ? { expected_plan_hash: expectedPlanHash, plan_hash_mismatch: planHashMismatch } : {}),
         ...(state && "exit_code" in state ? { exit_code: state.exit_code } : {}),
         ...(state && "timed_out" in state ? { timed_out: state.timed_out } : {}),
+        ...(typeof state?.pid === "number" ? { pid: state.pid } : {}),
+        ...(typeof state?.child_pid === "number" ? { child_pid: state.child_pid } : {}),
+        ...(recordedPidAlive !== undefined ? { recorded_pid_alive: recordedPidAlive } : {}),
+        ...(recordedChildPidAlive !== undefined ? { recorded_child_pid_alive: recordedChildPidAlive } : {}),
+        ...(state?.interrupted_signal ? { interrupted_signal: state.interrupted_signal } : {}),
+        ...(state?.interrupted_at ? { interrupted_at: state.interrupted_at } : {}),
+        ...(state?.execution_outcome ? { execution_outcome: state.execution_outcome } : {}),
+        ...(state?.remote_mutations ? { remote_mutations: state.remote_mutations } : {}),
         ...(state?.started_at ? { started_at: state.started_at } : {}),
         ...(state?.finished_at ? { finished_at: state.finished_at } : {}),
         ...(state?.executor ? { executor: state.executor } : {}),
@@ -2423,39 +2632,51 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       };
 
       if (awaitedTerminal) {
-        const statusFile = bridgeArtifact(state?.status_file, `${config.contextDir}/agent-status.md`);
-        const diffFile = bridgeArtifact(state?.diff_file, `${config.contextDir}/implementation-diff.patch`);
-        const logFile = bridgeArtifact(state?.log_file, `${config.contextDir}/execution-log.jsonl`);
-        const testsFile = bridgeArtifact(state?.tests_file, `${config.contextDir}/loop-tests.txt`);
-        structured.status_file = statusFile;
-        structured.diff_file = diffFile;
-        structured.log_file = logFile;
-        const status = await excerpt(statusFile, 6_000);
-        if (status) structured.status_excerpt = status;
+        if (typeof state?.status_file === "string") {
+          const statusFile = bridgeArtifact(state.status_file, `${config.contextDir}/agent-status.md`);
+          structured.status_file = statusFile;
+          const status = await excerpt(statusFile, 6_000);
+          if (status) structured.status_excerpt = status;
+        }
         if (includeDiff) {
-          const diff = await excerpt(diffFile, 12_000);
-          if (diff) structured.diff_excerpt = diff;
+          if (typeof state?.diff_file === "string") {
+            const diffFile = bridgeArtifact(state.diff_file, `${config.contextDir}/implementation-diff.patch`);
+            structured.diff_file = diffFile;
+            const diff = await excerpt(diffFile, 12_000);
+            if (diff) structured.diff_excerpt = diff;
+          }
         }
         if (includeLog) {
-          const log = await excerpt(logFile, 6_000, 20);
-          if (log) structured.log_excerpt = log;
+          if (typeof state?.log_file === "string") {
+            const logFile = bridgeArtifact(state.log_file, `${config.contextDir}/execution-log.jsonl`);
+            structured.log_file = logFile;
+            const log = await excerpt(logFile, 6_000, 20);
+            if (log) structured.log_excerpt = log;
+          }
         }
         if (includeTests) {
-          const tests = await excerpt(testsFile, 4_000);
-          if (tests) {
-            structured.tests_file = testsFile;
-            structured.tests_excerpt = tests;
+          if (typeof state?.tests_file === "string") {
+            const testsFile = bridgeArtifact(state.tests_file, `${config.contextDir}/loop-tests.txt`);
+            const tests = await excerpt(testsFile, 4_000);
+            if (tests) {
+              structured.tests_file = testsFile;
+              structured.tests_excerpt = tests;
+            }
           }
         }
       }
 
       const summary = !state
         ? `No handoff run state found at ${stateRel}. Start a run with handoff_to_agent + local execute-handoff/watch-handoff, then call wait_for_handoff again.`
-        : awaitedTerminal
-          ? `Handoff run ${state.state} (iteration ${state.iteration ?? 1}, exit ${state.exit_code ?? "null"}).`
-          : planHashMismatch
-            ? `Executor has not completed the expected plan yet (last known run plan_hash=${state.plan_hash ?? "unknown"}). Still waiting.`
-            : `Handoff run is ${state.state}. Re-poll after ~${Math.max(1, Math.ceil(pollMs / 1000))}s.`;
+        : awaitedTerminal && resolvedState === "orphaned"
+          ? `Handoff run state is stale: recorded executor PID ${state.pid ?? "unknown"} no longer exists. The execution outcome may be ambiguous; reconcile Git and target state before retry.`
+          : awaitedTerminal && resolvedState === "interrupted"
+            ? `Handoff run was interrupted by ${state.interrupted_signal ?? "a parent signal"}. Reconcile Git and target state before retrying any material side effect.`
+            : awaitedTerminal
+              ? `Handoff run ${resolvedState} (iteration ${state.iteration ?? 1}, exit ${state.exit_code ?? "null"}).`
+              : planHashMismatch
+                ? `Executor has not completed the expected plan yet (last known run plan_hash=${state.plan_hash ?? "unknown"}). Still waiting.`
+                : `Handoff run is ${state.state}. Re-poll after ~${Math.max(1, Math.ceil(pollMs / 1000))}s.`;
 
       const lines = [
         "# Wait For Handoff",
@@ -2661,6 +2882,111 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
             resume_cursor: result.resume_cursor,
             next_cursor: result.next_cursor ?? null,
             has_more: result.has_more,
+            source_size_bytes: result.source_size_bytes,
+            codex_sessions_mode: config.codexSessions
+          });
+        }
+      );
+
+      registerCodexTool(
+        config,
+        server,
+        "search_codex_session",
+        {
+          title: "Search Codex Session",
+          description:
+            "Opt-in, read-only bounded search over parsed Codex session messages. Returns byte offsets that can be passed to read_codex_session_around without loading the whole transcript into memory.",
+          inputSchema: {
+            session_id: z.string().optional().describe("Codex session id from codex_sessions."),
+            source_path: z.string().optional().describe("Source path from codex_sessions. Must be inside the configured Codex session roots."),
+            query: z.string().min(1).describe("Case-insensitive text to find in message content, tool calls, or tool output."),
+            roles: z.array(z.string().min(1)).max(12).optional().describe("Optional roles to include, such as user, assistant, or tool."),
+            tool_names: z.array(z.string().min(1)).max(40).optional().describe("Optional exact tool names for function_call messages."),
+            time_from: z.union([z.string(), z.number()]).optional().describe("Optional inclusive ISO timestamp or Unix milliseconds lower bound."),
+            time_to: z.union([z.string(), z.number()]).optional().describe("Optional inclusive ISO timestamp or Unix milliseconds upper bound."),
+            max_results: z.number().int().min(1).max(100).optional().describe("Maximum matches to return. Default: 30."),
+            max_snippet_bytes: z.number().int().min(80).max(4000).optional().describe("Maximum UTF-8 bytes per match snippet. Default: 600.")
+          },
+          annotations: READ_ONLY_ANNOTATIONS,
+          _meta: {
+            ...toolCardMeta(),
+            "openai/toolInvocation/invoking": "Searching local Codex session...",
+            "openai/toolInvocation/invoked": "Codex session search ready"
+          }
+        },
+        async (args) => {
+          const result = await searchCodexSession(config, {
+            sessionId: args.session_id,
+            sourcePath: args.source_path,
+            query: String(args.query ?? ""),
+            roles: args.roles,
+            toolNames: args.tool_names,
+            timeFrom: args.time_from,
+            timeTo: args.time_to,
+            maxResults: args.max_results,
+            maxSnippetBytes: args.max_snippet_bytes
+          });
+          return textResult(result.text, {
+            session: result.session,
+            matches: result.matches,
+            match_count: result.matches.length,
+            truncated: result.truncated,
+            source_size_bytes: result.source_size_bytes,
+            codex_sessions_mode: config.codexSessions
+          });
+        }
+      );
+
+      registerCodexTool(
+        config,
+        server,
+        "read_codex_session_around",
+        {
+          title: "Read Around Codex Session",
+          description:
+            "Opt-in, read-only bounded contextual transcript reader. Use the message_id or byte_offset returned by search_codex_session, or locate the first message at a timestamp.",
+          inputSchema: {
+            session_id: z.string().optional().describe("Codex session id from codex_sessions."),
+            source_path: z.string().optional().describe("Source path from codex_sessions. Must be inside the configured Codex session roots."),
+            message_id: z.string().optional().describe("Byte-offset message_id returned by search_codex_session."),
+            byte_offset: z.number().int().min(0).optional().describe("Byte offset returned by search_codex_session."),
+            timestamp: z.union([z.string(), z.number()]).optional().describe("Locate the first parsed message at or after this ISO timestamp or Unix millisecond value."),
+            before: z.number().int().min(0).max(100).optional().describe("Messages before the target. Default: 10."),
+            after: z.number().int().min(0).max(100).optional().describe("Messages after the target. Default: 10."),
+            max_total_bytes: z.number().int().min(4000).max(400000).optional().describe("Maximum UTF-8 transcript content bytes. Default: 80000."),
+            exclude_tool_outputs: z.boolean().optional().describe("Exclude function_call_output messages. Default: false."),
+            max_tool_output_bytes: z.number().int().min(0).max(400000).optional().describe("Maximum bytes retained per tool output. Default: 20000.")
+          },
+          annotations: READ_ONLY_ANNOTATIONS,
+          _meta: {
+            ...toolCardMeta(),
+            "openai/toolInvocation/invoking": "Reading around Codex session...",
+            "openai/toolInvocation/invoked": "Codex session context ready"
+          }
+        },
+        async (args) => {
+          const result = await readCodexSessionAround(config, {
+            sessionId: args.session_id,
+            sourcePath: args.source_path,
+            messageId: args.message_id,
+            byteOffset: args.byte_offset,
+            timestamp: args.timestamp,
+            before: args.before,
+            after: args.after,
+            maxTotalBytes: args.max_total_bytes,
+            excludeToolOutputs: args.exclude_tool_outputs,
+            maxToolOutputBytes: args.max_tool_output_bytes
+          });
+          return textResult(result.text, {
+            session: result.session,
+            messages: result.messages,
+            message_count: result.messages.length,
+            target: result.target,
+            before: result.before,
+            after: result.after,
+            has_more_before: result.has_more_before,
+            has_more_after: result.has_more_after,
+            truncated: result.truncated,
             source_size_bytes: result.source_size_bytes,
             codex_sessions_mode: config.codexSessions
           });

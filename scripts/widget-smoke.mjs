@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { toolCardWidgetHtml } from "../dist/toolCardWidget.js";
 
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = "1";
+
 const scripts = [...toolCardWidgetHtml.matchAll(/<script>([\s\S]*?)<\/script>/g)];
 const widgetScript = scripts.at(-1)?.[1];
 if (!widgetScript) throw new Error("tool-card widget script missing");

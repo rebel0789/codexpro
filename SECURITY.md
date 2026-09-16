@@ -12,7 +12,7 @@ Feature-specific notes follow GitHub `main`; npm users should check the publishe
 
 Please report security issues privately before opening a public issue. If the repository has GitHub private vulnerability reporting enabled, use that. Otherwise contact the maintainer listed by the project owner.
 
-Do not include secrets, private repository contents, tunnel tokens, or `.env` values in reports.
+Maintainer security contact: [@rebel0789 on GitHub](https://github.com/rebel0789). You can also try the repository's [new security advisory form](https://github.com/rebel0789/codexpro/security/advisories/new) when GitHub makes it available for this repository. Do not include secrets, private repository contents, tunnel tokens, or `.env` values in reports.
 
 ## Terms Boundary
 

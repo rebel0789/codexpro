@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const cli = path.join(projectRoot, 'scripts', 'codexpro.mjs');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-analysis-cli-'));

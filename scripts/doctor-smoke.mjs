@@ -5,6 +5,8 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 async function getFreePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();

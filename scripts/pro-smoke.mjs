@@ -3,6 +3,8 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
+process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS = '1';
+
 function run(args, options = {}) {
   const result = spawnSync(process.execPath, args, {
     cwd: path.resolve('.'),

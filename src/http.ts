@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
-import cors from "cors";
 import { z } from "zod";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
@@ -20,6 +19,8 @@ import {
 } from "./profileStore.js";
 import { redactSensitiveText, redactStructured } from "./redact.js";
 import { createCodexProServer } from "./server.js";
+import { WorkspaceRegistry } from "./guard.js";
+import { redactConfigPaths } from "./pathLabels.js";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -382,7 +383,7 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
 function profileResponse(config: CodexProConfig): Record<string, unknown> {
   const profile = readWorkspaceProfile(config.defaultRoot);
   const runtime = readRuntimeConnection(config.defaultRoot);
-  return redactStructured({
+  return redactConfigPaths(config, redactStructured({
     ok: true,
     profile_path: profile.profilePath ?? profilePathForRoot(config.defaultRoot),
     exists: Boolean(profile.profilePath),
@@ -401,7 +402,7 @@ function profileResponse(config: CodexProConfig): Record<string, unknown> {
       widgetDomain: config.widgetDomain,
       authEnabled: Boolean(config.authToken)
     }
-  });
+  }), { labelUnknownPaths: true });
 }
 
 function jsonError(res: Response, status: number, code: string, message: string, issues?: unknown): void {
@@ -1323,6 +1324,7 @@ function onboardingPage(config: CodexProConfig): string {
       const cleanSearch = initialUrl.searchParams.toString();
       history.replaceState(null, "", initialUrl.pathname + (cleanSearch ? "?" + cleanSearch : "") + initialUrl.hash);
     }
+    const adminProfileUrl = "/admin/profile" + (connectorToken ? "?codexpro_token=" + encodeURIComponent(connectorToken) : "");
     document.querySelectorAll("[data-copy], [data-copy-kind]").forEach((button) => {
       button.addEventListener("click", async () => {
         let value = button.getAttribute("data-copy") || "";
@@ -1415,7 +1417,7 @@ function onboardingPage(config: CodexProConfig): string {
         };
         if (status) status.textContent = "Saving...";
         try {
-          const response = await fetch("/admin/profile" + window.location.search, {
+          const response = await fetch(adminProfileUrl, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify(payload)
@@ -1455,6 +1457,20 @@ async function main(): Promise<void> {
 
   const app = express();
   const logRequests = process.env.CODEXPRO_LOG_REQUESTS === "1";
+  const connectionDiagnostics = {
+    server_started_at: new Date().toISOString(),
+    requests_received: 0,
+    auth_failures: 0,
+    mcp_requests_received: 0,
+    mcp_dispatches_started: 0,
+    mcp_responses_completed: 0,
+    mcp_errors: 0,
+    last_request_at: null as string | null,
+    last_mcp_request_at: null as string | null,
+    last_dispatch_started_at: null as string | null,
+    last_response_completed_at: null as string | null,
+    last_auth_failure_at: null as string | null
+  };
   const authFailureWindow = new Map<string, { count: number; resetAt: number }>();
   const authFailureLimit = 10;
 
@@ -1493,19 +1509,56 @@ async function main(): Promise<void> {
     next();
   }
 
+  function sameOriginAdminRequest(req: Request, res: Response, next: NextFunction): void {
+    const origin = req.headers.origin;
+    if (!origin) {
+      next();
+      return;
+    }
+    const host = req.get("host");
+    let originHost: string;
+    try {
+      originHost = new URL(origin).host;
+    } catch {
+      jsonError(res, 403, "origin_denied", "Cross-origin admin requests are not allowed.");
+      return;
+    }
+    // A tunnel may terminate TLS before forwarding to this HTTP process, so compare the
+    // browser Origin host with the forwarded Host instead of requiring matching schemes.
+    if (!host || originHost !== host) {
+      jsonError(res, 403, "origin_denied", "Cross-origin admin requests are not allowed.");
+      return;
+    }
+    next();
+  }
+
   app.use((req, res, next) => {
+    const requestTime = new Date().toISOString();
+    const incomingRequestId = Array.isArray(req.headers["x-codexpro-request-id"])
+      ? req.headers["x-codexpro-request-id"][0]
+      : req.headers["x-codexpro-request-id"];
+    const requestId = typeof incomingRequestId === "string" && /^[A-Za-z0-9._:-]{1,96}$/.test(incomingRequestId)
+      ? incomingRequestId
+      : randomUUID();
+    (req as Request & { codexproRequestId?: string }).codexproRequestId = requestId;
+    res.setHeader("X-CodexPro-Request-Id", requestId);
+    connectionDiagnostics.requests_received += 1;
+    connectionDiagnostics.last_request_at = requestTime;
+    if (req.path === "/mcp") {
+      connectionDiagnostics.mcp_requests_received += 1;
+      connectionDiagnostics.last_mcp_request_at = requestTime;
+    }
     if (!logRequests) {
       next();
       return;
     }
     const started = Date.now();
-    console.error(`[CodexPro] ${req.method} ${req.path} received`);
+    console.error(`[CodexPro] ${req.method} ${req.path} received request_id=${requestId}`);
     res.on("finish", () => {
-      console.error(`[CodexPro] ${req.method} ${req.path} -> ${res.statusCode} ${Date.now() - started}ms`);
+      console.error(`[CodexPro] ${req.method} ${req.path} -> ${res.statusCode} ${Date.now() - started}ms request_id=${requestId}`);
     });
     next();
   });
-  app.use(cors({ exposedHeaders: ["Mcp-Session-Id"] }));
   app.get("/favicon.ico", (_req, res) => {
     res.setHeader("Cache-Control", "public, max-age=86400");
     res.type("image/svg+xml").send(LOCAL_FAVICON);
@@ -1514,7 +1567,9 @@ async function main(): Promise<void> {
     res.setHeader("Cache-Control", "no-store");
     res.setHeader("Pragma", "no-cache");
     res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("X-Frame-Options", "DENY");
     next();
   });
   app.use((req, res, next) => {
@@ -1538,6 +1593,8 @@ async function main(): Promise<void> {
     const current = authFailureWindow.get(key);
     if (!current || current.resetAt <= now) {
       authFailureWindow.set(key, { count: 1, resetAt: now + 60_000 });
+      connectionDiagnostics.auth_failures += 1;
+      connectionDiagnostics.last_auth_failure_at = new Date(now).toISOString();
       res.status(401).send("Unauthorized");
       return;
     }
@@ -1548,10 +1605,14 @@ async function main(): Promise<void> {
       }
     }
     if (current.count > authFailureLimit) {
+      connectionDiagnostics.auth_failures += 1;
+      connectionDiagnostics.last_auth_failure_at = new Date(now).toISOString();
       res.setHeader("Retry-After", String(Math.max(1, Math.ceil((current.resetAt - now) / 1000))));
       res.status(429).send("Too Many Authentication Attempts");
       return;
     }
+    connectionDiagnostics.auth_failures += 1;
+    connectionDiagnostics.last_auth_failure_at = new Date(now).toISOString();
     res.status(401).send("Unauthorized");
   });
 
@@ -1562,6 +1623,7 @@ async function main(): Promise<void> {
   };
 
   const transports = new Map<string, TransportRecord>();
+  const workspaceRegistry = new WorkspaceRegistry();
   const sessionIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
   function requestSessionId(req: Request): string | undefined {
@@ -1624,7 +1686,7 @@ async function main(): Promise<void> {
   });
 
   app.get("/healthz", (_req, res) => {
-    res.json({
+    res.json(redactConfigPaths(config, {
       ok: true,
       name: "CodexPro",
       defaultRoot: config.defaultRoot,
@@ -1639,15 +1701,16 @@ async function main(): Promise<void> {
       widgetDomain: config.widgetDomain,
       contextDir: config.contextDir,
       authEnabled: Boolean(config.authToken),
-      authRequired: Boolean(config.authToken)
-    });
+      authRequired: Boolean(config.authToken),
+      connection_diagnostics: connectionDiagnostics
+    }, { labelUnknownPaths: true }));
   });
 
   app.get("/admin/profile", (_req, res) => {
     res.json(profileResponse(config));
   });
 
-  app.post("/admin/profile", adminRateLimit, adminBodyLimit, express.json({ limit: "32kb" }), (req, res) => {
+  app.post("/admin/profile", sameOriginAdminRequest, adminRateLimit, adminBodyLimit, express.json({ limit: "32kb" }), (req, res) => {
     const parsed = AdminProfilePatch.safeParse(req.body ?? {});
     if (!parsed.success) {
       jsonError(res, 400, "invalid_profile", "Invalid profile settings.", parsed.error.flatten());
@@ -1673,6 +1736,8 @@ async function main(): Promise<void> {
   });
 
   app.post("/mcp", express.json({ limit: "20mb" }), async (req, res) => {
+    connectionDiagnostics.mcp_dispatches_started += 1;
+    connectionDiagnostics.last_dispatch_started_at = new Date().toISOString();
     try {
       const sessionId = requestSessionId(req);
       let transport: StreamableHTTPServerTransport;
@@ -1699,7 +1764,7 @@ async function main(): Promise<void> {
           if (closedSessionId) transports.delete(closedSessionId);
         };
 
-        const server = createCodexProServer(config);
+        const server = createCodexProServer(config, { workspaceRegistry });
         await server.connect(transport);
       } else {
         sendSessionError(res, sessionId);
@@ -1707,7 +1772,10 @@ async function main(): Promise<void> {
       }
 
       await transport.handleRequest(req, res, req.body);
+      connectionDiagnostics.mcp_responses_completed += 1;
+      connectionDiagnostics.last_response_completed_at = new Date().toISOString();
     } catch (error) {
+      connectionDiagnostics.mcp_errors += 1;
       console.error(error instanceof Error ? error.stack ?? error.message : String(error));
       if (!res.headersSent) {
         res.status(500).json({
