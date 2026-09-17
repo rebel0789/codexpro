@@ -71,6 +71,30 @@ With workspace write mode (the normal agent setup):
 - write plans under `.ai-bridge`
 - export a context bundle for chats that cannot call tools
 
+## Optional macOS Computer Use
+
+Computer Use is off by default and is currently macOS-only. It is exposed only with `--tool-mode full`: `observe` lists allowlisted running apps, reads Accessibility state, and captures a window screenshot; `interact` additionally enables allowlisted native clicks and restricted key combinations.
+
+```bash
+codexpro start \
+  --tool-mode full \
+  --computer-use observe \
+  --computer-use-apps com.microsoft.Word,com.apple.TextEdit
+```
+
+Grant the terminal running CodexPro macOS **Accessibility** and **Screen Recording** permissions. Refresh `computer_get_state` immediately before state-dependent actions because element ids are valid only for that fresh UI state. AX data and screenshots may contain sensitive on-screen text. `interact` can emit native input events, so keep the allowlist narrow and do not save or close unsaved documents without an explicit user request.
+
+The tools call the local macOS AX/ScreenCaptureKit backend directly. They do not start a second Codex agent or model turn; the current ChatGPT conversation still consumes usage normally. Browser automation is out of scope.
+
+Configuration can also be supplied through the environment or saved setup:
+
+```dotenv
+CODEXPRO_COMPUTER_USE=observe
+CODEXPRO_COMPUTER_USE_APPS=com.microsoft.Word,com.apple.TextEdit
+```
+
+Use `codexpro setup`, `codexpro settings set`, or `codexpro doctor` to save and validate these options. An empty allowlist exposes no application data or controls.
+
 ## Multiple projects
 
 One CodexPro process can allow more than one repo:
