@@ -20,6 +20,7 @@ import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidg
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { pathRedactions, redactPathsDeep, redactPathsInText } from "./pathLabels.js";
+import { CODEXPRO_VERSION } from "./version.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -952,7 +953,7 @@ export function createCodexProServer(
   const workspaces = new WorkspaceManager(config, options.workspaceRegistry);
   const reviewCheckpoints = new Map<string, string>();
   const guard = new PathGuard(config);
-  const server = new McpServer({ name: "CodexPro", version: "0.30.1" }, { instructions: serverInstructions(config) });
+  const server = new McpServer({ name: "CodexPro", version: CODEXPRO_VERSION }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
 

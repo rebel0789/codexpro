@@ -63,13 +63,35 @@ If plugin creation fails, run `codexpro connection-test` and check whether ChatG
 
 With workspace write mode (the normal agent setup):
 
-- read, search, and inspect the repo
+- read, search, and inspect the repo with bounded code intelligence
 - edit with `write`, `edit`, or guarded `apply_patch`
 - import ChatGPT attachments with `import_file`
 - run allowlisted checks with `bash`
-- review diffs with `show_changes`
+- review diffs and likely impact with `show_changes`
 - write plans under `.ai-bridge`
 - export a context bundle for chats that cannot call tools
+
+### Built-in repository intelligence
+
+CodexPro does more than raw file search:
+
+- `inspect_workspace` maps languages, project types, entrypoints, areas, symbols, and internal relationships.
+- `search` supports targeted `symbol`, `references`, and `impact` intents as well as ordinary text and regex search.
+- `show_changes` identifies affected areas, likely dependents, related tests, risk signals, and relevant verification commands.
+- TypeScript/JavaScript, Python, Go, Rust, Swift, Java, C#, C, and C++ declarations are recognized. Other languages retain safe inventory and lexical search.
+
+Analysis is local, bounded, and cached by a workspace fingerprint. It needs no model API key, language-server daemon, embedding service, or vector database. Coverage and inference strength are reported instead of presented as certainty.
+
+### Product focus
+
+CodexPro is optimized for a narrow loop: connect ChatGPT to explicitly allowed local repositories, make a reviewable change, verify it, and preserve a handoff record. The project prioritizes:
+
+- explicit workspace boundaries and separate controls for reads, writes, commands, sessions, and handoffs
+- useful code navigation without sending a repository to a separate indexing service
+- cross-platform installation and release checks on supported Node.js versions
+- compact, bounded tool results that remain usable in long ChatGPT sessions
+
+See the [roadmap](ROADMAP.md) for the next reliability, code-navigation, and workflow improvements.
 
 ## Multiple projects
 
@@ -163,6 +185,7 @@ npm install
 npm run build
 npm run smoke
 npm run stress
+npm run package:smoke
 npm run release:check
 ```
 
@@ -178,6 +201,7 @@ npm run release:publish
 - [Website](https://rebel0789.github.io/codexpro/)
 - [FAQ](FAQ.md)
 - [Security](SECURITY.md)
+- [Roadmap](ROADMAP.md)
 - [Stable URL guide](DOMAIN_SETUP.md)
 - [Changelog](CHANGELOG.md)
 - [Contributors](CONTRIBUTORS.md)

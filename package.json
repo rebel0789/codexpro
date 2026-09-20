@@ -1,6 +1,6 @@
 {
   "name": "codexpro",
-  "version": "0.30.1",
+  "version": "0.30.2",
   "description": "Local MCP server that connects ChatGPT Plugins to explicitly allowed repos on your machine.",
   "type": "module",
   "license": "MIT",
@@ -45,6 +45,7 @@
     "scripts",
     "README.md",
     "README_ZH.md",
+    "ROADMAP.md",
     "PUBLIC_LAUNCH_CHECKLIST.md",
     "DOMAIN_SETUP.md",
     "LICENSE",
@@ -93,7 +94,8 @@
     "pro:apply": "node scripts/pro-apply.mjs",
     "release:guard": "node scripts/release-guard.mjs",
     "release:pack": "node scripts/release-pack.mjs",
-    "release:check": "npm run release:guard && npm run build && npm run smoke && npm run stress && npm audit --audit-level=high && npm run release:pack",
+    "package:smoke": "node scripts/package-install-smoke.mjs",
+    "release:check": "npm run release:guard && npm run build && npm run smoke && npm run stress && npm audit --audit-level=high && npm run release:pack && npm run package:smoke",
     "release:publish": "node scripts/release-publish.mjs"
   },
   "dependencies": {

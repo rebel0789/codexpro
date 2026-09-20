@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.30.2 (2026-09-20)
+
+- Read the runtime and MCP server version from package metadata so release entrypoints cannot drift from `package.json`.
+- Added a clean consumer-install smoke test for the packed npm tarball and all three public command entrypoints.
+- Expanded CI to Node.js 20 and 24 on Linux and Windows, including package-install and high-severity dependency-audit gates.
+- Documented built-in repository intelligence, product focus, and a prioritized public roadmap.
+
 ## 0.30.1 (2026-09-20)
 
 - Hardened local handoff receipts: interruptions are recorded as non-terminal `interrupting` and terminal `interrupted` states only after child exit; stale in-flight receipts become `orphaned` only when recorded processes are gone and require reconciliation.
