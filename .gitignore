@@ -1,5 +1,6 @@
 node_modules/
 dist/
+camel-cpu-dag/target/
 .DS_Store
 .env
 .env.*

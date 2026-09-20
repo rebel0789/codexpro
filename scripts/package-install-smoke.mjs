@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CODEXPRO_PACKAGE, assertCodexProReleaseEnvironment } from "./release-guard.mjs";
@@ -30,6 +30,11 @@ const packDir = join(scratch, "pack");
 const consumerDir = join(scratch, "consumer");
 mkdirSync(packDir);
 mkdirSync(consumerDir);
+writeFileSync(join(consumerDir, "package.json"), `${JSON.stringify({
+  name: "codexpro-package-smoke-consumer",
+  version: "1.0.0",
+  private: true
+}, null, 2)}\n`, "utf8");
 
 try {
   const packed = requireSuccess(

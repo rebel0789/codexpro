@@ -12,12 +12,12 @@ const cli = path.join(projectRoot, 'scripts', 'codexpro.mjs');
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-analysis-cli-'));
 const home = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-analysis-cli-home-'));
 
-function run(args) {
+function run(args, extraEnv = {}) {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd: projectRoot,
     encoding: 'utf8',
     timeout: 5000,
-    env: { ...process.env, NO_COLOR: '1', CI: '1', CODEXPRO_HOME: home }
+    env: { ...process.env, NO_COLOR: '1', CI: '1', CODEXPRO_HOME: home, ...extraEnv }
   });
 }
 
@@ -69,7 +69,10 @@ try {
 
   const nonGitRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-analysis-cli-non-git-'));
   try {
-    const nonGitReview = run(['review', '--root', nonGitRoot, '--json']);
+    const nonGitReview = run(
+      ['review', '--root', nonGitRoot, '--json'],
+      { GIT_DIR: path.join(nonGitRoot, '.git-does-not-exist') }
+    );
     assert.notEqual(nonGitReview.status, 0);
     assert.match(nonGitReview.stderr, /Unable to read Git changes/i);
   } finally {

@@ -20,6 +20,21 @@ import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidg
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { pathRedactions, redactPathsDeep, redactPathsInText } from "./pathLabels.js";
+import { fleetCapabilityContract } from "./fleetInvariants.js";
+import { camelDagContract, runCamelDag } from "./camelDagOps.js";
+import { chrome2ApiContract } from "./chrome2ApiContract.js";
+import { chrome2ApiStatus, completeWithChrome2Api } from "./chrome2ApiOps.js";
+import {
+  chromeSummarizerContract,
+  SUMMARY_FORMATS,
+  SUMMARY_LANGUAGES,
+  SUMMARY_LENGTHS,
+  SUMMARY_PREFERENCES,
+  SUMMARY_TYPES
+} from "./chromeSummarizerContract.js";
+import { summarizeWithChrome2Api } from "./chromeSummarizerOps.js";
+import { CHROME_DOCUMENT_LIMITS, summarizeDocumentWithChrome2Api } from "./chromeDocumentSummarizer.js";
+import { CHROME_CORPUS_LIMITS, summarizeCorpusWithChrome2Api } from "./chromeCorpusSummarizer.js";
 import { CODEXPRO_VERSION } from "./version.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
@@ -350,6 +365,7 @@ const MINIMAL_TOOL_NAMES = [
 
 const STANDARD_TOOL_NAMES = [
   ...MINIMAL_TOOL_NAMES,
+  "fabric",
   "inspect_workspace",
   "tree",
   "search",
@@ -363,6 +379,7 @@ const STANDARD_TOOL_NAMES = [
 
 const FULL_TOOL_NAMES = [
   SUPERTOOL_NAME,
+  "fabric",
   "server_config",
   "codexpro_self_test",
   "codexpro_inventory",
@@ -394,6 +411,7 @@ const FULL_TOOL_NAMES = [
 
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
   SUPERTOOL_NAME,
+  "fabric",
   "codexpro_self_test",
   "write",
   "edit",
@@ -956,6 +974,198 @@ export function createCodexProServer(
   const server = new McpServer({ name: "CodexPro", version: CODEXPRO_VERSION }, { instructions: serverInstructions(config) });
   registeredToolNamesByServer.set(server as object, []);
   registerToolCardResource(server, config);
+
+  registerCodexTool(
+    config,
+    server,
+    "fabric",
+    {
+      title: "Bounded CPU Fabric",
+      description:
+        "Inspect recursive fleet invariants, execute a bounded Camel/KIE CPU plan, or use bounded loopback Chrome2api completion and Chrome Summarizer-compatible lanes.",
+      inputSchema: {
+        action: z.enum(["invariants", "dag_contract", "dag_execute", "chrome_contract", "chrome_status", "chrome_complete", "chrome_summarizer_contract", "chrome_summarize", "chrome_summarize_document", "chrome_summarize_corpus"])
+          .describe("Inspect a contract/status, execute one admitted CPU plan, or request one local ChromeML text completion."),
+        workspace_id: z.string().optional().describe("For chrome_summarize_document/corpus: workspace containing the source documents."),
+        document_path: z.string().min(1).optional().describe("For chrome_summarize_document: text file path inside the selected workspace."),
+        document_glob: z.string().min(1).max(512).optional()
+          .describe("For chrome_summarize_corpus: case-sensitive top-level workspace glob. Default: *AI*.md."),
+        chunk_bytes: z.number().int().min(CHROME_DOCUMENT_LIMITS.minChunkBytes).max(CHROME_DOCUMENT_LIMITS.maxChunkBytes).optional()
+          .describe("For chrome_summarize_document/corpus: deterministic maximum UTF-8 bytes per source chunk. Default: 48000."),
+        dag_json: z.string().min(2).max(1_000_000).optional().describe("For dag_execute: JSON with planId and items [{id, capability, payload}]."),
+        prompt: z.string().min(1).max(65_536).optional().describe("For chrome_complete: bounded text prompt. Media and local file paths are not accepted."),
+        system: z.string().max(16_384).optional().describe("For chrome_complete: optional bounded system instruction."),
+        max_tokens: z.number().int().min(1).max(2_048).optional().describe("For chrome_complete: maximum output tokens. Default: 256."),
+        temperature: z.number().min(0).max(2).optional().describe("For chrome_complete: sampling temperature. Default: 0.2."),
+        summary_text: z.string().min(1).max(60_000).optional().describe("For chrome_summarize: source text. The byte limit is enforced separately."),
+        summary_type: z.enum(SUMMARY_TYPES).optional().describe("Chrome summary type. Default: key-points."),
+        summary_format: z.enum(SUMMARY_FORMATS).optional().describe("Chrome summary format. Default: markdown."),
+        summary_length: z.enum(SUMMARY_LENGTHS).optional().describe("Chrome summary length. Default: short."),
+        summary_preference: z.enum(SUMMARY_PREFERENCES).optional().describe("Chrome execution preference. Default: auto."),
+        shared_context: z.string().max(4_096).optional().describe("Session-wide summarization context."),
+        context: z.string().max(4_096).optional().describe("Per-summary context."),
+        expected_input_languages: z.array(z.enum(SUMMARY_LANGUAGES)).max(5).optional().describe("Expected source languages."),
+        output_language: z.enum(SUMMARY_LANGUAGES).optional().describe("Requested summary language."),
+        expected_context_languages: z.array(z.enum(SUMMARY_LANGUAGES)).max(5).optional().describe("Expected context languages."),
+        timeout_ms: z.number().int().min(2_000).max(120_000).optional().describe("Execution deadline. Default: 120000 ms.")
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      if (args.action === "invariants") {
+        const contract = fleetCapabilityContract();
+        const statements = contract.invariants.map((item) => `- ${item.id}: ${item.statement}`).join("\n");
+        return textResult(`# Fleet Capability Invariants\n\n${statements}`, contract as unknown as Record<string, unknown>);
+      }
+      if (args.action === "dag_contract") {
+        const contract = camelDagContract();
+        const ready = contract.runtime.jar_present && contract.runtime.java_present;
+        return textResult(
+          `# Camel/KIE CPU DAG\n\nRuntime: ${contract.engine}\nReady: ${ready}\nCapabilities: ${contract.compiler.capabilities.join(", ")}`,
+          contract as unknown as Record<string, unknown>
+        );
+      }
+      if (args.action === "chrome_contract") {
+        const contract = chrome2ApiContract();
+        return textResult(
+          `# Chrome2api Contract\n\nEndpoint valid: ${contract.endpoint.configuration_valid}\nModel: ${contract.model}\nLocal text only: ${contract.boundaries.local_file_or_media_inputs === false}`,
+          contract as unknown as Record<string, unknown>
+        );
+      }
+      if (args.action === "chrome_status") {
+        const status = await chrome2ApiStatus(args.timeout_ms === undefined ? 5_000 : Number(args.timeout_ms));
+        return textResult(
+          `# Chrome2api Status\n\nReady: ${status.ready}\nModel: ${status.required_model}\nLatency: ${status.latency_ms} ms`,
+          status as unknown as Record<string, unknown>
+        );
+      }
+      if (args.action === "chrome_summarizer_contract") {
+        const contract = chromeSummarizerContract();
+        return textResult(
+          `# Chrome Summarizer Contract\n\nBackend: ${contract.backend}\nTypes: ${contract.options.type.join(", ")}\nFormats: ${contract.options.format.join(", ")}\nLengths: ${contract.options.length.join(", ")}`,
+          contract as unknown as Record<string, unknown>
+        );
+      }
+      if (args.action === "chrome_summarize") {
+        if (!args.summary_text) throw new CodexProError("fabric chrome_summarize requires summary_text.");
+        const receipt = await summarizeWithChrome2Api({
+          text: String(args.summary_text),
+          type: args.summary_type,
+          format: args.summary_format,
+          length: args.summary_length,
+          preference: args.summary_preference,
+          sharedContext: args.shared_context,
+          context: args.context,
+          expectedInputLanguages: args.expected_input_languages,
+          outputLanguage: args.output_language,
+          expectedContextLanguages: args.expected_context_languages,
+          timeoutMs: args.timeout_ms === undefined ? 120_000 : Number(args.timeout_ms)
+        });
+        return textResult(
+          `# Chrome Summary\n\n${receipt.summary}\n\nReceipt: ${receipt.receipt_root}`,
+          receipt as unknown as Record<string, unknown>
+        );
+      }
+      if (args.action === "chrome_summarize_document") {
+        if (!args.document_path) throw new CodexProError("fabric chrome_summarize_document requires document_path.");
+        const workspace = workspaces.getWorkspace(args.workspace_id);
+        const resolved = guard.resolve(workspace, String(args.document_path));
+        await guard.assertTextFile(resolved.absPath, CHROME_DOCUMENT_LIMITS.maxDocumentBytes);
+        const bytes = await fsp.readFile(resolved.absPath);
+        const source = bytes.toString("utf8");
+        if (!Buffer.from(source, "utf8").equals(bytes)) throw new CodexProError("Chrome document must be valid UTF-8 text.");
+        const receipt = await summarizeDocumentWithChrome2Api({
+          text: source,
+          documentId: resolved.relPath,
+          chunkBytes: args.chunk_bytes,
+          type: args.summary_type,
+          format: args.summary_format,
+          length: args.summary_length,
+          preference: args.summary_preference,
+          sharedContext: args.shared_context,
+          context: args.context,
+          expectedInputLanguages: args.expected_input_languages,
+          outputLanguage: args.output_language,
+          expectedContextLanguages: args.expected_context_languages,
+          timeoutMs: args.timeout_ms === undefined ? 120_000 : Number(args.timeout_ms)
+        });
+        return textResult(
+          `# Chrome Document Summary\n\n${receipt.final.summary}\n\nChunks: ${receipt.source_chunks.length}\nReceipt: ${receipt.receipt_root}`,
+          receipt as unknown as Record<string, unknown>
+        );
+      }
+      if (args.action === "chrome_summarize_corpus") {
+        const pattern = String(args.document_glob ?? "*AI*.md");
+        if (pattern.includes("/") || pattern.includes("\\") || pattern.includes("**")) {
+          throw new CodexProError("fabric chrome_summarize_corpus accepts one top-level basename glob without path separators or **.");
+        }
+        const workspace = workspaces.getWorkspace(args.workspace_id);
+        const documentPaths = await listFiles(guard, workspace, {
+          root: ".",
+          glob: pattern,
+          includeHidden: false,
+          maxFiles: CHROME_CORPUS_LIMITS.maxDocuments + 1,
+          maxDepth: 0
+        });
+        if (!documentPaths.length) throw new CodexProError(`Chrome corpus glob matched no documents: ${pattern}`);
+        if (documentPaths.length > CHROME_CORPUS_LIMITS.maxDocuments) {
+          throw new CodexProError(`Chrome corpus glob matched more than ${CHROME_CORPUS_LIMITS.maxDocuments} documents.`);
+        }
+        const documents = [];
+        let totalBytes = 0;
+        for (const documentPath of documentPaths) {
+          const resolved = guard.resolve(workspace, documentPath);
+          await guard.assertTextFile(resolved.absPath, CHROME_DOCUMENT_LIMITS.maxDocumentBytes);
+          const bytes = await fsp.readFile(resolved.absPath);
+          totalBytes += bytes.byteLength;
+          if (totalBytes > CHROME_CORPUS_LIMITS.maxTotalBytes) {
+            throw new CodexProError(`Chrome corpus exceeds ${CHROME_CORPUS_LIMITS.maxTotalBytes} total UTF-8 bytes.`);
+          }
+          const source = bytes.toString("utf8");
+          if (!Buffer.from(source, "utf8").equals(bytes)) throw new CodexProError(`Chrome corpus document must be valid UTF-8 text: ${resolved.relPath}`);
+          documents.push({ documentId: resolved.relPath, text: source });
+        }
+        const receipt = await summarizeCorpusWithChrome2Api({
+          documents,
+          chunkBytes: args.chunk_bytes,
+          type: args.summary_type,
+          format: args.summary_format,
+          length: args.summary_length,
+          preference: args.summary_preference,
+          sharedContext: args.shared_context,
+          context: args.context,
+          expectedInputLanguages: args.expected_input_languages,
+          outputLanguage: args.output_language,
+          expectedContextLanguages: args.expected_context_languages,
+          timeoutMs: args.timeout_ms === undefined ? 120_000 : Number(args.timeout_ms)
+        });
+        return textResult(
+          `# Chrome Corpus Summary\n\nDocuments: ${receipt.document_count}\nUnique contents: ${receipt.unique_content_count}\nProvider calls: ${receipt.cache.provider_calls}\nReceipt: ${receipt.receipt_root}`,
+          receipt as unknown as Record<string, unknown>
+        );
+      }
+      if (args.action === "chrome_complete") {
+        if (!args.prompt) throw new CodexProError("fabric chrome_complete requires prompt.");
+        const receipt = await completeWithChrome2Api({
+          prompt: String(args.prompt),
+          system: args.system === undefined ? undefined : String(args.system),
+          maxTokens: args.max_tokens === undefined ? undefined : Number(args.max_tokens),
+          temperature: args.temperature === undefined ? undefined : Number(args.temperature),
+          timeoutMs: args.timeout_ms === undefined ? 120_000 : Number(args.timeout_ms)
+        });
+        return textResult(
+          `# Chrome2api Completion\n\n${receipt.content}\n\nReceipt: ${receipt.receipt_root}`,
+          receipt as unknown as Record<string, unknown>
+        );
+      }
+      if (!args.dag_json) throw new CodexProError("fabric dag_execute requires dag_json.");
+      const receipt = await runCamelDag(String(args.dag_json), args.timeout_ms === undefined ? 120_000 : Number(args.timeout_ms));
+      return textResult(
+        `# Camel/KIE CPU DAG Receipt\n\nPlan: ${String(receipt.planId ?? "unknown")}\nReceipt: ${String(receipt.receiptRoot ?? "unknown")}\nOutputs: ${Array.isArray(receipt.outputs) ? receipt.outputs.length : 0}`,
+        receipt
+      );
+    }
+  );
 
   registerCodexTool(
     config,

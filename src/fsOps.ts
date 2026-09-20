@@ -271,7 +271,7 @@ export async function repoTree(config: CodexProConfig, guard: PathGuard, workspa
 export async function listFiles(
   guard: PathGuard,
   workspace: Workspace,
-  options: { root?: string; glob?: string; includeHidden?: boolean; maxFiles: number }
+  options: { root?: string; glob?: string; includeHidden?: boolean; maxFiles: number; maxDepth?: number }
 ): Promise<string[]> {
   const target = guard.resolve(workspace, options.root ?? ".");
   const stat = await fsp.stat(target.absPath);
@@ -285,7 +285,7 @@ export async function listFiles(
     files.push(rel);
   }
 
-  async function walk(absDir: string): Promise<void> {
+  async function walk(absDir: string, depth: number): Promise<void> {
     if (files.length >= options.maxFiles) return;
     let entries: fs.Dirent[];
     try {
@@ -300,13 +300,13 @@ export async function listFiles(
       const rel = displayPath(abs, workspace.root);
       if (guard.isBlockedRelativePath(rel)) continue;
       if (!options.includeHidden && rel.split("/").some(isHiddenName)) continue;
-      if (entry.isDirectory()) await walk(abs);
+      if (entry.isDirectory() && (options.maxDepth === undefined || depth < options.maxDepth)) await walk(abs, depth + 1);
       else if (entry.isFile()) await addFile(abs);
     }
   }
 
   if (stat.isFile()) await addFile(target.absPath);
-  else await walk(target.absPath);
+  else await walk(target.absPath, 0);
   return files;
 }
 

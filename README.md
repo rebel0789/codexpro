@@ -180,14 +180,50 @@ Restart `codexpro start` after updating. Saved profiles under `~/.codexpro` stay
 
 ## Development
 
+CodexPro's TypeScript runtime requires Node.js 20 or newer. Building the optional
+Camel/KIE CPU-DAG sidecar also requires Java 17 and Maven.
+
 ```bash
 npm install
 npm run build
+npm run build:camel
 npm run smoke
 npm run stress
 npm run package:smoke
 npm run release:check
 ```
+
+### AI-planned, rules-admitted CPU DAGs
+
+The `fabric` MCP tool exposes ten bounded actions:
+
+- `invariants` returns the recursive fleet contract.
+- `dag_contract` returns registered capabilities, policy root, and hard limits.
+- `dag_execute` admits a JSON plan through Drools, executes its fixed capability
+  with a bounded Camel SEDA route, performs stable fan-in, and returns a
+  SHA-256-bound receipt.
+- `chrome_contract` returns the fixed local-inference trust boundary.
+- `chrome_status` verifies the loopback Chrome2api service and required model.
+- `chrome_complete` executes one bounded text-only request through ChromeML and
+  returns request, response, and terminal receipt roots.
+- `chrome_summarizer_contract` returns the Chrome Summarizer-compatible option
+  and lifecycle contract.
+- `chrome_summarize` executes a bounded local summary across every documented
+  type, format, length, and preference mode.
+- `chrome_summarize_document` reads one workspace-confined UTF-8 document,
+  creates exact byte-range chunks, maps them locally, performs a bounded
+  summary-of-summaries reduction, and returns a candidate-only receipt.
+- `chrome_summarize_corpus` resolves one safe top-level workspace glob,
+  content-deduplicates at most 64 documents / 8 MB, summarizes each unique
+  source once, and returns per-path alias receipts. Unchanged requests reuse a
+  bounded process-local summary cache.
+
+The planner is never the router. A model may propose only data; it cannot supply
+Camel endpoint URIs, shell commands, executables, or credentials. See the
+[CPU-DAG contract](docs/camel-kie-cpu-dag.md) and
+[fleet invariants](docs/fleet-capability-invariants.md). The optional
+[Chrome2api provider](docs/chrome2api.md) is loopback-only and never forwards
+authorization, cookies, browser state, local file paths, or media.
 
 Publish only from the CodexPro root:
 

@@ -1,0 +1,66 @@
+package com.synexia.codexpro.dag
+
+import com.synexia.codexpro.dag.DagAdmission
+
+rule "deny executable endpoint supplied by planner"
+  salience 100
+  when
+    $fact : DagAdmission(decision == "PENDING", endpointUriSupplied == true)
+  then
+    modify($fact) { deny("endpoint-uri-from-planner-forbidden") };
+end
+
+rule "deny shell request"
+  salience 90
+  when
+    $fact : DagAdmission(decision == "PENDING", shellRequested == true)
+  then
+    modify($fact) { deny("shell-capability-forbidden") };
+end
+
+rule "deny unregistered capability"
+  salience 80
+  when
+    $fact : DagAdmission(decision == "PENDING", registeredCapability == false)
+  then
+    modify($fact) { deny("capability-not-admitted") };
+end
+
+rule "deny item count overflow"
+  salience 70
+  when
+    $fact : DagAdmission(decision == "PENDING", itemCount > maxItems)
+  then
+    modify($fact) { deny("item-count-overflow") };
+end
+
+rule "deny item payload overflow"
+  salience 60
+  when
+    $fact : DagAdmission(decision == "PENDING", payloadBytes > maxPayloadBytes)
+  then
+    modify($fact) { deny("item-payload-overflow") };
+end
+
+rule "deny total payload overflow"
+  salience 50
+  when
+    $fact : DagAdmission(decision == "PENDING", totalPayloadBytes > maxTotalPayloadBytes)
+  then
+    modify($fact) { deny("total-payload-overflow") };
+end
+
+rule "allow registered bounded data plan"
+  salience -100
+  when
+    $fact : DagAdmission(
+      decision == "PENDING",
+      registeredCapability == true,
+      endpointUriSupplied == false,
+      shellRequested == false,
+      itemCount <= maxItems,
+      payloadBytes <= maxPayloadBytes,
+      totalPayloadBytes <= maxTotalPayloadBytes)
+  then
+    modify($fact) { allow() };
+end

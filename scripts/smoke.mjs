@@ -238,7 +238,7 @@ await client.request('initialize', {
 client.notify('notifications/initialized');
 const tools = await client.request('tools/list', {});
 const toolNames = tools.tools.map((tool) => tool.name);
-for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'import_file', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
+for (const expected of ['fabric', 'server_config', 'codexpro_self_test', 'codexpro_inventory', 'list_workspaces', 'open_current_workspace', 'open_workspace', 'workspace_snapshot', 'inspect_workspace', 'tree', 'search', 'load_skill', 'read', 'view_image', 'write', 'edit', 'apply_patch', 'import_file', 'bash', 'git_status', 'git_diff', 'show_changes', 'read_handoff', 'wait_for_handoff', 'codex_context', 'handoff_to_agent', 'handoff_to_codex', 'export_pro_context']) {
   if (!toolNames.includes(expected)) throw new Error(`missing tool: ${expected}`);
 }
 const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
@@ -264,6 +264,19 @@ async function expectToolError(name, args, pattern, targetClient = client) {
     throw new Error(`${name} error did not match ${pattern}: ${text}`);
   }
 }
+const fabricActions = toolsByName.get('fabric')?.inputSchema?.properties?.action?.enum ?? [];
+for (const action of ['invariants', 'dag_contract', 'dag_execute', 'chrome_contract', 'chrome_status', 'chrome_complete', 'chrome_summarizer_contract', 'chrome_summarize', 'chrome_summarize_document', 'chrome_summarize_corpus']) {
+  if (!fabricActions.includes(action)) throw new Error(`fabric schema missing action: ${action}`);
+}
+const chromeContractResult = await client.request('tools/call', { name: 'fabric', arguments: { action: 'chrome_contract' } });
+if (chromeContractResult.isError || chromeContractResult.structuredContent?.schema !== 'codexpro.chrome2api.contract.v1') {
+  throw new Error(`fabric chrome_contract failed: ${JSON.stringify(chromeContractResult)}`);
+}
+await expectToolError(
+  'fabric',
+  { action: 'chrome_summarize_corpus', document_glob: 'does-not-exist-*.md' },
+  /matched no documents/i
+);
 for (const visualTool of toolNames) {
   if (hasWidgetMeta(visualTool) || hasToolCardStatusMeta(visualTool)) throw new Error(`${visualTool} exposed widget metadata while CODEXPRO_TOOL_CARDS is off`);
 }

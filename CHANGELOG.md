@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Added bounded Chrome Summarizer-compatible corpus execution: safe top-level
+  workspace globs, 64-document / 8-MB caps, exact-content deduplication,
+  per-path alias receipts, and deterministic unique-content execution order.
+- Added bounded process-local summary reuse with concurrent request joining;
+  cache diagnostics never affect semantic receipt identity and failures are not
+  cached.
+
 ## 0.30.2 (2026-09-20)
 
 - Read the runtime and MCP server version from package metadata so release entrypoints cannot drift from `package.json`.
