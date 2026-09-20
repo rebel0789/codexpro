@@ -6,7 +6,14 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { z } from "zod";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
-import { expandHome, loadConfig, type CodexProConfig } from "./config.js";
+import {
+  computerUseAllowedAppsFrom,
+  expandHome,
+  loadConfig,
+  MAX_COMPUTER_USE_APPS,
+  type CodexProConfig,
+  type ComputerUseMode
+} from "./config.js";
 import {
   profilePathForRoot,
   readRuntimeConnection,
@@ -55,6 +62,7 @@ const BASH_TRANSCRIPTS = ["compact", "full"] as const;
 const CODEX_SESSIONS = ["off", "metadata", "read"] as const;
 const WRITE_MODES = ["workspace", "handoff", "off"] as const;
 const TOOL_MODES = ["standard", "minimal", "full"] as const;
+const COMPUTER_USE_MODES = ["off", "observe", "interact"] as const;
 
 const textField = (max: number) =>
   z.preprocess((value) => (typeof value === "string" ? value.trim() : value), z.string().max(max).optional());
@@ -75,6 +83,11 @@ const AdminProfilePatch = z.object({
   requireBashSession: z.boolean().optional(),
   write: z.enum(WRITE_MODES).optional(),
   toolMode: z.enum(TOOL_MODES).optional(),
+  computerUse: z.enum(COMPUTER_USE_MODES).optional(),
+  computerUseApps: z.union([
+    z.string().max(16_384),
+    z.array(z.string().max(255)).max(MAX_COMPUTER_USE_APPS)
+  ]).optional(),
   toolCards: z.boolean().optional(),
   widgetDomain: textField(2048),
   tunnelName: textField(128),
@@ -103,6 +116,8 @@ interface ProfileFormValues {
   requireBashSession: boolean;
   write: "off" | "handoff" | "workspace";
   toolMode: "minimal" | "standard" | "full";
+  computerUse: ComputerUseMode;
+  computerUseApps: string[];
   toolCards: boolean;
   widgetDomain: string;
   noInstallCloudflared: boolean;
@@ -110,6 +125,31 @@ interface ProfileFormValues {
 
 function oneOf<T extends readonly string[]>(value: unknown, values: T, fallback: T[number]): T[number] {
   return typeof value === "string" && values.includes(value) ? value : fallback;
+}
+
+function normalizedComputerUseApps(value: unknown, fallback: string[] = []): string[] {
+  if (Array.isArray(value)) {
+    try {
+      return computerUseAllowedAppsFrom(value.map((item) => String(item)).join(","));
+    } catch {
+      return fallback;
+    }
+  }
+  if (typeof value === "string") {
+    try {
+      return computerUseAllowedAppsFrom(value);
+    } catch {
+      return fallback;
+    }
+  }
+  return fallback;
+}
+
+function parseComputerUseAppsInput(value: unknown): string[] {
+  if (Array.isArray(value)) return computerUseAllowedAppsFrom(value.map((item) => String(item)).join(","));
+  if (typeof value === "string") return computerUseAllowedAppsFrom(value);
+  if (value === undefined || value === null) return [];
+  throw new Error("computerUseApps must be a comma-separated string or an array of macOS bundle ids.");
 }
 
 function runtimeTunnelFallback(): TunnelMode {
@@ -180,6 +220,8 @@ function profileValues(config: CodexProConfig, profile = readWorkspaceProfile(co
     requireBashSession: Boolean(profile.requireBashSession ?? config.requireBashSession),
     write,
     toolMode: oneOf(profile.toolMode ?? config.toolMode, TOOL_MODES, config.toolMode),
+    computerUse: oneOf(profile.computerUse ?? config.computerUseMode, COMPUTER_USE_MODES, config.computerUseMode),
+    computerUseApps: normalizedComputerUseApps(profile.computerUseApps ?? config.computerUseAllowedApps, config.computerUseAllowedApps),
     toolCards: Boolean(profile.toolCards ?? config.toolCards),
     widgetDomain: String(profile.widgetDomain ?? config.widgetDomain),
     noInstallCloudflared: Boolean(profile.noInstallCloudflared)
@@ -203,7 +245,9 @@ const OPTION_LABELS: Record<string, string> = {
   read: "Read",
   workspace: "Workspace",
   minimal: "Minimal",
-  standard: "Standard"
+  standard: "Standard",
+  observe: "Observe",
+  interact: "Interact"
 };
 
 function optionLabel(value: string): string {
@@ -305,10 +349,13 @@ function profileForm(config: CodexProConfig): string {
             <label><span>Bash</span><select name="bash">${selectOptions(BASH_MODES, values.bash)}</select></label>
             <label><span>Write mode</span><select name="write">${selectOptions(WRITE_MODES, values.write)}</select></label>
             <label><span>Tool mode</span><select name="toolMode">${selectOptions(TOOL_MODES, values.toolMode)}</select></label>
+            <label><span>Computer Use</span><select name="computerUse">${selectOptions(COMPUTER_USE_MODES, values.computerUse)}</select></label>
             <label><span>Codex sessions</span><select name="codexSessions">${selectOptions(CODEX_SESSIONS, values.codexSessions)}</select></label>
             <label><span>Codex directory</span><input name="codexDir" value="${escapeHtml(values.codexDir)}"></label>
             <label><span>Bash session</span><input name="bashSession" value="${escapeHtml(values.bashSession)}"></label>
+            <label><span>Allowed macOS apps</span><input name="computerUseApps" value="${escapeHtml(values.computerUseApps.join(","))}" placeholder="com.microsoft.Word,com.apple.TextEdit"></label>
           </div>
+          <p class="field-help">Computer Use is off by default, requires full tool mode, and only accepts explicit macOS bundle ids. Observe reads Accessibility state/screenshots; interact also permits click/key events.</p>
           <label class="check-row"><input name="toolCards" type="checkbox" value="true"${values.toolCards ? " checked" : ""}><span>Enable ChatGPT tool cards</span></label>
           <label class="check-row"><input name="requireBashSession" type="checkbox" value="true"${values.requireBashSession ? " checked" : ""}><span>Require matching bash session id</span></label>
         </fieldset>
@@ -334,6 +381,9 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
     ...current,
     ...input,
     port: input.port ? String(input.port) : current.port,
+    computerUseApps: input.computerUseApps === undefined
+      ? current.computerUseApps
+      : parseComputerUseAppsInput(input.computerUseApps),
     requireBashSession: input.requireBashSession ?? current.requireBashSession,
     noInstallCloudflared: input.noInstallCloudflared ?? current.noInstallCloudflared
   };
@@ -345,6 +395,9 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
   }
   if (next.requireBashSession && !next.bashSession) {
     throw new Error("requireBashSession requires a bashSession value.");
+  }
+  if (next.computerUse !== "off" && next.toolMode !== "full") {
+    throw new Error("computerUse observe or interact requires full tool mode.");
   }
 
   const token = typeof existing.token === "string" && existing.token ? existing.token : config.authToken ?? "";
@@ -373,6 +426,8 @@ function buildProfilePayload(config: CodexProConfig, existing: WorkspaceProfile,
     ...(next.requireBashSession ? { requireBashSession: true } : {}),
     write,
     toolMode: next.toolMode,
+    computerUse: next.computerUse,
+    ...(next.computerUseApps.length ? { computerUseApps: next.computerUseApps } : {}),
     toolCards: next.toolCards,
     ...(next.widgetDomain ? { widgetDomain: next.widgetDomain } : {}),
     ...(existing.allowedRoots?.length ? { allowedRoots: existing.allowedRoots } : {}),
@@ -398,6 +453,8 @@ function profileResponse(config: CodexProConfig): Record<string, unknown> {
       codexSessions: config.codexSessions,
       writeMode: config.writeMode,
       toolMode: config.toolMode,
+      computerUse: config.computerUseMode,
+      computerUseApps: config.computerUseAllowedApps,
       toolCards: config.toolCards,
       widgetDomain: config.widgetDomain,
       authEnabled: Boolean(config.authToken)
@@ -424,6 +481,8 @@ function printHelp(): void {
 
 Usage:
   codexpro-mcp-http --root /path/to/repo --port 8787
+                     [--computer-use <off|observe|interact>]
+                     [--computer-use-apps <bundle-id,...>]
   codexpro-mcp-http --version
   codexpro-mcp-http --help
 
@@ -1261,6 +1320,7 @@ function onboardingPage(config: CodexProConfig): string {
             <div class="row"><span class="label">Local MCP</span><span class="mono">${escapeHtml(localMcp)}</span></div>
             <div class="row"><span class="label">Write mode</span><span class="pill ${config.writeMode === "workspace" ? "" : "warn"}">${escapeHtml(writeTone)}</span></div>
             <div class="row"><span class="label">Tool mode</span><span class="pill ${config.toolMode === "standard" ? "" : "warn"}">${escapeHtml(config.toolMode)}</span></div>
+            <div class="row"><span class="label">Computer Use</span><span class="pill ${config.computerUseMode === "off" ? "" : "warn"}">${escapeHtml(`${config.computerUseMode}${config.computerUseAllowedApps.length ? ` (${config.computerUseAllowedApps.length} apps)` : ""}`)}</span></div>
             <div class="row"><span class="label">Bash mode</span><span class="pill ${config.bashMode === "safe" ? "" : "warn"}">${escapeHtml(config.bashMode)}</span></div>
             <div class="row"><span class="label">Transcript</span><span class="pill ${config.bashTranscript === "compact" ? "" : "warn"}">${escapeHtml(config.bashTranscript)}</span></div>
             <div class="row"><span class="label">Bash session</span><span class="pill ${config.requireBashSession ? "warn" : ""}">${escapeHtml(config.bashSessionId ? `${config.bashSessionId}${config.requireBashSession ? " required" : ""}` : "not set")}</span></div>
@@ -1408,6 +1468,8 @@ function onboardingPage(config: CodexProConfig): string {
           bash: data.bash,
           write: data.write,
           toolMode: data.toolMode,
+          computerUse: data.computerUse,
+          computerUseApps: data.computerUseApps,
           toolCards: Boolean(form.elements.toolCards?.checked),
           codexSessions: data.codexSessions,
           codexDir: data.codexDir,
@@ -1698,6 +1760,8 @@ async function main(): Promise<void> {
       codexSessions: config.codexSessions,
       writeMode: config.writeMode,
       toolMode: config.toolMode,
+      computerUse: config.computerUseMode,
+      computerUseApps: config.computerUseAllowedApps,
       widgetDomain: config.widgetDomain,
       contextDir: config.contextDir,
       authEnabled: Boolean(config.authToken),

@@ -20,6 +20,7 @@ import { TOOL_CARD_LEGACY_URIS, TOOL_CARD_MIME_TYPE, TOOL_CARD_URI, toolCardWidg
 import { hasSecretValue, redactSensitiveText, redactStructured } from "./redact.js";
 import { inspectWorkspace, invalidateWorkspaceAnalysis, reviewWorkspaceChanges } from "./analysis/index.js";
 import { pathRedactions, redactPathsDeep, redactPathsInText } from "./pathLabels.js";
+import { clickComputerElement, computerUseStatus, getComputerState, listComputerApps, pressComputerKey, screenshotComputerApp } from "./computerUseOps.js";
 
 const STRUCTURED_STRING_MAX_CHARS = 30_000;
 
@@ -388,7 +389,12 @@ const FULL_TOOL_NAMES = [
   "codex_context",
   "export_pro_context",
   "handoff_to_agent",
-  "handoff_to_codex"
+  "handoff_to_codex",
+  "computer_list_apps",
+  "computer_get_state",
+  "computer_screenshot",
+  "computer_click",
+  "computer_press_key"
 ] as const;
 
 const CONNECTION_TEST_HIDDEN_TOOLS = new Set<string>([
@@ -433,6 +439,17 @@ function toolNamesForMode(config: CodexProConfig): string[] {
     const analysisIndex = names.indexOf("inspect_workspace");
     if (analysisIndex !== -1) names.splice(analysisIndex, 1);
   }
+  if (config.computerUseMode === "off") {
+    for (const computerTool of ["computer_list_apps", "computer_get_state", "computer_screenshot", "computer_click", "computer_press_key"]) {
+      const toolIndex = names.indexOf(computerTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
+  } else if (config.computerUseMode === "observe") {
+    for (const computerTool of ["computer_click", "computer_press_key"]) {
+      const toolIndex = names.indexOf(computerTool);
+      if (toolIndex !== -1) names.splice(toolIndex, 1);
+    }
+  }
   if (config.connectionTest) {
     for (const hiddenTool of CONNECTION_TEST_HIDDEN_TOOLS) {
       const toolIndex = names.indexOf(hiddenTool);
@@ -468,6 +485,10 @@ function shouldRegisterTool(config: CodexProConfig, name: string): boolean {
   if (name === "read_codex_session") return config.codexSessions === "read";
   if (name === "inspect_workspace" && !config.analysisEnabled) return false;
   if (name === "handoff_to_agent" && config.writeMode === "handoff") return true;
+  if (name.startsWith("computer_")) {
+    if (config.toolMode !== "full" || config.computerUseMode === "off") return false;
+    if (config.computerUseMode === "observe" && (name === "computer_click" || name === "computer_press_key")) return false;
+  }
   if (config.toolMode === "full") return true;
   if (config.toolMode === "minimal") return MINIMAL_TOOLS.has(name);
   return STANDARD_TOOLS.has(name);
@@ -500,6 +521,15 @@ function serverInstructions(config: CodexProConfig): string {
     config.bashMode === "off"
       ? "5. Bash is disabled and the bash tool is unavailable. Do not attempt shell commands."
       : "5. Use bash only for meaningful verification commands such as npm test, npm run build, lint, typecheck, or an existing project script.";
+  const computerInstruction = config.computerUseMode === "off"
+    ? ""
+    : [
+        "Local Computer Use is enabled in " + config.computerUseMode + " mode for an explicit application allowlist.",
+        "Prefer repository tools, application APIs, CLI, and test bridges before GUI automation.",
+        "Before a state-dependent GUI action, call computer_get_state and use the fresh accessibility element id.",
+        "After an interaction, read fresh state again before deciding the next action.",
+        "Do not save or close unsaved user documents unless the user explicitly requested it."
+      ].join(" ");
 
   return [
     "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
@@ -511,6 +541,7 @@ function serverInstructions(config: CodexProConfig): string {
     editInstruction,
     bashInstruction,
     "6. Keep tool calls minimal. Prefer one targeted search plus show_changes instead of repeated broad inspection calls.",
+    computerInstruction,
     config.codexSessions !== "off"
       ? `7. Codex session history access is enabled in ${config.codexSessions} mode. Use it only when the user asks for local Codex session history.`
       : "",
@@ -520,7 +551,7 @@ function serverInstructions(config: CodexProConfig): string {
         ? `8. Bash session label for this server is "${config.bashSessionId}".`
         : "",
     "",
-    `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}.`
+    `Current modes: tool=${config.toolMode}, bash=${config.bashMode}, write=${config.writeMode}, computer_use=${config.computerUseMode}.`
   ].filter(Boolean).join("\n");
 }
 
@@ -1080,6 +1111,7 @@ export function createCodexProServer(
         codexDir: config.codexDir,
         writeMode: config.writeMode,
         toolMode: config.toolMode,
+        computerUse: computerUseStatus(config),
         exposeAbsolutePaths: config.exposeAbsolutePaths,
         toolCards: config.toolCards,
         connectionTest: config.connectionTest,
@@ -1102,6 +1134,92 @@ export function createCodexProServer(
         registeredToolCount: registeredToolNames(server).length
       };
       return textResult(`# CodexPro Server Config\n\n${JSON.stringify(safeConfig, null, 2)}`, safeConfig);
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "computer_list_apps",
+    {
+      title: "列出允许的本地应用",
+      description: "列出 Computer Use allowlist 中当前正在运行的本地应用。不会枚举或返回未授权应用。",
+      inputSchema: {},
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async () => {
+      const apps = await listComputerApps(config);
+      return textResult(`# 本地应用\n\n${JSON.stringify(apps, null, 2)}`, { apps });
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "computer_get_state",
+    {
+      title: "读取本地应用界面",
+      description: "读取一个已授权 macOS 应用的 Accessibility Tree。交互前后应重新读取，元素 id 只对当前界面状态有效。",
+      inputSchema: {
+        app_id: z.string().min(1).describe("允许的 macOS bundle id，例如 com.microsoft.Word。"),
+        max_elements: z.number().int().min(1).max(1000).optional().describe("最多返回的 AX 元素数，默认 400，最大 1000。")
+      },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const state = await getComputerState(config, args.app_id, args.max_elements ?? 400);
+      return textResult(`# ${state.app_name}\n\n${JSON.stringify(state, null, 2)}`, state as unknown as Record<string, unknown>);
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "computer_screenshot",
+    {
+      title: "截取本地应用窗口",
+      description: "截取一个已授权本地应用当前最大的可见窗口。需要 macOS 14+ 和屏幕录制权限。",
+      inputSchema: { app_id: z.string().min(1) },
+      annotations: READ_ONLY_ANNOTATIONS
+    },
+    async (args) => {
+      const image = await screenshotComputerApp(config, args.app_id);
+      return {
+        content: [{ type: "image", data: image.data, mimeType: image.mimeType }],
+        structuredContent: { app_id: args.app_id, width: image.width, height: image.height }
+      };
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "computer_click",
+    {
+      title: "点击本地应用元素",
+      description: "对已授权应用中由最近一次 computer_get_state 返回的 AX 元素执行原生 Press。仅 interact 模式可用。",
+      inputSchema: { app_id: z.string().min(1), element_id: z.string().min(1) },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const result = await clickComputerElement(config, args.app_id, args.element_id);
+      return textResult(`# Computer Use\n\n已点击 ${args.element_id}`, result);
+    }
+  );
+
+  registerCodexTool(
+    config,
+    server,
+    "computer_press_key",
+    {
+      title: "向本地应用发送按键",
+      description: "向已授权应用发送一个受限键盘组合，例如 cmd+s、return、escape、left。仅 interact 模式可用。",
+      inputSchema: { app_id: z.string().min(1), key: z.string().min(1).max(64) },
+      annotations: HANDOFF_WRITE_ANNOTATIONS
+    },
+    async (args) => {
+      const result = await pressComputerKey(config, args.app_id, args.key);
+      return textResult(`# Computer Use\n\n已发送按键 ${args.key}`, result);
     }
   );
 

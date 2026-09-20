@@ -10,6 +10,8 @@ function printHelp(): void {
 
 Usage:
   codexpro-mcp --root /path/to/repo [--allow-root /path]
+               [--computer-use <off|observe|interact>]
+               [--computer-use-apps <bundle-id,...>]
   codexpro-mcp --version
   codexpro-mcp --help
 

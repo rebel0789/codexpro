@@ -9,6 +9,10 @@ export type BashRuntime = "auto" | "native-bash" | "wsl";
 export type CodexSessionsMode = "off" | "metadata" | "read";
 export type WriteMode = "off" | "handoff" | "workspace";
 export type ToolMode = "minimal" | "standard" | "full";
+export type ComputerUseMode = "off" | "observe" | "interact";
+export const COMPUTER_USE_MODES = ["off", "observe", "interact"] as const;
+export const MAX_COMPUTER_USE_APPS = 64;
+const COMPUTER_USE_APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 export const MIN_HTTP_TOKEN_BYTES = 24;
 export const MAX_BASH_TIMEOUT_MS = 900_000;
 
@@ -31,6 +35,8 @@ export interface CodexProConfig {
   codexDir: string;
   writeMode: WriteMode;
   toolMode: ToolMode;
+  computerUseMode: ComputerUseMode;
+  computerUseAllowedApps: string[];
   exposeAbsolutePaths: boolean;
   inheritEnv: boolean;
   maxReadBytes: number;
@@ -205,6 +211,24 @@ function toolModeFrom(value: string | undefined): ToolMode {
   return "standard";
 }
 
+export function computerUseModeFrom(value: string | undefined): ComputerUseMode {
+  if (value === "observe" || value === "interact") return value;
+  return "off";
+}
+
+export function computerUseAllowedAppsFrom(value: string | undefined): string[] {
+  const apps = [...new Set(splitList(value, ","))];
+  if (apps.length > MAX_COMPUTER_USE_APPS) {
+    throw new Error(`CODEXPRO_COMPUTER_USE_APPS supports at most ${MAX_COMPUTER_USE_APPS} bundle ids.`);
+  }
+  for (const appId of apps) {
+    if (!COMPUTER_USE_APP_ID_PATTERN.test(appId)) {
+      throw new Error(`CODEXPRO_COMPUTER_USE_APPS contains an invalid macOS bundle id: ${appId}`);
+    }
+  }
+  return apps;
+}
+
 function widgetDomainFrom(value: string | undefined): string {
   const raw = value?.trim() || "https://rebel0789.github.io";
   let parsed: URL;
@@ -296,6 +320,8 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
         : undefined;
   const writeArg = typeof args.write === "string" ? args.write : undefined;
   const toolModeArg = typeof args["tool-mode"] === "string" ? args["tool-mode"] : undefined;
+  const computerUseArg = typeof args["computer-use"] === "string" ? args["computer-use"] : undefined;
+  const computerUseAppsArg = typeof args["computer-use-apps"] === "string" ? args["computer-use-apps"] : undefined;
   const widgetDomainArg = typeof args["widget-domain"] === "string" ? args["widget-domain"] : undefined;
   const toolCardsArg =
     args["tool-cards"] === true
@@ -343,6 +369,8 @@ export function loadConfig(argv = process.argv.slice(2)): CodexProConfig {
     codexDir: expandHome(codexDirArg || process.env.CODEXPRO_CODEX_DIR || path.join(os.homedir(), ".codex")),
     writeMode: writeModeFrom(writeArg ?? process.env.CODEXPRO_WRITE_MODE),
     toolMode: toolModeFrom(toolModeArg ?? process.env.CODEXPRO_TOOL_MODE),
+    computerUseMode: computerUseModeFrom(computerUseArg ?? process.env.CODEXPRO_COMPUTER_USE),
+    computerUseAllowedApps: computerUseAllowedAppsFrom(computerUseAppsArg ?? process.env.CODEXPRO_COMPUTER_USE_APPS),
     exposeAbsolutePaths: boolFrom(process.env.CODEXPRO_EXPOSE_ABSOLUTE_PATHS, false),
     inheritEnv: process.env.CODEXPRO_INHERIT_ENV === "1",
     maxReadBytes: numberFrom(process.env.CODEXPRO_MAX_READ_BYTES, 180_000, 4_000, 2_000_000),

@@ -32,6 +32,7 @@ CodexPro can expose:
 - optional ChatGPT attachment import through `import_file`, which downloads only platform-provided HTTPS file references from approved origins and never accepts arbitrary model-supplied URLs
 - optional local handoff execution through `codexpro execute-handoff`, run from the user's terminal only
 - optional local execute/review looping through `codexpro loop-handoff`, run from the user's terminal only with a user-provided reviewer command and iteration limit
+- optional macOS Computer Use, limited to an explicit bundle-id allowlist; `observe` reads Accessibility state and screenshots, while `interact` can emit native click/key events
 
 ## Failure Model
 
@@ -53,6 +54,10 @@ Review changes against these failure modes before release:
 | Remote MCP tool runs Codex/OpenCode/Pi directly | Agent execution remains a user-started CLI/watch process on the local machine. |
 | Autonomous loop drives ChatGPT Web or bypasses approvals | `loop-handoff` only runs local terminal commands over `.ai-bridge` files; it does not resume browser sessions, approve prompts, or expose a remote MCP executor. |
 | Reviewer masks a failed external command | `loop-handoff` requires explicit reviewer verdict assignments and rejects reviewer `PASS` after failed executor, test, or reviewer commands unless the user opts into the supported executor/test override behavior. |
+| ChatGPT controls an unintended desktop application | Computer Use is off by default, requires full tool mode, filters running apps by an explicit bundle-id allowlist, and exposes click/key events only in `interact` mode. |
+| A stale Accessibility element id triggers the wrong action | Element ids are paths from one Accessibility snapshot; call `computer_get_state` immediately before each state-dependent action and treat ids as invalid after any UI change. |
+| GUI data or screenshots expose sensitive content | Accessibility values are bounded and screenshots are returned only for allowlisted apps, but the current window may still contain secrets; keep the allowlist narrow and do not share tool output. |
+| Computer Use is enabled on an unsupported host | The native backend is macOS-only and screenshot capture requires macOS 14+ plus Accessibility and Screen Recording permissions; other hosts must keep the mode off. |
 
 The main risks are:
 
@@ -63,6 +68,7 @@ The main risks are:
 - executing an untrusted `.ai-bridge/current-plan.md` or custom `execute-handoff --command`
 - running `loop-handoff` with an untrusted reviewer command or without a small `--max-iters`
 - adding overly broad allowed roots
+- enabling Computer Use with an overly broad application allowlist or `interact` when read-only observation is sufficient
 - leaking a `codexpro_token` or Cloudflare tunnel token
 - trusting a downloaded `cloudflared` binary without understanding where it came from
 
@@ -119,6 +125,9 @@ codexpro start \
 - Keep `loop-handoff` local. Do not use it to automate ChatGPT Web, Codex approvals, account access, third-party Pro sites, quota limits, or product safety prompts.
 - Use default agent mode only with trusted ChatGPT sessions and repo-specific roots.
 - Use `--no-bash` when ChatGPT should never trigger shell commands in the workspace.
+- Keep Computer Use off unless GUI inspection or interaction is required. Enable it only with `--tool-mode full` and a narrow `--computer-use-apps` bundle-id list; use `observe` before considering `interact`.
+- Grant Accessibility and Screen Recording only to the terminal that runs CodexPro. Treat AX state, screenshots, and native input as sensitive local operations.
+- Refresh `computer_get_state` before clicks or key events. Never use Computer Use to save or close a user's unsaved document unless the user explicitly requested that exact action.
 - Use `--bash-session <id> --require-bash-session` when bash should be enabled only for calls that explicitly target this local CodexPro terminal label.
 - Keep Codex session history access off unless needed. `--codex-sessions metadata` only lists local Codex JSONL metadata; `--codex-sessions read` allows bounded transcript reads.
 - Keep `CODEXPRO_CONTEXT_DIR` as a workspace-relative hidden directory such as `.ai-bridge`; CodexPro rejects source, build, dependency, credential, and absolute context directories.

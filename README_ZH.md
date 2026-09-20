@@ -81,6 +81,30 @@ codexpro start
 - 在 `.ai-bridge` 下写计划
 - 为不能调工具的会话导出 context bundle
 
+## macOS Computer Use（可选）
+
+Computer Use 默认关闭，并且首版只支持 macOS。它只在 `--tool-mode full` 下暴露；`observe` 只提供运行应用列表、Accessibility 状态读取和窗口截图，`interact` 才额外提供显式应用 allowlist 内的点击和受限按键。
+
+```bash
+codexpro start \
+  --tool-mode full \
+  --computer-use observe \
+  --computer-use-apps com.microsoft.Word,com.apple.TextEdit
+```
+
+开启前请在 macOS 中为运行 CodexPro 的终端授予 **辅助功能（Accessibility）** 和 **屏幕录制（Screen Recording）** 权限。每次 GUI 交互前都要重新调用 `computer_get_state`，因为返回的 Accessibility element id 只对当时的界面状态有效。不要把截图或 AX 状态当作无敏感内容；它们可能包含当前窗口中的文字。
+
+Computer Use 不会启动第二个 Codex agent 或模型回合；工具执行本身不会额外创建 Codex 回合，但当前 ChatGPT 会话仍按正常规则消耗其用量。该实现不提供浏览器自动化，也不会绕过 macOS 权限提示。不要保存或关闭用户未保存的文档，除非用户明确要求。
+
+配置文件方式：
+
+```dotenv
+CODEXPRO_COMPUTER_USE=observe
+CODEXPRO_COMPUTER_USE_APPS=com.microsoft.Word,com.apple.TextEdit
+```
+
+应用 bundle id 必须显式列出；留空 allowlist 时不会返回或控制任何应用。完整设置也可通过 `codexpro setup`、`codexpro settings set` 和 `codexpro doctor` 完成或检查。
+
 ## 多项目
 
 一个 CodexPro 进程可以允许多个仓库：

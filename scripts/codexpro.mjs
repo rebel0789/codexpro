@@ -19,6 +19,9 @@ import {
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const UNTRACKED_FILE_HASH_BYTES = 64 * 1024;
 const UNTRACKED_SYMLINK_TARGET_BYTES = 512;
+const COMPUTER_USE_MODES = ['off', 'observe', 'interact'];
+const MAX_COMPUTER_USE_APPS = 64;
+const COMPUTER_USE_APP_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$/;
 
 function packageVersion() {
   return JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')).version;
@@ -94,6 +97,12 @@ Options:
                              Tool surface exposed to ChatGPT. Default: standard.
                              minimal = config/self-test plus open/read/write/edit/apply_patch/bash/show_changes.
                              full = expose every compatibility and advanced tool.
+  --computer-use <off|observe|interact>
+                             Optional macOS GUI tools. Default: off; requires --tool-mode full.
+                             observe = list apps, read Accessibility state, and screenshot.
+                             interact = observe plus allowlisted click and key actions.
+  --computer-use-apps <bundle-id,...>
+                             Explicit macOS application bundle-id allowlist. Required for GUI access.
   --widget-domain <origin>   Dedicated HTTPS origin for ChatGPT widget iframes.
                              Required for app submission. Default: https://rebel0789.github.io.
   --tool-cards <on|off>      Opt in to ChatGPT widget metadata on tool descriptors. Default: off.
@@ -550,6 +559,31 @@ function validateChoice(flag, value, allowed) {
   throw new Error(`--${flag} must be ${allowed.slice(0, -1).join(', ')}, or ${allowed.at(-1)}`);
 }
 
+function computerUseModeOption(args, profile, fallback = 'off') {
+  const value = optionValue(args, profile, 'computerUse', ['CODEXPRO_COMPUTER_USE'], fallback);
+  return validateChoice('computer-use', String(value), COMPUTER_USE_MODES);
+}
+
+function computerUseAppsFrom(value) {
+  const parts = Array.isArray(value)
+    ? value.flatMap((item) => String(item).split(','))
+    : String(value ?? '').split(',');
+  const apps = [...new Set(parts.map((item) => item.trim()).filter(Boolean))];
+  if (apps.length > MAX_COMPUTER_USE_APPS) {
+    throw new Error(`--computer-use-apps supports at most ${MAX_COMPUTER_USE_APPS} bundle ids`);
+  }
+  for (const appId of apps) {
+    if (!COMPUTER_USE_APP_ID_PATTERN.test(appId)) {
+      throw new Error(`--computer-use-apps contains an invalid macOS bundle id: ${appId}`);
+    }
+  }
+  return apps;
+}
+
+function computerUseAppsOption(args, profile) {
+  return computerUseAppsFrom(optionValue(args, profile, 'computerUseApps', ['CODEXPRO_COMPUTER_USE_APPS'], ''));
+}
+
 function optionalChoice(flag, value, allowed) {
   if (!value) return '';
   return validateChoice(flag, value, allowed);
@@ -800,6 +834,8 @@ function saveRuntimeConnection(root, details, options = {}) {
     requireBashSession: Boolean(options.requireBashSession),
     write: options.write ?? '',
     toolMode: options.toolMode ?? '',
+    computerUse: options.computerUse ?? 'off',
+    computerUseApps: Array.isArray(options.computerUseApps) ? options.computerUseApps : [],
     toolCards: Boolean(options.toolCards)
   };
   fs.writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, { mode: 0o600 });
@@ -3115,6 +3151,21 @@ async function runDoctor(argv) {
     writeError = error instanceof Error ? error.message : String(error);
   }
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
+  const rawComputerUse = optionValue(args, profile, 'computerUse', ['CODEXPRO_COMPUTER_USE'], 'off');
+  let computerUse = String(rawComputerUse);
+  let computerUseError = '';
+  try {
+    computerUse = computerUseModeOption(args, profile);
+  } catch (error) {
+    computerUseError = error instanceof Error ? error.message : String(error);
+  }
+  let computerUseApps = [];
+  let computerUseAppsError = '';
+  try {
+    computerUseApps = computerUseAppsOption(args, profile);
+  } catch (error) {
+    computerUseAppsError = error instanceof Error ? error.message : String(error);
+  }
   const stableHostname = args.hostname
     ?? args.url
     ?? process.env.CODEXPRO_PUBLIC_HOSTNAME
@@ -3142,7 +3193,7 @@ async function runDoctor(argv) {
   console.log('');
   printBox('CodexPro doctor', [
     labelValue('Workspace', root),
-    labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}`),
+    labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}  computer_use=${computerUse}`),
     labelValue('Tunnel', tunnel),
     ...(stableHostname ? [labelValue('Hostname', stableHostname)] : []),
     ...(profile.profilePath ? [labelValue('Profile', profile.profilePath)] : [])
@@ -3156,6 +3207,19 @@ async function runDoctor(argv) {
   record(['off', 'safe', 'full'].includes(bash) ? 'ok' : 'fail', 'Bash mode', ['off', 'safe', 'full'].includes(bash) ? bash : '--bash must be off, safe, or full');
   record(!writeError && ['off', 'handoff', 'workspace'].includes(write) ? 'ok' : 'fail', 'Write mode', writeError || write);
   record(['minimal', 'standard', 'full'].includes(toolMode) ? 'ok' : 'fail', 'Tool mode', ['minimal', 'standard', 'full'].includes(toolMode) ? toolMode : '--tool-mode must be minimal, standard, or full');
+  record(!computerUseError && COMPUTER_USE_MODES.includes(computerUse) ? 'ok' : 'fail', 'Computer Use', computerUseError || computerUse);
+  if (computerUse !== 'off') {
+    record(toolMode === 'full' ? 'ok' : 'fail', 'CU tool mode', toolMode === 'full' ? 'full tool mode enabled' : 'set --tool-mode full to expose Computer Use tools');
+    record(process.platform === 'darwin' ? 'ok' : 'fail', 'CU platform', process.platform === 'darwin' ? 'macOS native backend available' : 'Computer Use currently requires macOS');
+    record(
+      computerUseAppsError ? 'fail' : computerUseApps.length ? 'ok' : 'warn',
+      'CU allowlist',
+      computerUseAppsError || (computerUseApps.length ? computerUseApps.join(', ') : 'empty; pass --computer-use-apps <bundle-id,...>')
+    );
+    if (process.platform === 'darwin') {
+      record(commandExists('xcrun') ? 'ok' : 'warn', 'CU compiler', commandExists('xcrun') ? 'xcrun/swiftc found' : 'xcrun not found; helper builds on first use');
+    }
+  }
   record(clipboard ? 'ok' : 'warn', 'Clipboard', clipboard || 'not found; URL will be printed for manual copy');
   record(browser ? 'ok' : 'warn', 'Browser open', browser || 'not found; open ChatGPT manually');
 
@@ -3316,6 +3380,11 @@ function profileFromPreference(root, args, profile, preference) {
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = optionalWriteOption(args, profile, mode);
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], '');
+  const computerUse = computerUseModeOption(args, profile);
+  const computerUseApps = computerUseAppsOption(args, profile);
+  if (computerUse !== 'off' && toolMode !== 'full') {
+    throw new Error('--computer-use observe or interact requires --tool-mode full.');
+  }
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
   const existingToken = optionValue(args, profile, 'token', ['CODEXPRO_HTTP_TOKEN', 'CODEBASE_BRIDGE_HTTP_TOKEN'], '');
   const token = preference.tunnel === 'none' ? existingToken : stableToken(existingToken);
@@ -3341,6 +3410,8 @@ function profileFromPreference(root, args, profile, preference) {
     ...(requireBashSession ? { requireBashSession: true } : {}),
     ...(write ? { write } : {}),
     ...(toolMode ? { toolMode } : {}),
+    computerUse,
+    ...(computerUseApps.length ? { computerUseApps } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
     ...toolCardsProfileEntry(args, profile),
     ...(allowedRoots.length ? { allowedRoots } : {}),
@@ -3441,10 +3512,20 @@ async function runSetupWizard(argv) {
             : 'quick';
     const defaultPort = String(optionValue(defaults, profile, 'port', ['CODEXPRO_PORT'], '8787'));
     const defaultMode = normalizeSetupChoice(optionValue(defaults, profile, 'mode', ['CODEXPRO_MODE'], 'agent'), ['agent', 'handoff', 'pro'], 'agent');
+    const defaultComputerUse = computerUseModeOption(defaults, profile);
+    const defaultComputerUseApps = computerUseAppsOption(defaults, profile);
 
     const port = normalizePort(await ask(rl, 'Which local port should CodexPro use?', defaultPort));
     const modeAnswer = await ask(rl, 'Mode: agent, handoff, or pro?', defaultMode);
     const mode = normalizeSetupChoice(modeAnswer, ['agent', 'handoff', 'pro'], defaultMode);
+    const computerUseAnswer = await ask(rl, 'Computer Use: off, observe, or interact?', defaultComputerUse);
+    const computerUse = normalizeSetupChoice(computerUseAnswer, COMPUTER_USE_MODES, defaultComputerUse);
+    const computerUseAppsAnswer = await ask(
+      rl,
+      'Computer Use allowed macOS bundle ids (comma-separated; blank for none)',
+      defaultComputerUseApps.join(',')
+    );
+    const computerUseApps = computerUseAppsFrom(computerUseAppsAnswer);
 
     printBox('Public URL', [
       'ChatGPT needs an HTTPS URL it can reach.',
@@ -3464,8 +3545,13 @@ async function runSetupWizard(argv) {
     const codexDir = optionValue(defaults, profile, 'codexDir', ['CODEXPRO_CODEX_DIR'], '');
     const write = optionalWriteOption(defaults, profile, mode);
     const toolMode = optionalChoice('tool-mode', optionValue(defaults, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], ''), ['minimal', 'standard', 'full']);
+    if (computerUse !== 'off' && toolMode !== 'full') {
+      throw new Error('Computer Use observe/interact requires full tool mode. Re-run setup with --tool-mode full.');
+    }
     const widgetDomain = optionValue(defaults, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], '');
     const toolCardsEntry = toolCardsProfileEntry(defaults, profile);
+    args.push('--computer-use', computerUse);
+    if (computerUseApps.length) args.push('--computer-use-apps', computerUseApps.join(','));
     if (bash) args.push('--bash', bash);
     if (bashTranscript !== 'compact') args.push('--bash-transcript', bashTranscript);
     if (codexSessions !== 'off') args.push('--codex-sessions', codexSessions);
@@ -3569,6 +3655,8 @@ async function runSetupWizard(argv) {
         ...(requireBashSession ? { requireBashSession: true } : {}),
         ...(write ? { write } : {}),
         ...(toolMode ? { toolMode } : {}),
+        computerUse,
+        ...(computerUseApps.length ? { computerUseApps } : {}),
         ...(widgetDomain ? { widgetDomain } : {}),
         ...toolCardsEntry,
         ...(allowedRoots.length ? { allowedRoots } : {}),
@@ -3617,6 +3705,10 @@ function printProfile(root, profile) {
     ...(safe.bash ? [labelValue('Bash', safe.bash)] : []),
     ...(safe.write ? [labelValue('Write', safe.write)] : []),
     ...(safe.toolMode ? [labelValue('Tool mode', safe.toolMode)] : []),
+    ...(safe.computerUse ? [labelValue('Computer Use', safe.computerUse)] : []),
+    ...(Array.isArray(safe.computerUseApps) && safe.computerUseApps.length
+      ? [labelValue('CU allowlist', safe.computerUseApps.join(', '))]
+      : []),
     ...(safe.toolCards !== undefined ? [labelValue('Tool cards', safe.toolCards ? 'on' : 'off')] : []),
     labelValue('Bash transcript', safe.bashTranscript ?? 'compact'),
     labelValue('Codex sessions', safe.codexSessions ?? 'off'),
@@ -3670,6 +3762,11 @@ function saveSettingsFromArgs(root, args, profile) {
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = writeOption(args, profile, mode);
   const bash = optionalChoice('bash', optionValue(args, profile, 'bash', ['CODEXPRO_BASH_MODE'], profile.bash ?? ''), ['off', 'safe', 'full']);
+  const computerUse = computerUseModeOption(args, profile);
+  const computerUseApps = computerUseAppsOption(args, profile);
+  if (computerUse !== 'off' && toolMode !== 'full') {
+    throw new Error('--computer-use observe or interact requires --tool-mode full.');
+  }
   const tunnelName = tunnel === 'cloudflare-named' ? (args.tunnelName ?? profile.tunnelName ?? '') : '';
   const ngrokConfig = tunnel === 'ngrok'
     ? resolveConfigPath(root, optionValue(args, profile, 'ngrokConfig', ['NGROK_CONFIG', 'CODEXPRO_NGROK_CONFIG'], ''))
@@ -3702,6 +3799,8 @@ function saveSettingsFromArgs(root, args, profile) {
     ...(requireBashSession ? { requireBashSession: true } : {}),
     ...(mode !== 'agent' || args.write !== undefined || profile.write ? { write } : {}),
     ...(toolMode ? { toolMode } : {}),
+    computerUse,
+    ...(computerUseApps.length ? { computerUseApps } : {}),
     ...(widgetDomain ? { widgetDomain } : {}),
     ...toolCardsProfileEntry(args, profile),
     ...(allowedRoots.length ? { allowedRoots } : {}),
@@ -4102,6 +4201,8 @@ async function main() {
   const { bashSession, requireBashSession } = bashSessionOptions(args, profile);
   const write = writeOption(args, profile, mode);
   const toolMode = optionValue(args, profile, 'toolMode', ['CODEXPRO_TOOL_MODE'], 'standard');
+  const computerUse = computerUseModeOption(args, profile);
+  const computerUseApps = computerUseAppsOption(args, profile);
   const widgetDomain = optionValue(args, profile, 'widgetDomain', ['CODEXPRO_WIDGET_DOMAIN'], 'https://rebel0789.github.io');
   const toolCards = optionBool(args, profile, 'toolCards', ['CODEXPRO_TOOL_CARDS'], false);
   validateChoice('bash', bash, ['off', 'safe', 'full']);
@@ -4110,6 +4211,9 @@ async function main() {
   }
   validateChoice('write', write, ['off', 'handoff', 'workspace']);
   validateChoice('tool-mode', toolMode, ['minimal', 'standard', 'full']);
+  if (computerUse !== 'off' && toolMode !== 'full') {
+    throw new Error('--computer-use observe or interact requires --tool-mode full.');
+  }
 
   if (args.token && args.tokenFile) throw new Error('Use either --token or --token-file, not both.');
   let token = args.noAuth
@@ -4135,6 +4239,8 @@ async function main() {
     CODEXPRO_CODEX_SESSIONS: codexSessions,
     CODEXPRO_WRITE_MODE: write,
     CODEXPRO_TOOL_MODE: toolMode,
+    CODEXPRO_COMPUTER_USE: computerUse,
+    CODEXPRO_COMPUTER_USE_APPS: computerUseApps.join(','),
     CODEXPRO_WIDGET_DOMAIN: widgetDomain,
     CODEXPRO_TOOL_CARDS: toolCards ? '1' : '0',
     CODEXPRO_CONNECTION_TEST: connectionTest ? '1' : '0',
@@ -4162,7 +4268,8 @@ async function main() {
   printBox('CodexPro start', [
     labelValue('Workspace', root),
     ...(allowRoots.length > 1 ? [labelValue('Projects', allowRoots.slice(1).join(', '))] : []),
-    labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}`),
+    labelValue('Mode', `${mode}  tools=${toolMode}  write=${write}  bash=${bash}  computer_use=${computerUse}`),
+    ...(computerUseApps.length ? [labelValue('CU allowlist', computerUseApps.join(', '))] : []),
     labelValue('Bash transcript', bashTranscript),
     labelValue('Bash runtime', `${bashRuntime}${bashExecutable ? ` (${bashExecutable})` : ''}`),
     labelValue('Codex sessions', codexSessions),
@@ -4203,6 +4310,8 @@ async function main() {
     tunnel,
     mode,
     toolMode,
+    computerUse,
+    computerUseApps,
     write,
     bash,
     bashTranscript,
