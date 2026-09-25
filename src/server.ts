@@ -817,17 +817,19 @@ function buildAgentPlanBody(options: {
   agent: string;
   agentName: string;
   model?: string;
+  reasoningEffort?: string;
   statusPath: string;
   diffPath: string;
   executionLogPath: string;
 }): string {
   const modelLine = options.model ? `Model: ${options.model}\n` : "";
+  const reasoningEffortLine = options.reasoningEffort ? `Reasoning effort: ${options.reasoningEffort}\n` : "";
   return `# ${options.title}
 
 Updated: ${new Date().toISOString()}
 Workspace: ${options.workspace.root}
 Target agent: ${options.agentName} (${options.agent})
-${modelLine}
+${modelLine}${reasoningEffortLine}
 ## Plan
 
 ${options.plan.trim()}
@@ -851,6 +853,7 @@ async function writeAgentHandoff(
     agent: string;
     agentName?: string;
     model?: string;
+    reasoningEffort?: string;
     title: string;
     plan: string;
     append: boolean;
@@ -860,6 +863,7 @@ async function writeAgentHandoff(
   agent: string;
   agentName: string;
   model?: string;
+  reasoningEffort?: string;
   title: string;
   planPath: string;
   statusPath: string;
@@ -873,6 +877,7 @@ async function writeAgentHandoff(
   const agent = normalizeAgentId(options.agent);
   const agentName = displayAgentName(agent, options.agentName);
   const model = options.model ? cleanOneLine(options.model, "", 120) : undefined;
+  const reasoningEffort = options.reasoningEffort ? cleanOneLine(options.reasoningEffort, "", 120) : undefined;
   const plan = String(options.plan ?? "").trim();
   if (!plan) throw new CodexProError("plan must not be empty.");
   const planPath = `${config.contextDir}/current-plan.md`;
@@ -888,6 +893,7 @@ async function writeAgentHandoff(
     agent,
     agentName,
     model,
+    reasoningEffort,
     statusPath,
     diffPath,
     executionLogPath
@@ -904,6 +910,7 @@ async function writeAgentHandoff(
     agent,
     agent_name: agentName,
     model,
+    reasoning_effort: reasoningEffort,
     title: options.title,
     plan_path: planPath,
     status_path: statusPath,
@@ -929,6 +936,7 @@ async function writeAgentHandoff(
     agent,
     agentName,
     model,
+    reasoningEffort,
     title: options.title,
     planPath,
     statusPath,
@@ -944,7 +952,7 @@ const READ_ONLY_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destru
 const SESSION_READ_ANNOTATIONS = { readOnlyHint: true, openWorldHint: false, destructiveHint: false, idempotentHint: false };
 const LOCAL_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
 const BASH_ANNOTATIONS = { readOnlyHint: false, openWorldHint: true, destructiveHint: true, idempotentHint: false };
-const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: false, idempotentHint: false };
+const HANDOFF_WRITE_ANNOTATIONS = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
 
 export function createCodexProServer(
   config: CodexProConfig,
@@ -3003,12 +3011,13 @@ export function createCodexProServer(
     {
       title: "Handoff To Agent",
       description:
-        "Write .ai-bridge/current-plan.md for Codex, OpenCode, Pi, or another local implementation agent. This only creates handoff files; it does not execute local agent commands.",
+        "Write .ai-bridge/current-plan.md for Codex, OpenCode, Pi, or another local implementation agent. By default this replaces the existing plan; set append=true to append instead. This only writes handoff files; it does not execute the target agent, run shell commands, push code, or contact external services.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
         agent: z.string().optional().describe("Target agent id, for example codex, opencode, pi, or custom. Default: custom."),
         agent_name: z.string().optional().describe("Human-readable agent name for custom agents."),
         model: z.string().optional().describe("Optional model identifier to include in the handoff plan."),
+        reasoning_effort: z.string().optional().describe("Optional opaque reasoning effort to include in the handoff plan; the local executor validates provider support."),
         title: z.string().optional().describe("Short task title."),
         plan: z.string().describe("Detailed implementation plan for the local agent."),
         append: z.boolean().optional().describe("Append to existing current-plan.md instead of overwriting. Default: false.")
@@ -3026,6 +3035,7 @@ export function createCodexProServer(
         agent: args.agent ?? "custom",
         agentName: args.agent_name,
         model: args.model,
+        reasoningEffort: args.reasoning_effort,
         title: cleanOneLine(args.title, "Agent implementation plan"),
         plan: String(args.plan ?? ""),
         append: parseBool(args.append, false),
@@ -3035,7 +3045,7 @@ export function createCodexProServer(
       const text = `# Handoff To Agent
 
 Agent: ${result.agentName} (${result.agent})
-${result.model ? `Model: ${result.model}\n` : ""}Wrote ${result.planPath}.
+${result.model ? `Model: ${result.model}\n` : ""}${result.reasoningEffort ? `Reasoning effort: ${result.reasoningEffort}\n` : ""}Wrote ${result.planPath}.
 Status path: ${result.statusPath}
 Diff path: ${result.diffPath}
 Execution log: ${result.executionLogPath}
@@ -3052,6 +3062,7 @@ ${result.prompt}
         agent: result.agent,
         agent_name: result.agentName,
         model: result.model,
+        reasoning_effort: result.reasoningEffort,
         plan_path: result.planPath,
         status_path: result.statusPath,
         diff_path: result.diffPath,
@@ -3070,7 +3081,7 @@ ${result.prompt}
     "handoff_to_codex",
     {
       title: "Handoff To Codex",
-      description: "Compatibility wrapper for handoff_to_agent with agent=codex.",
+      description: "Write .ai-bridge/current-plan.md for Codex. By default this replaces the existing plan; set append=true to append instead. This only writes handoff files; it does not execute Codex, run shell commands, push code, or contact external services.",
       inputSchema: {
         workspace_id: z.string().optional().describe("Workspace id from open_workspace. Omit to use the workspace selected for this MCP session."),
         title: z.string().optional().describe("Short task title."),

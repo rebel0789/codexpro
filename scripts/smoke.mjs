@@ -243,6 +243,22 @@ for (const expected of ['server_config', 'codexpro_self_test', 'codexpro_invento
 }
 const toolCardUri = 'ui://widget/codexpro-tool-card-v10.html';
 const toolsByName = new Map(tools.tools.map((tool) => [tool.name, tool]));
+const effortSchema = toolsByName.get('handoff_to_agent')?.inputSchema?.properties?.reasoning_effort;
+if (effortSchema?.type !== 'string' || toolsByName.get('handoff_to_agent')?.inputSchema?.required?.includes('reasoning_effort')) {
+  throw new Error(`handoff_to_agent did not expose optional typed reasoning_effort: ${JSON.stringify(effortSchema)}`);
+}
+for (const name of ['handoff_to_agent', 'handoff_to_codex']) {
+  const descriptor = toolsByName.get(name);
+  const expectedAnnotations = { readOnlyHint: false, openWorldHint: false, destructiveHint: true, idempotentHint: false };
+  for (const [key, value] of Object.entries(expectedAnnotations)) {
+    if (descriptor?.annotations?.[key] !== value) {
+      throw new Error(`${name} tools/list annotation ${key} should be ${value}: ${JSON.stringify(descriptor?.annotations)}`);
+    }
+  }
+  if (!descriptor.description?.includes('replaces the existing plan') || !descriptor.description?.includes('append=true')) {
+    throw new Error(`${name} tools/list description does not explain replace/append behavior`);
+  }
+}
 if (toolsByName.get('bash')?.inputSchema?.properties?.timeout_ms?.maximum !== 900000) {
   throw new Error(`bash schema did not expose the stable 15-minute ceiling: ${JSON.stringify(toolsByName.get('bash')?.inputSchema)}`);
 }
@@ -1122,11 +1138,17 @@ const agentHandoff = await client.request('tools/call', {
     workspace_id: ws,
     agent: 'opencode',
     model: 'provider/cheap-model',
+    reasoning_effort: 'high',
     title: 'Smoke agent plan',
     plan: '- Verify demo.txt contains write.'
   }
 });
 if (agentHandoff.structuredContent.agent !== 'opencode') throw new Error('handoff_to_agent did not preserve target agent');
+if (agentHandoff.structuredContent.reasoning_effort !== 'high') throw new Error('handoff_to_agent did not preserve typed effort');
+const typedPlan = await fs.readFile(path.join(tmp, '.ai-bridge', 'current-plan.md'), 'utf8');
+if (!typedPlan.includes('Target agent: OpenCode (opencode)\nModel: provider/cheap-model\nReasoning effort: high\n\n## Plan')) {
+  throw new Error('handoff_to_agent did not serialize effort in the deterministic preamble');
+}
 const escapedHandoff = await client.request('tools/call', {
   name: 'handoff_to_agent',
   arguments: {
@@ -1138,6 +1160,8 @@ const escapedHandoff = await client.request('tools/call', {
   }
 });
 const escapedPrompt = escapedHandoff.content?.find?.((part) => part.type === 'text')?.text ?? '';
+const omittedEffortPlan = await fs.readFile(path.join(tmp, '.ai-bridge', 'current-plan.md'), 'utf8');
+if (omittedEffortPlan.includes('Reasoning effort:')) throw new Error('handoff_to_agent serialized an omitted effort');
 if (!escapedPrompt.includes("--model 'foo; touch /tmp/pwned'")) {
   throw new Error(`handoff_to_agent did not shell-quote the model hint: ${escapedPrompt}`);
 }
