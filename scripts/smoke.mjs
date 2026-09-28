@@ -77,6 +77,12 @@ assertCommand(['dist/http.js', '--version'], pkg.version);
 assertCommand(['dist/http.js', '--help'], 'CodexPro MCP HTTP server');
 
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-'));
+const relativeWorkspace = path.join(tmp, 'relative-workspace');
+await fs.mkdir(relativeWorkspace);
+await fs.writeFile(path.join(relativeWorkspace, 'relative.txt'), 'relative workspace\n', 'utf8');
+const nestedWorkspace = path.join(relativeWorkspace, 'nested-workspace');
+await fs.mkdir(nestedWorkspace);
+await fs.writeFile(path.join(nestedWorkspace, 'nested.txt'), 'nested workspace\n', 'utf8');
 const alternateWorkspace = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-smoke-alternate-'));
 await fs.writeFile(path.join(alternateWorkspace, 'selected.txt'), 'alternate workspace\n', 'utf8');
 await fs.writeFile(path.join(tmp, 'demo.txt'), 'alpha\nread\nread\nomega\n', 'utf8');
@@ -412,6 +418,29 @@ if (activeSmokeSkills.length !== 1 || activeSmokeSkills[0].source !== 'workspace
 }
 if (currentWithSkills.structuredContent.skill_inventory?.some?.((skill) => skill.name === 'outside-skill')) {
   throw new Error('open_current_workspace followed a symlinked workspace skill root outside the workspace');
+}
+const relativeOpened = await client.request('tools/call', {
+  name: 'open_workspace',
+  arguments: { root: 'relative-workspace', include_tree: false }
+});
+const realRelativeRoot = await fs.realpath(relativeWorkspace);
+if ((await fs.realpath(relativeOpened.structuredContent.root)).toLowerCase() !== realRelativeRoot.toLowerCase()) {
+  throw new Error(`relative open_workspace resolved ${relativeOpened.structuredContent.root}, expected ${realRelativeRoot}`);
+}
+const nestedOpened = await client.request('tools/call', {
+  name: 'open_workspace',
+  arguments: { root: 'nested-workspace', include_tree: false }
+});
+const realNestedRoot = await fs.realpath(nestedWorkspace);
+if ((await fs.realpath(nestedOpened.structuredContent.root)).toLowerCase() !== realNestedRoot.toLowerCase()) {
+  throw new Error(`selected-root relative open_workspace resolved ${nestedOpened.structuredContent.root}, expected ${realNestedRoot}`);
+}
+const absoluteReopened = await client.request('tools/call', {
+  name: 'open_workspace',
+  arguments: { root: tmp, include_tree: false }
+});
+if (absoluteReopened.structuredContent.workspace_id !== current.structuredContent.workspace_id) {
+  throw new Error(`absolute open_workspace behavior changed: ${absoluteReopened.structuredContent.root}`);
 }
 const alternate = await client.request('tools/call', {
   name: 'open_workspace',

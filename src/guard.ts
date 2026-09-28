@@ -77,7 +77,9 @@ export class WorkspaceManager {
 
   openWorkspace(rootInput?: string, options: { select?: boolean } = {}): Workspace {
     const requested = rootInput?.trim() ? expandHome(rootInput.trim()) : this.config.defaultRoot;
-    const resolved = path.resolve(requested);
+    const resolved = path.isAbsolute(requested)
+      ? path.resolve(requested)
+      : path.resolve(this.getWorkspaceBaseRoot(), requested);
     if (!fs.existsSync(resolved)) {
       throw new CodexProError(`Workspace root does not exist: ${resolved}`);
     }
@@ -104,6 +106,14 @@ export class WorkspaceManager {
     this.workspaces.set(id, workspace);
     if (options.select !== false) this.selectedWorkspaceId = id;
     return workspace;
+  }
+
+  private getWorkspaceBaseRoot(): string {
+    if (this.selectedWorkspaceId) {
+      const selected = this.workspaces.get(this.selectedWorkspaceId);
+      if (selected) return selected.root;
+    }
+    return this.config.defaultRoot;
   }
 
   getWorkspace(id?: string): Workspace {
