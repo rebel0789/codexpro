@@ -489,7 +489,7 @@ function serverInstructions(config: CodexProConfig): string {
     "CodexPro connects ChatGPT to explicitly allowed local development workspaces.",
     "",
     "Preferred workflow:",
-    "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects; that selection stays active for this MCP session.",
+    "1. Start with open_current_workspace. Use open_workspace only when the user gives a different allowed root or asks to switch projects. After open_workspace returns workspace_id, pass that workspace_id explicitly on follow-up calls; some ChatGPT connectors rotate HTTP MCP sessions between tool calls.",
     "2. Follow any AGENTS.md-style instructions returned by the workspace open call before editing files.",
     "3. Inspect with tree, search, and read. Do not use bash for git status, git diff, cat, sed, grep, rg, find, ls, or file reading.",
     editInstruction,
@@ -1509,7 +1509,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
     {
       title: "Open Workspace",
       description:
-        "Open and select an allowed local project for this MCP session. Later tool calls may omit workspace_id to use this selection.",
+        "Open and select an allowed local project. Reuse the returned workspace_id explicitly on follow-up calls so the workspace remains stable even if the client rotates HTTP MCP sessions.",
       inputSchema: {
         root: z.string().optional().describe("Project directory to open. Omit to use CODEXPRO_ROOT/current working directory. Supports ~/ paths."),
         path: z.string().optional().describe("Alias for root. Useful for clients that naturally send path instead of root."),
@@ -1543,6 +1543,7 @@ export function createCodexProServer(config: CodexProConfig): McpServer {
       return textResult(summary.text, {
         workspace_id: summary.workspaceId,
         selected_workspace_id: summary.workspaceId,
+        follow_up_workspace_id: summary.workspaceId,
         root: summary.root,
         agents_loaded: summary.agentsLoaded,
         agents_path: summary.agentsPath,

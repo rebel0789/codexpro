@@ -40,6 +40,27 @@ function workspaceIdForRoot(realRoot: string): string {
   return `ws_${createHash("sha256").update(realRoot).digest("hex").slice(0, 24)}`;
 }
 
+/**
+ * Process-local catalog of workspace ids opened by any MCP session.
+ *
+ * Workspace selection stays session-local, but ChatGPT connectors may rotate
+ * HTTP MCP sessions between tool calls. The id returned by open_workspace must
+ * therefore remain resolvable by a later session when that id is passed
+ * explicitly. We store only canonical roots here and re-run normal allowed-root
+ * validation before opening them in another WorkspaceManager.
+ */
+const sharedWorkspaceRoots = new Map<string, string>();
+
+function rememberWorkspaceRoot(realRoot: string): string {
+  const id = workspaceIdForRoot(realRoot);
+  const existing = sharedWorkspaceRoots.get(id);
+  if (existing && existing !== realRoot) {
+    throw new CodexProError(`Workspace id collision for ${id}`);
+  }
+  sharedWorkspaceRoots.set(id, realRoot);
+  return id;
+}
+
 function maybeRealpath(existingPath: string): string | undefined {
   try {
     return fs.realpathSync.native(existingPath);
@@ -101,7 +122,7 @@ export class WorkspaceManager {
       return existing;
     }
 
-    const id = workspaceIdForRoot(realRoot);
+    const id = rememberWorkspaceRoot(realRoot);
     const workspace = { id, root: realRoot, openedAt: new Date().toISOString() };
     this.workspaces.set(id, workspace);
     if (options.select !== false) this.selectedWorkspaceId = id;
@@ -124,13 +145,21 @@ export class WorkspaceManager {
       }
       return this.selectDefaultWorkspace();
     }
-    const workspace = this.workspaces.get(id);
+    let workspace = this.workspaces.get(id);
     if (!workspace) {
-      const configuredRoot = this.config.allowedRoots.find((allowedRoot) => workspaceIdForRoot(allowedRoot) === id);
-      if (configuredRoot) return this.openWorkspace(configuredRoot, { select: false });
+      const rememberedRoot = sharedWorkspaceRoots.get(id);
+      if (rememberedRoot) {
+        workspace = this.openWorkspace(rememberedRoot, { select: false });
+      }
     }
     if (!workspace) {
-      throw new CodexProError(`Unknown workspace_id: ${id}. Call open_workspace first.`);
+      const configuredRoot = this.config.allowedRoots.find((allowedRoot) => workspaceIdForRoot(allowedRoot) === id);
+      if (configuredRoot) workspace = this.openWorkspace(configuredRoot, { select: false });
+    }
+    if (!workspace) {
+      throw new CodexProError(
+        `Unknown workspace_id: ${id}. Call open_workspace first, then pass the returned workspace_id on follow-up calls.`
+      );
     }
     return workspace;
   }

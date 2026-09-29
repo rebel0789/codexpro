@@ -685,6 +685,21 @@ try {
       ) {
         throw new Error(`HTTP workspace selection leaked between MCP sessions: ${JSON.stringify(secondList.structuredContent)}`);
       }
+
+      const crossSessionRead = await callTool(secondClient, 'read', {
+        workspace_id: alternate.structuredContent.workspace_id,
+        path: 'selected.txt'
+      });
+      const alternateRealRoot = await fs.realpath(alternateRoot);
+      if (crossSessionRead.structuredContent.root !== alternateRealRoot) {
+        throw new Error(
+          `cross-session workspace_id resolved ${crossSessionRead.structuredContent.root}, expected ${alternateRealRoot}`
+        );
+      }
+      const afterExplicitRead = await callTool(secondClient, 'list_workspaces');
+      if (afterExplicitRead.structuredContent.selected_workspace_id === alternate.structuredContent.workspace_id) {
+        throw new Error('explicit cross-session workspace_id lookup changed the second session selection');
+      }
     });
 
     const firstList = await callTool(firstClient, 'list_workspaces');
