@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Made explicit `workspace_id` handles resolvable across rotated HTTP MCP sessions while keeping workspace selection session-local, fixing ChatGPT connector flows where `open_workspace` and the next tool call land on different MCP sessions.
 - Hardened handoff execution receipts: `execute-handoff` records non-terminal `interrupting` while SIGINT/SIGTERM child termination is in progress, then records terminal `interrupted` only after the child exits; receipts publish parent/child PIDs and unknown-outcome/reconciliation semantics, and `wait_for_handoff` treats stale in-flight receipts as `orphaned` only after both recorded processes are gone.
 - Added a default local handoff remote-mutation guard: standard `git push`/send-pack push paths and `gh` are blocked inside the executor unless `--allow-remote-mutations` is explicitly supplied. This is a guard against accidental side effects, not a security sandbox against a malicious process.
 
