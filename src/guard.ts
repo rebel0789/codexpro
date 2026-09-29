@@ -36,18 +36,36 @@ export function displayPath(absPath: string, root: string): string {
   return normalizeRelPath(rel);
 }
 
-function workspaceIdForRoot(realRoot: string): string {
+function legacyWorkspaceIdForRoot(realRoot: string): string {
   return `ws_${createHash("sha256").update(realRoot).digest("hex").slice(0, 24)}`;
 }
 
+function workspaceIdForRoot(realRoot: string): string {
+  const digest = createHash("sha256").update(realRoot).digest("hex").slice(0, 24);
+  const encodedRoot = Buffer.from(realRoot, "utf8").toString("base64url");
+  return `ws_${digest}_${encodedRoot}`;
+}
+
+function workspaceRootFromId(id: string): string | undefined {
+  const match = /^ws_([0-9a-f]{24})_([A-Za-z0-9_-]+)$/i.exec(id);
+  if (!match) return undefined;
+  let decodedRoot: string;
+  try {
+    decodedRoot = Buffer.from(match[2], "base64url").toString("utf8");
+  } catch {
+    return undefined;
+  }
+  if (!decodedRoot || workspaceIdForRoot(decodedRoot) !== id) return undefined;
+  return decodedRoot;
+}
+
 /**
- * Process-local catalog of workspace ids opened by any MCP session.
+ * Process-local cache for fast cross-session lookups and legacy hash-only ids.
  *
- * Workspace selection stays session-local, but ChatGPT connectors may rotate
- * HTTP MCP sessions between tool calls. The id returned by open_workspace must
- * therefore remain resolvable by a later session when that id is passed
- * explicitly. We store only canonical roots here and re-run normal allowed-root
- * validation before opening them in another WorkspaceManager.
+ * New workspace ids are self-describing stable handles, so they remain
+ * resolvable after HTTP MCP session rotation and after the CodexPro server
+ * process restarts. Every recovered root still goes through openWorkspace(),
+ * which re-applies the configured allowed-root policy.
  */
 const sharedWorkspaceRoots = new Map<string, string>();
 
@@ -153,7 +171,15 @@ export class WorkspaceManager {
       }
     }
     if (!workspace) {
-      const configuredRoot = this.config.allowedRoots.find((allowedRoot) => workspaceIdForRoot(allowedRoot) === id);
+      const encodedRoot = workspaceRootFromId(id);
+      if (encodedRoot) {
+        workspace = this.openWorkspace(encodedRoot, { select: false });
+      }
+    }
+    if (!workspace) {
+      const configuredRoot = this.config.allowedRoots.find(
+        (allowedRoot) => workspaceIdForRoot(allowedRoot) === id || legacyWorkspaceIdForRoot(allowedRoot) === id
+      );
       if (configuredRoot) workspace = this.openWorkspace(configuredRoot, { select: false });
     }
     if (!workspace) {
