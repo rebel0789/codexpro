@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.30.3 (2026-10-01)
+
+- Fixed Windows handoff runs that could remain `running` after an npm `.cmd` executor exited by settling from the child exit when inherited output handles never close, terminating the full process tree on timeout, and recording the completion source for diagnostics.
+- Updated patched transitive dependencies for brace-expansion denial-of-service and IP-address classification vulnerabilities; the release audit reports zero known vulnerabilities.
+- Reduced Windows CI flakiness by allowing the analysis CLI smoke test enough startup time on slower hosted runners.
 
 ## 0.30.2 (2026-09-20)
 

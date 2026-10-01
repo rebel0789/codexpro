@@ -283,6 +283,40 @@ if (!codexApp.includes('codex adapter executed')) {
   throw new Error(`codex adapter did not execute fake codex\n${codexApp}`);
 }
 
+const inheritedPipeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-execute-inherited-pipe-'));
+await fs.mkdir(path.join(inheritedPipeRoot, '.ai-bridge'), { recursive: true });
+await fs.writeFile(path.join(inheritedPipeRoot, '.ai-bridge', 'current-plan.md'), '# Inherited pipe plan\n\nExit while a descendant retains the output handles.\n', 'utf8');
+await fs.writeFile(path.join(inheritedPipeRoot, 'inherited-pipe-agent.mjs'), `
+import { spawn } from 'node:child_process';
+
+const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 8000)'], {
+  detached: true,
+  stdio: ['ignore', process.stdout, process.stderr]
+});
+holder.unref();
+console.log('agent exited while descendant retained output handles');
+`, 'utf8');
+const inheritedPipeStarted = Date.now();
+const inheritedPipeRun = run([
+  'execute-handoff',
+  '--root',
+  inheritedPipeRoot,
+  '--agent',
+  'custom',
+  '--command',
+  `${quoteArg(process.execPath)} inherited-pipe-agent.mjs --task-file {{plan_file}}`,
+  '--timeout-ms',
+  '10000',
+  '--yes'
+]);
+const inheritedPipeDuration = Date.now() - inheritedPipeStarted;
+requireSuccess(inheritedPipeRun, 'execute-handoff inherited output handles');
+const inheritedPipeState = JSON.parse(await fs.readFile(path.join(inheritedPipeRoot, '.ai-bridge', 'handoff-run-state.json'), 'utf8'));
+const inheritedPipeStatus = await fs.readFile(path.join(inheritedPipeRoot, '.ai-bridge', 'agent-status.md'), 'utf8');
+if (inheritedPipeDuration > 6000 || inheritedPipeState.state !== 'completed' || inheritedPipeState.completion_source !== 'exit-fallback' || !inheritedPipeStatus.includes('Completion: exit-fallback')) {
+  throw new Error(`execute-handoff waited for inherited output handles\nduration=${inheritedPipeDuration}\nstate=${JSON.stringify(inheritedPipeState)}\nstatus:\n${inheritedPipeStatus}`);
+}
+
 const executeStagedRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'codexpro-execute-staged-untracked-'));
 await fs.mkdir(path.join(executeStagedRoot, '.ai-bridge'), { recursive: true });
 await fs.writeFile(path.join(executeStagedRoot, '.ai-bridge', 'current-plan.md'), '# Staged plan\n\nStage one edit and create one file.\n', 'utf8');

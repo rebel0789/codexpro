@@ -16,7 +16,7 @@ function run(args) {
   return spawnSync(process.execPath, [cli, ...args], {
     cwd: projectRoot,
     encoding: 'utf8',
-    timeout: 5000,
+    timeout: 15000,
     env: { ...process.env, NO_COLOR: '1', CI: '1', CODEXPRO_HOME: home }
   });
 }

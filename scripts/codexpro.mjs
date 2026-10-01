@@ -1715,6 +1715,9 @@ function spawnSyncPortable(command, args, options = {}) {
   });
 }
 
+const PROCESS_CLOSE_GRACE_MS = 1000;
+const PROCESS_TIMEOUT_SETTLEMENT_MS = 4000;
+
 function runProcessCaptured(command, args, options) {
   const timeoutMs = options.timeoutMs;
   const maxOutputBytes = options.maxOutputBytes;
@@ -1734,7 +1737,9 @@ function runProcessCaptured(command, args, options) {
     let stdout = '';
     let stderr = '';
     let timedOut = false;
-    let closed = false;
+    let settled = false;
+    let closeGraceTimer = null;
+    let timeoutSettlementTimer = null;
     const appendBounded = (current, chunk) => {
       if (Buffer.byteLength(current, 'utf8') > retainedOutputBytes) return current;
       const next = current + String(chunk);
@@ -1743,12 +1748,40 @@ function runProcessCaptured(command, args, options) {
         ? buffer.subarray(0, retainedOutputBytes).toString('utf8')
         : next;
     };
+    const finish = (exitCode, signal, completionSource, spawnError = false, spawnErrorMessage = '') => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (closeGraceTimer) clearTimeout(closeGraceTimer);
+      if (timeoutSettlementTimer) clearTimeout(timeoutSettlementTimer);
+      if (completionSource !== 'close') {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        child.unref();
+      }
+      const out = trimBytes(stdout, maxOutputBytes);
+      const timeoutMessage = timedOut ? `\n[codexpro] Command timed out after ${timeoutMs} ms.` : '';
+      const errorText = spawnErrorMessage || `${stderr}${timeoutMessage}`;
+      const err = trimBytes(errorText, maxOutputBytes);
+      resolve({
+        exitCode,
+        signal,
+        durationMs: Date.now() - started,
+        timedOut,
+        stdout: spawnError ? '' : out.text,
+        stderr: err.text,
+        truncated: out.truncated || err.truncated,
+        spawnError,
+        completionSource
+      });
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        if (!closed) child.kill('SIGKILL');
-      }, 1500).unref();
+      killProcess(child);
+      timeoutSettlementTimer = setTimeout(() => {
+        finish(child.exitCode, child.signalCode, 'timeout-fallback');
+      }, PROCESS_TIMEOUT_SETTLEMENT_MS);
+      timeoutSettlementTimer.unref();
     }, timeoutMs);
     timer.unref();
 
@@ -1758,33 +1791,17 @@ function runProcessCaptured(command, args, options) {
     child.stderr.on('data', (chunk) => {
       stderr = appendBounded(stderr, chunk);
     });
-    child.on('error', (error) => {
-      clearTimeout(timer);
-      resolve({
-        exitCode: 127,
-        signal: null,
-        durationMs: Date.now() - started,
-        timedOut,
-        stdout: '',
-        stderr: error instanceof Error ? error.message : String(error),
-        spawnError: true
-      });
+    child.once('error', (error) => {
+      finish(127, null, 'spawn-error', true, error instanceof Error ? error.message : String(error));
     });
-    child.on('close', (exitCode, signal) => {
-      closed = true;
-      clearTimeout(timer);
-      const out = trimBytes(stdout, maxOutputBytes);
-      const err = trimBytes(`${stderr}${timedOut ? `\n[codexpro] Command timed out after ${timeoutMs} ms.` : ''}`, maxOutputBytes);
-      resolve({
-        exitCode,
-        signal,
-        durationMs: Date.now() - started,
-        timedOut,
-        stdout: out.text,
-        stderr: err.text,
-        truncated: out.truncated || err.truncated,
-        spawnError: false
-      });
+    child.once('exit', (exitCode, signal) => {
+      closeGraceTimer = setTimeout(() => {
+        finish(exitCode, signal, 'exit-fallback');
+      }, PROCESS_CLOSE_GRACE_MS);
+      closeGraceTimer.unref();
+    });
+    child.once('close', (exitCode, signal) => {
+      finish(exitCode, signal, 'close');
     });
   });
 }
@@ -1841,6 +1858,7 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     `Exit code: ${result.exitCode ?? 'null'}`,
     result.signal ? `Signal: ${result.signal}` : '',
     `Timed out: ${result.timedOut ? 'yes' : 'no'}`,
+    `Completion: ${result.completionSource}`,
     `Duration: ${result.durationMs} ms`,
     `Diff path: ${path.posix.join(contextDir, 'implementation-diff.patch')}`,
     `Execution log: ${path.posix.join(contextDir, 'execution-log.jsonl')}`,
@@ -1861,6 +1879,7 @@ function writeExecutionOutputs(root, contextDir, commandInfo, result, diffText, 
     exit_code: result.exitCode,
     signal: result.signal,
     timed_out: result.timedOut,
+    completion_source: result.completionSource,
     duration_ms: result.durationMs,
     stdout_excerpt: result.stdout,
     stderr_excerpt: result.stderr,
@@ -2025,6 +2044,7 @@ async function executeHandoffRequest(request, args, options = {}) {
       finished_at: new Date().toISOString(),
       exit_code: result.exitCode ?? null,
       timed_out: Boolean(result.timedOut),
+      completion_source: result.completionSource,
       duration_ms: result.durationMs,
       ...(interruptedSignal ? { interrupted_signal: interruptedSignal } : {}),
       execution_outcome: runState === 'completed' ? 'completed' : 'unknown',

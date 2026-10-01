@@ -1,6 +1,6 @@
 {
   "name": "codexpro",
-  "version": "0.30.2",
+  "version": "0.30.3",
   "description": "Local MCP server that connects ChatGPT Plugins to explicitly allowed repos on your machine.",
   "type": "module",
   "license": "MIT",
