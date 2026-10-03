@@ -1,6 +1,5 @@
 #!/usr/bin/env node
-import { randomUUID } from "node:crypto";
-import { timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { z } from "zod";
@@ -22,6 +21,8 @@ import { createCodexProServer } from "./server.js";
 import { WorkspaceRegistry } from "./guard.js";
 import { redactConfigPaths } from "./pathLabels.js";
 import { CODEXPRO_VERSION } from "./version.js";
+import { runWithMcpRequestContext, type McpRequestContext } from "./requestContext.js";
+import { recordTelemetry, telemetrySnapshot } from "./telemetry.js";
 
 function escapeHtml(value: unknown): string {
   return String(value ?? "")
@@ -1619,6 +1620,11 @@ async function main(): Promise<void> {
     transport: StreamableHTTPServerTransport;
     createdAt: number;
     lastSeenAt: number;
+    activeRequests: number;
+    lastRequestId?: string;
+    clientSessionFingerprint?: string;
+    lastRequestedTool?: string;
+    lastJsonRpcMethod?: string;
   };
 
   const transports = new Map<string, TransportRecord>();
@@ -1628,6 +1634,108 @@ async function main(): Promise<void> {
   function requestSessionId(req: Request): string | undefined {
     const value = req.headers["mcp-session-id"];
     return Array.isArray(value) ? value[0] : value;
+  }
+
+  function correlationFingerprint(value: string): string {
+    return createHash("sha256").update(value).digest("hex").slice(0, 12);
+  }
+
+  function clientCorrelationHeaders(req: Request): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [rawName, rawValue] of Object.entries(req.headers)) {
+      const name = rawName.toLowerCase();
+      if (name === "mcp-session-id" || name === "x-codexpro-request-id" || name === "x-openai-subject") continue;
+      if (/authorization|cookie|token|secret|api[-_]?key/i.test(name)) continue;
+      if (!/(request|trace|session|conversation|thread|openai|chatgpt)/i.test(name)) continue;
+      const value = Array.isArray(rawValue) ? rawValue[0] : rawValue;
+      if (typeof value !== "string" || !value) continue;
+      out[name + "-fingerprint"] = correlationFingerprint(redactSensitiveText(value.slice(0, 512)));
+    }
+    return out;
+  }
+
+  function jsonRpcCorrelation(body: unknown): Pick<McpRequestContext, "jsonRpcId" | "jsonRpcMethod" | "requestedTool"> {
+    if (!body || typeof body !== "object" || Array.isArray(body)) return {};
+    const value = body as Record<string, unknown>;
+    const id = value.id;
+    const method = typeof value.method === "string" ? value.method : undefined;
+    const params = value.params && typeof value.params === "object" && !Array.isArray(value.params)
+      ? value.params as Record<string, unknown>
+      : undefined;
+    const requestedTool = method === "tools/call" && typeof params?.name === "string" ? params.name : undefined;
+    return {
+      ...(typeof id === "string" || typeof id === "number" || id === null ? { jsonRpcId: id } : {}),
+      ...(method ? { jsonRpcMethod: method } : {}),
+      ...(requestedTool ? { requestedTool } : {})
+    };
+  }
+
+  function mcpRequestContext(req: Request, body: unknown, sessionId: string | undefined): McpRequestContext {
+    const existingRequestId = (req as Request & { codexproRequestId?: string }).codexproRequestId;
+    return {
+      requestId: existingRequestId ?? randomUUID(),
+      receivedAt: Date.now(),
+      ...(sessionId ? { mcpSessionId: sessionId } : {}),
+      ...jsonRpcCorrelation(body),
+      clientCorrelation: clientCorrelationHeaders(req)
+    };
+  }
+
+  function clientSessionFingerprint(context: McpRequestContext): string | undefined {
+    const headers = context.clientCorrelation ?? {};
+    const preferred = [
+      "x-openai-conversation-id-fingerprint",
+      "conversation-id-fingerprint",
+      "thread-id-fingerprint",
+      "x-openai-session-fingerprint",
+      "x-datadog-trace-id-fingerprint"
+    ];
+    for (const key of preferred) {
+      if (headers[key]) return headers[key];
+    }
+    return undefined;
+  }
+
+  function telemetryEnabled(): boolean {
+    return process.env.CODEXPRO_TELEMETRY !== "0";
+  }
+
+  function logMcpRequest(event: "start" | "finish" | "error", context: McpRequestContext, extra: Record<string, unknown> = {}): void {
+    if (!logRequests && !telemetryEnabled()) return;
+    const ts = new Date().toISOString();
+    const payload = {
+      ts,
+      event,
+      requestId: context.requestId,
+      ...(context.mcpSessionId ? { mcpSessionId: context.mcpSessionId } : {}),
+      ...(context.jsonRpcId !== undefined ? { jsonRpcId: context.jsonRpcId } : {}),
+      ...(context.jsonRpcMethod ? { jsonRpcMethod: context.jsonRpcMethod } : {}),
+      ...(context.requestedTool ? { requestedTool: context.requestedTool } : {}),
+      ...(context.clientCorrelation && Object.keys(context.clientCorrelation).length
+        ? { clientCorrelation: context.clientCorrelation }
+        : {}),
+      ...extra
+    };
+    if (telemetryEnabled()) {
+      recordTelemetry({
+        kind: "request",
+        ts,
+        event,
+        requestId: context.requestId,
+        ...(context.mcpSessionId ? { mcpSessionId: context.mcpSessionId } : {}),
+        ...(context.jsonRpcId !== undefined ? { jsonRpcId: context.jsonRpcId } : {}),
+        ...(context.jsonRpcMethod ? { jsonRpcMethod: context.jsonRpcMethod } : {}),
+        ...(context.requestedTool ? { requestedTool: context.requestedTool } : {}),
+        ...(clientSessionFingerprint(context) ? { clientSessionFingerprint: clientSessionFingerprint(context) } : {}),
+        ...(typeof extra.httpMethod === "string" ? { httpMethod: extra.httpMethod } : {}),
+        ...(typeof extra.path === "string" ? { path: extra.path } : {}),
+        ...(typeof extra.statusCode === "number" ? { statusCode: extra.statusCode } : {}),
+        ...(typeof extra.durationMs === "number" ? { durationMs: extra.durationMs } : {})
+      });
+    }
+    if (logRequests) {
+      console.error("[CodexProRequest] " + JSON.stringify(payload));
+    }
   }
 
   function sendSessionError(res: Response, sessionId: string | undefined): void {
@@ -1664,17 +1772,121 @@ async function main(): Promise<void> {
     }
   }
 
-  function getTransport(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
+  function getTransportRecord(sessionId: string | undefined): TransportRecord | undefined {
     if (!sessionId || !sessionIdPattern.test(sessionId)) return undefined;
     pruneTransports();
     const record = transports.get(sessionId);
     if (!record) return undefined;
     record.lastSeenAt = Date.now();
-    return record.transport;
+    return record;
+  }
+
+  function getTransport(sessionId: string | undefined): StreamableHTTPServerTransport | undefined {
+    return getTransportRecord(sessionId)?.transport;
   }
 
   const pruneTimer = setInterval(pruneTransports, Math.min(config.httpSessionTtlMs, 60_000));
   pruneTimer.unref();
+
+  const configuredSessionHeartbeatMs = Number(process.env.CODEXPRO_SESSION_HEARTBEAT_MS ?? 30_000);
+  const sessionHeartbeatMs = Number.isFinite(configuredSessionHeartbeatMs)
+    ? Math.max(10_000, Math.min(120_000, Math.floor(configuredSessionHeartbeatMs)))
+    : 30_000;
+  const sessionHeartbeatWindowMs = Math.min(config.httpSessionTtlMs, 5 * 60_000);
+  const sessionHeartbeatTimer = (logRequests || telemetryEnabled())
+    ? setInterval(() => {
+        const now = Date.now();
+        const grouped = new Map<string, {
+          clientSessionFingerprint?: string;
+          latestMcpSessionId: string;
+          activeRequests: number;
+          createdAt: number;
+          lastSeenAt: number;
+          lastRequestId?: string;
+          lastRequestedTool?: string;
+          lastJsonRpcMethod?: string;
+          transportCount: number;
+        }>();
+
+        for (const [sessionId, record] of transports) {
+          const idleForMs = now - record.lastSeenAt;
+          if (idleForMs > sessionHeartbeatWindowMs) continue;
+          const key = record.clientSessionFingerprint
+            ? "client:" + record.clientSessionFingerprint
+            : "mcp:" + sessionId;
+          const current = grouped.get(key);
+          if (!current) {
+            grouped.set(key, {
+              ...(record.clientSessionFingerprint ? { clientSessionFingerprint: record.clientSessionFingerprint } : {}),
+              latestMcpSessionId: sessionId,
+              activeRequests: record.activeRequests,
+              createdAt: record.createdAt,
+              lastSeenAt: record.lastSeenAt,
+              lastRequestId: record.lastRequestId,
+              lastRequestedTool: record.lastRequestedTool,
+              lastJsonRpcMethod: record.lastJsonRpcMethod,
+              transportCount: 1
+            });
+            continue;
+          }
+          current.activeRequests += record.activeRequests;
+          current.createdAt = Math.min(current.createdAt, record.createdAt);
+          current.transportCount += 1;
+          if (record.lastSeenAt >= current.lastSeenAt) {
+            current.lastSeenAt = record.lastSeenAt;
+            current.latestMcpSessionId = sessionId;
+            current.lastRequestId = record.lastRequestId;
+            current.lastRequestedTool = record.lastRequestedTool;
+            current.lastJsonRpcMethod = record.lastJsonRpcMethod;
+          }
+        }
+
+        for (const record of grouped.values()) {
+          const sinceLastRequestSeenMs = now - record.lastSeenAt;
+          const requestActive = record.activeRequests > 0;
+          const ts = new Date(now).toISOString();
+          const state = requestActive ? "request_active" : "idle_between_requests";
+          const payload = {
+            ts,
+            event: "heartbeat",
+            ...(record.clientSessionFingerprint ? { clientSessionFingerprint: record.clientSessionFingerprint } : {}),
+            latestMcpSessionId: record.latestMcpSessionId,
+            transportCount: record.transportCount,
+            state,
+            activeRequests: record.activeRequests,
+            ageMs: now - record.createdAt,
+            ...(requestActive
+              ? { requestActiveForAtLeastMs: sinceLastRequestSeenMs }
+              : { idleForMs: sinceLastRequestSeenMs }),
+            ...(record.lastRequestId ? { lastRequestId: record.lastRequestId } : {}),
+            ...(record.lastRequestedTool ? { lastRequestedTool: record.lastRequestedTool } : {}),
+            ...(record.lastJsonRpcMethod ? { lastJsonRpcMethod: record.lastJsonRpcMethod } : {})
+          };
+          if (telemetryEnabled()) {
+            recordTelemetry({
+              kind: "session",
+              ts,
+              event: "heartbeat",
+              ...(record.clientSessionFingerprint ? { clientSessionFingerprint: record.clientSessionFingerprint } : {}),
+              mcpSessionId: record.latestMcpSessionId,
+              transportCount: record.transportCount,
+              state,
+              activeRequests: record.activeRequests,
+              ...(requestActive
+                ? { requestActiveForAtLeastMs: sinceLastRequestSeenMs }
+                : { idleForMs: sinceLastRequestSeenMs }),
+              ...(record.lastRequestId ? { requestId: record.lastRequestId } : {}),
+              ...(record.lastRequestedTool ? { requestedTool: record.lastRequestedTool } : {}),
+              ...(record.lastJsonRpcMethod ? { jsonRpcMethod: record.lastJsonRpcMethod } : {})
+            });
+          }
+          if (logRequests) {
+            console.error("[CodexProSession] " + JSON.stringify(payload));
+          }
+        }
+      }, sessionHeartbeatMs)
+    : undefined;
+  sessionHeartbeatTimer?.unref?.();
 
   app.get("/", (_req, res) => {
     res.type("html").send(onboardingPage(config));
@@ -1703,6 +1915,34 @@ async function main(): Promise<void> {
       authRequired: Boolean(config.authToken),
       connection_diagnostics: connectionDiagnostics
     }, { labelUnknownPaths: true }));
+  });
+
+  app.get("/telemetry/recent", (req, res) => {
+    const parseIntParam = (value: unknown, fallback: number, min: number, max: number): number => {
+      const raw = Array.isArray(value) ? value[0] : value;
+      const parsed = typeof raw === "string" && raw.trim() !== "" ? Number(raw) : fallback;
+      if (!Number.isFinite(parsed)) return fallback;
+      return Math.max(min, Math.min(max, Math.floor(parsed)));
+    };
+    const sinceSeq = parseIntParam(req.query.since_seq, 0, 0, Number.MAX_SAFE_INTEGER);
+    const limit = parseIntParam(req.query.limit, 200, 1, 2_000);
+    const rawFingerprint = Array.isArray(req.query.client_session) ? req.query.client_session[0] : req.query.client_session;
+    const clientSessionFingerprint = typeof rawFingerprint === "string" ? rawFingerprint.trim() : "";
+    if (clientSessionFingerprint && !/^[a-f0-9]{8,64}$/i.test(clientSessionFingerprint)) {
+      jsonError(res, 400, "invalid_client_session", "client_session must be a hexadecimal session fingerprint.");
+      return;
+    }
+    res.json({
+      ok: true,
+      name: "CodexPro",
+      version: CODEXPRO_VERSION,
+      generatedAt: new Date().toISOString(),
+      ...telemetrySnapshot({
+        sinceSeq,
+        limit,
+        ...(clientSessionFingerprint ? { clientSessionFingerprint } : {})
+      })
+    });
   });
 
   app.get("/admin/profile", (_req, res) => {
@@ -1737,23 +1977,53 @@ async function main(): Promise<void> {
   app.post("/mcp", express.json({ limit: "20mb" }), async (req, res) => {
     connectionDiagnostics.mcp_dispatches_started += 1;
     connectionDiagnostics.last_dispatch_started_at = new Date().toISOString();
+
+    const sessionId = requestSessionId(req);
+    const context = mcpRequestContext(req, req.body, sessionId);
+    const requestStarted = Date.now();
+    const stableClientSession = clientSessionFingerprint(context);
+    let requestRecord: TransportRecord | undefined;
+
+    logMcpRequest("start", context, { httpMethod: req.method, path: req.path });
+    res.on("finish", () => {
+      logMcpRequest("finish", context, {
+        httpMethod: req.method,
+        path: req.path,
+        statusCode: res.statusCode,
+        durationMs: Date.now() - requestStarted
+      });
+    });
+
     try {
-      const sessionId = requestSessionId(req);
       let transport: StreamableHTTPServerTransport;
 
-      const existingTransport = getTransport(sessionId);
-      if (existingTransport) {
-        transport = existingTransport;
+      const existingRecord = getTransportRecord(sessionId);
+      if (existingRecord) {
+        requestRecord = existingRecord;
+        requestRecord.activeRequests += 1;
+        requestRecord.lastRequestId = context.requestId;
+        requestRecord.clientSessionFingerprint = stableClientSession ?? requestRecord.clientSessionFingerprint;
+        requestRecord.lastRequestedTool = context.requestedTool;
+        requestRecord.lastJsonRpcMethod = context.jsonRpcMethod;
+        transport = existingRecord.transport;
       } else if (!sessionId && isInitializeRequest(req.body)) {
         transport = new StreamableHTTPServerTransport({
           sessionIdGenerator: () => randomUUID(),
           onsessioninitialized: (newSessionId: string) => {
+            const now = Date.now();
+            context.mcpSessionId = newSessionId;
             pruneTransports();
-            transports.set(newSessionId, {
+            requestRecord = {
               transport,
-              createdAt: Date.now(),
-              lastSeenAt: Date.now()
-            });
+              createdAt: now,
+              lastSeenAt: now,
+              activeRequests: 1,
+              lastRequestId: context.requestId,
+              clientSessionFingerprint: stableClientSession,
+              lastRequestedTool: context.requestedTool,
+              lastJsonRpcMethod: context.jsonRpcMethod
+            };
+            transports.set(newSessionId, requestRecord);
             pruneTransports();
           }
         } as any);
@@ -1770,11 +2040,15 @@ async function main(): Promise<void> {
         return;
       }
 
-      await transport.handleRequest(req, res, req.body);
+      await runWithMcpRequestContext(context, () => transport.handleRequest(req, res, req.body));
       connectionDiagnostics.mcp_responses_completed += 1;
       connectionDiagnostics.last_response_completed_at = new Date().toISOString();
     } catch (error) {
       connectionDiagnostics.mcp_errors += 1;
+      logMcpRequest("error", context, {
+        durationMs: Date.now() - requestStarted,
+        error: redactSensitiveText(error instanceof Error ? error.message : String(error))
+      });
       console.error(error instanceof Error ? error.stack ?? error.message : String(error));
       if (!res.headersSent) {
         res.status(500).json({
@@ -1782,6 +2056,15 @@ async function main(): Promise<void> {
           error: { code: -32603, message: "Internal CodexPro MCP error. Check the local terminal for details." },
           id: null
         });
+      }
+    } finally {
+      if (requestRecord) {
+        requestRecord.activeRequests = Math.max(0, requestRecord.activeRequests - 1);
+        requestRecord.lastSeenAt = Date.now();
+        requestRecord.lastRequestId = context.requestId;
+        requestRecord.clientSessionFingerprint = stableClientSession ?? requestRecord.clientSessionFingerprint;
+        requestRecord.lastRequestedTool = context.requestedTool;
+        requestRecord.lastJsonRpcMethod = context.jsonRpcMethod;
       }
     }
   });
