@@ -581,6 +581,18 @@ if (!tokenPayload.includes('/Users/rebel/.codexpro/cloudflare-tunnel-token')) {
 await expectToolError('write', { workspace_id: ws, path: 'notes.md', content: 'OPENAI_API_KEY=sk-realSecretValue123\n' }, /Secret-looking content is blocked/);
 await expectToolError('write', { workspace_id: ws, path: 'token.txt', content: 'codexpro_token=shorttok\n' }, /Secret-looking content is blocked/);
 await expectToolError('write', { workspace_id: ws, path: 'notes.yaml', content: 'api_key: yamlsecretvalueabcdefghijklmnop\n' }, /Secret-looking content is blocked/);
+const multilineSchemaWrite = await client.request('tools/call', {
+  name: 'write',
+  arguments: {
+    workspace_id: ws,
+    path: 'metrics.yaml',
+    content: 'tokens:\n  frontier_input_uncached:\n  frontier_output:\n',
+    overwrite: true
+  }
+});
+if (multilineSchemaWrite.isError) {
+  throw new Error('write falsely classified multiline token metrics as a secret');
+}
 await client.request('tools/call', {
   name: 'write',
   arguments: {
