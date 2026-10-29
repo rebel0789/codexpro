@@ -14,7 +14,12 @@ export function hasSecretValue(text: string): boolean {
     pattern.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(text)) !== null) {
-      if (!isPlaceholderSecret(match[0])) return true;
+      if (
+        !isPlaceholderSecret(match[0]) &&
+        !isCodeReferenceMatch(text, match.index, match[0], pattern)
+      ) {
+        return true;
+      }
     }
   }
   return false;
@@ -25,12 +30,58 @@ export function redactSensitiveText(text: string): string {
     .replace(CODEXPRO_TOKEN_ASSIGNMENT_PATTERN, (_match, prefix) => `${prefix}[REDACTED_SECRET]`)
     .replace(CODEXPRO_TOKEN_FIELD_PATTERN, (_match, prefix) => `${prefix}[REDACTED_SECRET]`)
     .replace(CLI_TOKEN_PATTERN, (match, prefix) => isPlaceholderSecret(match) ? match : `${prefix}[REDACTED_SECRET]`)
-    .replace(SECRET_ASSIGNMENT_PATTERN, (match) => isPlaceholderSecret(match) ? match : redactSecretAssignment(match))
-    .replace(SECRET_FIELD_PATTERN, (match, prefix) => isPlaceholderSecret(match) ? match : `${prefix}[REDACTED_SECRET]`)
+    .replace(SECRET_ASSIGNMENT_PATTERN, (match, offset, input) =>
+      isPlaceholderSecret(match) || isCodeAssignmentReference(input, offset, match)
+        ? match
+        : redactSecretAssignment(match))
+    .replace(SECRET_FIELD_PATTERN, (match, prefix, offset, input) =>
+      isPlaceholderSecret(match) || isTypeFieldReference(input, offset, match)
+        ? match
+        : `${prefix}[REDACTED_SECRET]`)
     .replace(BEARER_TOKEN_PATTERN, (_match, prefix) => `${prefix}[REDACTED_SECRET]`)
     .replace(QUERY_TOKEN_PATTERN, (_match, prefix) => `${prefix}[REDACTED_SECRET]`)
     .replace(OPENAI_SECRET_PATTERN, (match) => isPlaceholderSecret(match) ? match : "[REDACTED_SECRET]")
     .replace(COMMON_TOKEN_PATTERN, (match) => isPlaceholderSecret(match) ? match : "[REDACTED_SECRET]");
+}
+
+function isCodeReferenceMatch(text: string, offset: number, match: string, pattern: RegExp): boolean {
+  if (pattern === SECRET_ASSIGNMENT_PATTERN) return isCodeAssignmentReference(text, offset, match);
+  if (pattern === SECRET_FIELD_PATTERN) return isTypeFieldReference(text, offset, match);
+  return false;
+}
+
+function isCodeAssignmentReference(text: string, offset: number, match: string): boolean {
+  const separator = match.indexOf("=");
+  if (separator < 0) return false;
+
+  const value = match.slice(separator + 1).trim();
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)*$/.test(value)) return false;
+
+  return /\b(?:const|let|var)\s+$/.test(text.slice(0, offset));
+}
+
+function isTypeFieldReference(text: string, offset: number, match: string): boolean {
+  const separator = match.indexOf(":");
+  if (separator < 0 || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(match.slice(separator + 1).trim())) return false;
+
+  const prefix = text.slice(0, offset);
+  const declarationPattern = /(?:^|\n)\s*(?:type\s+[A-Za-z_$][A-Za-z0-9_$]*(?:<[^>\n]+>)?\s*=\s*|interface\s+[A-Za-z_$][A-Za-z0-9_$]*(?:<[^>\n]+>)?\s*)\{/g;
+  let openBrace = -1;
+  for (const declaration of prefix.matchAll(declarationPattern)) {
+    openBrace = declaration.index! + declaration[0].lastIndexOf("{");
+  }
+  if (openBrace < 0) return false;
+
+  const body = prefix.slice(openBrace + 1, offset);
+  // Fail closed when comments or quoted text make the declaration boundary ambiguous.
+  if (/["'`/]/.test(body)) return false;
+
+  let depth = 1;
+  for (const character of body) {
+    if (character === "{") depth += 1;
+    if (character === "}" && --depth === 0) return false;
+  }
+  return depth > 0;
 }
 
 export function redactStructured<T>(value: T, depth = 0): T {

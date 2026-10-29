@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Keep aliased environment references and TypeScript credential type names intact during secret scanning while continuing to detect literal credential values.
+
 ## 0.30.3 (2026-10-01)
 
 - Fixed Windows handoff runs that could remain `running` after an npm `.cmd` executor exited by settling from the child exit when inherited output handles never close, terminating the full process tree on timeout, and recording the completion source for diagnostics.
